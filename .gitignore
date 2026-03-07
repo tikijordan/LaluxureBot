@@ -1,0 +1,20 @@
+# Dépendances
+node_modules/
+
+# Session WhatsApp (JAMAIS push ça)
+auth_info/
+session.zip
+
+# Variables sensibles
+.env
+
+# Données locales
+data/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

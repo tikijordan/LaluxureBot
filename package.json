@@ -1,0 +1,53 @@
+{
+  "name": "whatsapp-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Bot — 149 commandes: IA, admin groupe, médias, jeux, dev tools et plus",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "adm-zip": "^0.5.16",
+    "axios": "^1.13.6",
+    "canvas": "^2.11.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "fs-extra": "^11.2.0",
+    "jimp": "^1.6.0",
+    "mathjs": "^13.2.0",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2",
+    "node-telegram-bot-api": "^0.67.0",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4",
+    "yt-search": "^2.13.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "author": {
+    "name": "Bot Developer",
+    "description": "WhatsApp Bot Developer"
+  },
+  "license": "MIT",
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "admin",
+    "ai",
+    "gemini",
+    "groq",
+    "automation"
+  ],
+  "homepage": "https://github.com/bot-developer/whatsapp-bot",
+  "bugs": {
+    "description": "Consulter le fichier README.md pour l'assistance"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

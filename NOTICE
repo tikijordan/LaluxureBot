@@ -1,0 +1,119 @@
+================================================================================
+               LaLuxure Bot — AVIS LÉGAL ET DROITS D'UTILISATION
+================================================================================
+
+Copyright (c) 2026 LaLuxure Bot
+Tous droits réservés sous licence MIT.
+
+────────────────────────────────────────────────────────────────────────────────
+1. LICENCE
+────────────────────────────────────────────────────────────────────────────────
+
+Ce logiciel est distribué sous licence MIT (voir fichier LICENSE).
+Vous êtes libre de :
+  ✅ Utiliser ce logiciel à des fins personnelles ou commerciales
+  ✅ Modifier le code source
+  ✅ Distribuer des copies originales ou modifiées
+  ✅ Intégrer ce code dans vos propres projets
+
+À condition de :
+  📌 Conserver l'avis de copyright dans toutes les copies
+  📌 Inclure ce fichier NOTICE ou le fichier LICENSE dans toute distribution
+
+────────────────────────────────────────────────────────────────────────────────
+2. DÉPENDANCES TIERCES
+────────────────────────────────────────────────────────────────────────────────
+
+Ce projet utilise des bibliothèques open source tierces :
+
+  • @whiskeysockets/baileys  — Licence Apache 2.0
+    https://github.com/WhiskeySockets/Baileys
+
+  • axios                    — Licence MIT
+    https://github.com/axios/axios
+
+  • pino                     — Licence MIT
+    https://github.com/pinojs/pino
+
+  • fs-extra                 — Licence MIT
+    https://github.com/jprichardson/node-fs-extra
+
+  • dotenv                   — Licence BSD-2-Clause
+    https://github.com/motdotla/dotenv
+
+  • canvas                   — Licence MIT
+    https://github.com/Automattic/node-canvas
+
+  • @hapi/boom               — Licence BSD-3-Clause
+    https://github.com/hapijs/boom
+
+Chaque bibliothèque conserve sa propre licence. Consultez leurs dépôts
+respectifs pour plus d'informations.
+
+────────────────────────────────────────────────────────────────────────────────
+3. APIs ET SERVICES EXTERNES
+────────────────────────────────────────────────────────────────────────────────
+
+Ce bot interagit avec des services tiers soumis à leurs propres conditions :
+
+  • WhatsApp / Meta          — Conditions d'utilisation WhatsApp Business
+    https://www.whatsapp.com/legal/business-terms
+
+  • Google Gemini API        — Conditions d'utilisation Google AI
+    https://ai.google.dev/terms
+
+  • Groq API                 — Conditions d'utilisation Groq
+    https://groq.com/terms-of-service
+
+  • GitHub API               — Conditions d'utilisation GitHub
+    https://docs.github.com/en/site-policy/github-terms
+
+  • remove.bg API            — Conditions d'utilisation remove.bg
+    https://www.remove.bg/tos
+
+  • Jikan API (MyAnimeList)  — Licence MIT, données MyAnimeList
+    https://jikan.moe
+
+  • Piston API               — Exécution de code, usage gratuit
+    https://piston.readthedocs.io
+
+  ⚠️  L'utilisation de ces services est soumise à leurs propres limites
+  de taux (rate limits) et conditions. Respectez les quotas applicables.
+
+────────────────────────────────────────────────────────────────────────────────
+4. AVERTISSEMENT D'UTILISATION — WHATSAPP
+────────────────────────────────────────────────────────────────────────────────
+
+  ⚠️  IMPORTANT : L'utilisation de bots WhatsApp non officiels peut violer
+  les Conditions Générales d'Utilisation de WhatsApp/Meta.
+
+  L'auteur décline toute responsabilité en cas de :
+    - Bannissement de votre compte WhatsApp
+    - Utilisation abusive du bot (spam, harcèlement, etc.)
+    - Perte de données ou interruption de service
+
+  Ce logiciel est fourni "tel quel", sans garantie d'aucune sorte.
+  Utilisez-le à vos propres risques et de manière responsable.
+
+────────────────────────────────────────────────────────────────────────────────
+5. EXCLUSION DE RESPONSABILITÉ
+────────────────────────────────────────────────────────────────────────────────
+
+L'auteur (LaLuxure Bot) ne peut être tenu responsable de :
+  - Tout dommage direct ou indirect résultant de l'utilisation de ce logiciel
+  - Toute violation des conditions d'utilisation de services tiers
+  - Tout contenu généré par les utilisateurs via ce bot
+  - Toute perte financière ou de données
+
+────────────────────────────────────────────────────────────────────────────────
+6. CONTRIBUTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+Les contributions à ce projet sont les bienvenues sous réserve que :
+  - Le contributeur accepte que sa contribution soit distribuée sous licence MIT
+  - Le contributeur certifie être l'auteur original du code soumis
+  - Le style et les conventions du projet sont respectés
+
+================================================================================
+                  Pour toute question : consultez le fichier README.md
+================================================================================
