@@ -51,15 +51,28 @@ export function getMessageContext(msg) {
   const isLid   = rawFrom.endsWith('@lid');
   const fromMe  = msg.key.fromMe;
 
-  // Normaliser @lid → vrai JID numérique pour sock.sendMessage
-  const from = isLid ? `${OWNER}@s.whatsapp.net` : rawFrom;
+  // from = destination pour sock.sendMessage
+  // - groupe : garder le JID du groupe @g.us
+  // - privé @lid : remplacer par le vrai numéro
+  // - privé normal : garder tel quel
+  let from;
+  if (isGroup) {
+    from = rawFrom; // JID groupe toujours valide
+  } else if (isLid || fromMe) {
+    from = `${OWNER}@s.whatsapp.net`; // privé → envoyer à l'owner
+  } else {
+    from = rawFrom;
+  }
 
-  let senderJid = isGroup ? (msg.key.participant || '') : from;
-  if (fromMe && !isGroup) senderJid = `${OWNER}@s.whatsapp.net`;
-
-  const senderNumber = isGroup
-    ? senderJid.split('@')[0].replace(/\D/g, '')
-    : (fromMe ? OWNER : from.split('@')[0].replace(/\D/g, ''));
+  // senderJid = qui a envoyé
+  let senderJid, senderNumber;
+  if (isGroup) {
+    senderJid    = msg.key.participant || '';
+    senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
+  } else {
+    senderNumber = fromMe ? OWNER : rawFrom.split('@')[0].replace(/\D/g, '');
+    senderJid    = senderNumber + '@s.whatsapp.net';
+  }
   const isOwner = senderNumber === OWNER || fromMe;
 
   return { body, contentType, isGroup, from, sender: senderJid, senderNumber, isOwner, prefix: PREFIX };
@@ -71,8 +84,12 @@ export function getMessageContext(msg) {
 export async function handleCommand(sock, msg, store) {
   const { body, isGroup, from, sender, senderNumber, isOwner, prefix } = getMessageContext(msg);
 
+  // Debug
+  console.log(`🔧 Handler | from: ${from} | body: ${body} | isOwner: ${isOwner}`);
+
   // 1. Ignorer si pas de texte ou si ce n'est pas une commande
   if (!body || !body.startsWith(prefix)) return;
+
 
   // 2. Anti-spam (sauf pour l'owner)
   if (!isOwner) {
@@ -123,7 +140,6 @@ export async function handleCommand(sock, msg, store) {
 
   // 7. Exécution
   try {
-    console.log(`⚡ Exécution: [${cmdName}] par ${senderNumber} (Owner: ${isOwner})`);
     addStat(senderNumber, cmdName);
     
     await command.execute({

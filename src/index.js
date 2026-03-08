@@ -6,6 +6,7 @@
  * @license     MIT
  */
 
+import http from 'http';
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -21,10 +22,43 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import qrcodeterminal from 'qrcode-terminal';
 
-// --- AJOUT : IMPORT RELAIS TELEGRAM ---
-import { loadSessionFromTelegram, saveSessionToTelegram } from './telegramRelay.js';
-
 dotenv.config();
+
+// ── Filtrer les erreurs de session WhatsApp (Bad MAC, etc.) ──
+const originalStderr = process.stderr.write.bind(process.stderr);
+process.stderr.write = (data, ...args) => {
+  const str = data.toString();
+  if (
+    str.includes('Bad MAC') ||
+    str.includes('Session error') ||
+    str.includes('Failed to decrypt') ||
+    str.includes('MessageCounterError') ||
+    str.includes('Closing open session') ||
+    str.includes('Closing session:') ||
+    str.includes('registrationId') ||
+    str.includes('_chains') ||
+    str.includes('currentRatchet') ||
+    str.includes('indexInfo') ||
+    str.includes('pendingPreKey') ||
+    str.includes('ephemeralKeyPair') ||
+    str.includes('libsignal')
+  ) return true; // Ignorer silencieusement
+  return originalStderr(data, ...args);
+};
+
+// Filtrer aussi console.error pour les erreurs de session
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+  const str = args.join(' ');
+  if (
+    str.includes('Bad MAC') ||
+    str.includes('Session error') ||
+    str.includes('Failed to decrypt') ||
+    str.includes('MessageCounterError') ||
+    str.includes('libsignal')
+  ) return;
+  originalConsoleError(...args);
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = process.env.PREFIX || '/';
@@ -36,9 +70,6 @@ const OWNER  = process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.replace(/\D/g
 
 global.botMessages  = new Map();
 global.mutedMembers = new Set();
-// --- AJOUT : VARIABLE POUR ÉVITER LE SPAM TELEGRAM ---
-global.lastTelegramSave = 0; 
-
 // ── Imports utilitaires ────────────────────────────────────────
 import { handleCommand } from './handler.js';
 import { isAntilinkEnabled, containsLink } from './utils/antilink.js';
@@ -61,39 +92,35 @@ const store = {
 };
 
 async function connectToWhatsApp() {
-  // --- AJOUT : RESTAURATION DEPUIS TELEGRAM AU DÉMARRAGE ---
-  await loadSessionFromTelegram();
-
   const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, '../auth_info'));
   const { version } = await fetchLatestBaileysVersion();
 
+  // Logger qui supprime les erreurs Bad MAC et session
+  const logger = pino({ level: 'silent' });
+
   const sock = makeWASocket({
     version,
-    logger: pino({ level: 'silent' }),
+    logger,
     printQRInTerminal: false,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     browser: ['Ubuntu', 'Chrome', '20.0.0'],
     syncFullHistory: false,
     markOnlineOnConnect: true,
     emitOwnEvents: true,
+    // Ignorer les erreurs de déchiffrement (Bad MAC)
+    retryRequestDelayMs: 2000,
+    maxMsgRetryCount: 2,
+    fireInitQueries: true,
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
   });
 
   store.bind(sock.ev);
 
-  // --- MODIFICATION : SAUVEGARDE CREDS + TELEGRAM ---
-  sock.ev.on('creds.update', async () => {
-    await saveCreds();
-    
-    // Sauvegarde sur Telegram toutes les 10 minutes max pour la stabilité
-    const now = Date.now();
-    if (now - global.lastTelegramSave > 600000) { 
-        await saveSessionToTelegram();
-        global.lastTelegramSave = now;
-    }
-  });
+  sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
@@ -102,8 +129,15 @@ async function connectToWhatsApp() {
     }
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) {
-        setTimeout(connectToWhatsApp, 3000);
+      console.log(`🔴 Déconnecté (code: ${code})`);
+      if (code === DisconnectReason.loggedOut) {
+        console.log('❌ Session expirée. Supprimez auth_info/ et relancez.');
+      } else if (code === DisconnectReason.restartRequired) {
+        console.log('🔄 Redémarrage requis...');
+        setTimeout(connectToWhatsApp, 2000);
+      } else {
+        console.log('🔄 Reconnexion dans 5s...');
+        setTimeout(connectToWhatsApp, 5000);
       }
     }
     if (connection === 'open') {
@@ -115,8 +149,7 @@ async function connectToWhatsApp() {
       console.log('║  HÉBERGEMENT : RELAIS TELEGRAM ACTIF ║');
       console.log('╚══════════════════════════════════════╝\n');
       
-      // Sauvegarde immédiate à la connexion
-      await saveSessionToTelegram();
+
     }
   });
 
@@ -146,6 +179,9 @@ async function connectToWhatsApp() {
 
         const isCmd = body.startsWith(PREFIX);
 
+        // Debug temporaire
+        if (isGroup) console.log(`🔍 GRP msg | from: ${from} | ct: ${ct} | body: "${body}" | isCmd: ${isCmd} | fromMe: ${fromMe}`);
+
         // Anti-boucle : ignorer les messages du bot qui ne sont pas des commandes
         if (fromMe && !isCmd) continue;
 
@@ -163,8 +199,7 @@ async function connectToWhatsApp() {
 
         const isOwner = senderNumber === OWNER || fromMe;
 
-        // Log
-        console.log(`📩 [${isGroup ? 'GRP' : 'PV'}] ${senderNumber}: ${body.substring(0, 30)}`);
+
 
         // --- MODÉRATION GROUPE ---
         if (isGroup && !isOwner) {
@@ -196,5 +231,13 @@ async function connectToWhatsApp() {
 
   return sock;
 }
+
+// Serveur HTTP minimal pour les hébergeurs (Koyeb, Railway, Render...)
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  const status = global.waSock?.user ? 'online' : 'offline';
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status, bot: process.env.BOT_NAME || 'WhatsApp Bot' }));
+}).listen(PORT, () => console.log(`🌐 Serveur HTTP actif sur port ${PORT}`));
 
 connectToWhatsApp().catch(console.error);
