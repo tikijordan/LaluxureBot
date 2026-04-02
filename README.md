@@ -6,7 +6,7 @@ Bot WhatsApp complet développé avec `@whiskeysockets/baileys` (Node.js ES Modu
 
 ## 📋 Prérequis
 
-- **Node.js** v18+ 
+- **Node.js** v20+ 
 - Compte WhatsApp actif
 - Connexion Internet
 
@@ -16,7 +16,7 @@ Bot WhatsApp complet développé avec `@whiskeysockets/baileys` (Node.js ES Modu
 
 ```bash
 # 1. Cloner / extraire le projet
-cd whatsapp-bot
+cd LaluxureBot
 
 # 2. Installer les dépendances
 npm install
@@ -53,85 +53,85 @@ Scanner le QR code qui apparaît dans le terminal avec WhatsApp.
 ### 📌 Base
 | Commande | Description |
 |---|---|
-| `!menu` | Menu principal |
-| `!info` | Infos du bot |
-| `!aide` | Aide et exemples |
+| `menu` | Menu principal |
+| `info` | Infos du bot |
+| `aide` | Aide et exemples |
 
 ### 🎭 Divertissement
 | Commande | Description |
 |---|---|
-| `!blague` | Blague aléatoire |
-| `!citation` | Citation inspirante |
-| `!meteo [ville]` | Météo en temps réel |
-| `!news [sujet]` | Actualités |
-| `!meme` | Mème aléatoire |
-| `!quiz` | Question de quiz |
-| `!8ball [question]` | Boule magique |
+| `blague` | Blague aléatoire |
+| `citation` | Citation inspirante |
+| `meteo [ville]` | Météo en temps réel |
+| `news [sujet]` | Actualités |
+| `meme` | Mème aléatoire |
+| `quiz` | Question de quiz |
+| `8ball [question]` | Boule magique |
 
 ### 📷 Médias
 | Commande | Description |
 |---|---|
-| `!sticker` | Convertir image → sticker |
-| `!vo` ou `!viewonce` | Extraire un message vue unique |
-| `!pp [@mention]` | Photo de profil |
-| `!image [texte]` | Générer une image IA |
+| `sticker` | Convertir image → sticker |
+| `vo` ou `viewonce` | Extraire un message vue unique |
+| `pp [@mention]` | Photo de profil |
+| `image [texte]` | Générer une image IA |
 
 ### 🎵 Musique & Vidéo
 | Commande | Description |
 |---|---|
-| `!play [titre]` | Rechercher & télécharger musique |
-| `!ytmp3 [lien]` | YouTube → MP3 |
-| `!video [titre/lien]` | Télécharger vidéo YouTube |
-| `!dl [lien]` | Télécharger depuis n'importe quel site |
-| `!tiktok [lien]` | TikTok sans filigrane |
-| `!ig [lien]` | Instagram Reels/Photos |
+| `play [titre]` | Rechercher & télécharger musique |
+| `ytmp3 [lien]` | YouTube → MP3 |
+| `video [titre/lien]` | Télécharger vidéo YouTube |
+| `dl [lien]` | Télécharger depuis n'importe quel site |
+| `tiktok [lien]` | TikTok sans filigrane |
+| `ig [lien]` | Instagram Reels/Photos |
 
 ### 🤖 IA
 | Commande | Description |
 |---|---|
-| `!ia [question]` | Réponse IA (GPT ou Pollinations) |
-| `!translate [lang] [texte]` | Traduction (MyMemory API) |
-| `!resume [lien]` | Résumé d'article web |
+| `ia [question]` | Réponse IA (GPT ou Pollinations) |
+| `translate [lang] [texte]` | Traduction (MyMemory API) |
+| `resume [lien]` | Résumé d'article web |
 
 ### 🛡️ Sécurité
 | Commande | Description |
 |---|---|
-| `!antispam` | État de l'anti-spam |
-| `!unban [numéro]` | Débannir (admin) |
-| `!notag` | Activer protection anti-tag |
-| `!yestag` | Désactiver protection anti-tag |
+| `antispam` | État de l'anti-spam |
+| `unban [numéro]` | Débannir (admin) |
+| `notag` | Activer protection anti-tag |
+| `yestag` | Désactiver protection anti-tag |
 
 ### 💢 Spam (Admin)
 | Commande | Description |
 |---|---|
-| `!spam [num] [msg] [n]` | Envoyer n messages |
-| `!stopspam` | Arrêter le spam |
+| `spam [num] [msg] [n]` | Envoyer n messages |
+| `stopspam` | Arrêter le spam |
 
 ### 👥 Groupe
 | Commande | Description |
 |---|---|
-| `!tagall [message]` | Mentionner tout le monde |
-| `!everyone` | Alias tagall |
-| `!tagadmins` | Mentionner les admins |
-| `!groupinfo` | Infos du groupe |
+| `tagall [message]` | Mentionner tout le monde |
+| `everyone` | Alias tagall |
+| `tagadmins` | Mentionner les admins |
+| `groupinfo` | Infos du groupe |
 
 ### 🛠️ Utilitaires
 | Commande | Description |
 |---|---|
-| `!qrcode [texte]` | Générer QR Code |
-| `!calc [expression]` | Calculatrice (supporte sin, sqrt, etc.) |
-| `!reminder [min] [msg]` | Rappel temporisé |
-| `!note [texte]` | Sauvegarder une note |
-| `!mynotes` | Voir ses notes |
-| `!stats` | Statistiques d'utilisation |
-| `!contact` | Contacter l'owner |
+| `qrcode [texte]` | Générer QR Code |
+| `calc [expression]` | Calculatrice (supporte sin, sqrt, etc.) |
+| `reminder [min] [msg]` | Rappel temporisé |
+| `note [texte]` | Sauvegarder une note |
+| `mynotes` | Voir ses notes |
+| `stats` | Statistiques d'utilisation |
+| `contact` | Contacter l'owner |
 
 ---
 
 ## 🗂️ Structure du projet
 
 ```
-whatsapp-bot/
+Laluxure Bot/
 ├── src/
 │   ├── index.js          # Point d'entrée, connexion Baileys
 │   ├── handler.js        # Traitement des messages

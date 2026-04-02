@@ -1,8 +1,7 @@
 /**
- * ============================================================
  * @file        handler.js
- * @description Gestionnaire de commandes — Routage et exécution
- * ============================================================
+ * @description Gestionnaire de commandes
+ * @license     MIT
  */
 
 import path from 'path';
@@ -17,7 +16,6 @@ import { canUseBot } from './utils/botmode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Charger les commandes
 let commands = {};
 (async () => {
   commands = await loadCommands();
@@ -26,72 +24,47 @@ let commands = {};
 
 const noTagGroups = new Set();
 
-// ============================================================
-// EXTRACTION DU CONTEXTE
-// ============================================================
-export function getMessageContext(msg) {
+export async function handleCommand(sock, msg, store, ctx = {}) {
   const PREFIX = process.env.PREFIX || '/';
-  const OWNER_RAW = process.env.OWNER_NUMBER || '';
-  const OWNER = OWNER_RAW.replace(/\D/g, ''); // Nettoie le numéro (garde juste les chiffres)
+  const OWNER  = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 
-  const contentType = getContentType(msg.message);
-  let body = '';
+  // Utiliser le contexte passé par index.js (déjà calculé correctement)
+  let body         = ctx.body;
+  let from         = ctx.from;
+  let isGroup      = ctx.isGroup;
+  let isOwner      = ctx.isOwner;
+  let senderNumber = ctx.senderNumber;
+  let sender       = ctx.sender;
 
-  if (contentType === 'conversation')
-    body = msg.message.conversation || '';
-  else if (contentType === 'extendedTextMessage')
-    body = msg.message.extendedTextMessage?.text || '';
-  else if (contentType === 'imageMessage')
-    body = msg.message.imageMessage?.caption || '';
-  else if (contentType === 'videoMessage')
-    body = msg.message.videoMessage?.caption || '';
+  // Fallback si appelé sans contexte
+  if (body === undefined) {
+    const ct = getContentType(msg.message);
+    if (ct === 'conversation')             body = msg.message.conversation || '';
+    else if (ct === 'extendedTextMessage') body = msg.message.extendedTextMessage?.text || '';
+    else if (ct === 'imageMessage')        body = msg.message.imageMessage?.caption || '';
+    else if (ct === 'videoMessage')        body = msg.message.videoMessage?.caption || '';
+    else body = '';
 
-  const rawFrom = msg.key.remoteJid;
-  const isGroup = rawFrom.endsWith('@g.us');
-  const isLid   = rawFrom.endsWith('@lid');
-  const fromMe  = msg.key.fromMe;
+    const rawJid = msg.key.remoteJid;
+    const fromMe = msg.key.fromMe;
+    isGroup = rawJid.endsWith('@g.us');
+    const isLid = rawJid.endsWith('@lid');
 
-  // from = destination pour sock.sendMessage
-  // - groupe : garder le JID du groupe @g.us
-  // - privé @lid : remplacer par le vrai numéro
-  // - privé normal : garder tel quel
-  let from;
-  if (isGroup) {
-    from = rawFrom; // JID groupe toujours valide
-  } else if (isLid || fromMe) {
-    from = `${OWNER}@s.whatsapp.net`; // privé → envoyer à l'owner
-  } else {
-    from = rawFrom;
+    if (isGroup) {
+      from = rawJid;
+      sender = msg.key.participant || '';
+      senderNumber = sender.split('@')[0].replace(/\D/g, '');
+    } else {
+      from = (isLid || fromMe) ? `${OWNER}@s.whatsapp.net` : rawJid;
+      senderNumber = fromMe ? OWNER : rawJid.split('@')[0].replace(/\D/g, '');
+      sender = `${senderNumber}@s.whatsapp.net`;
+    }
+    isOwner = senderNumber === OWNER || fromMe;
   }
 
-  // senderJid = qui a envoyé
-  let senderJid, senderNumber;
-  if (isGroup) {
-    senderJid    = msg.key.participant || '';
-    senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
-  } else {
-    senderNumber = fromMe ? OWNER : rawFrom.split('@')[0].replace(/\D/g, '');
-    senderJid    = senderNumber + '@s.whatsapp.net';
-  }
-  const isOwner = senderNumber === OWNER || fromMe;
+  if (!body || !body.startsWith(PREFIX)) return;
 
-  return { body, contentType, isGroup, from, sender: senderJid, senderNumber, isOwner, prefix: PREFIX };
-}
-
-// ============================================================
-// HANDLER PRINCIPAL
-// ============================================================
-export async function handleCommand(sock, msg, store) {
-  const { body, isGroup, from, sender, senderNumber, isOwner, prefix } = getMessageContext(msg);
-
-  // Debug
-  console.log(`🔧 Handler | from: ${from} | body: ${body} | isOwner: ${isOwner}`);
-
-  // 1. Ignorer si pas de texte ou si ce n'est pas une commande
-  if (!body || !body.startsWith(prefix)) return;
-
-
-  // 2. Anti-spam (sauf pour l'owner)
+  // Anti-spam
   if (!isOwner) {
     if (isSpam(senderNumber)) {
       return await sock.sendMessage(from, { text: '⚠️ Calme-toi ! Trop de messages.' });
@@ -99,65 +72,38 @@ export async function handleCommand(sock, msg, store) {
     trackMessage(senderNumber);
   }
 
-  // 3. Découpage de la commande
-  const parts = body.slice(prefix.length).trim().split(/\s+/);
+  const parts   = body.slice(PREFIX.length).trim().split(/\s+/);
   const cmdName = parts[0]?.toLowerCase();
-  const args = parts.slice(1);
-  const text = args.join(' ');
+  const args    = parts.slice(1);
+  const text    = args.join(' ');
 
   if (!cmdName) return;
 
-  // 4. Vérification Mode Bot (Public/Privé)
-  // Si le bot n'est pas en mode public et que tu n'es pas l'owner
-  if (!canUseBot(isOwner) && !['public', 'self', 'owner'].includes(cmdName)) {
-     // Optionnel : ne rien envoyer du tout pour rester discret
-     return; 
-  }
+  if (!canUseBot(isOwner) && !['public', 'self', 'owner'].includes(cmdName)) return;
 
-  // 5. Trouver la commande
   const command = commands[cmdName];
-  if (!command) return; // On ne répond pas "Inconnu" pour éviter le spam si l'utilisateur se trompe
+  if (!command) return;
 
-  // 6. Vérification Admin/Owner
+  // Vérification admin
   if (command.adminOnly && !isOwner) {
-    // Vérifier si l'utilisateur est admin du groupe
-    let isBotAdmin = false;
     let isUserAdmin = false;
-    
     if (isGroup) {
-        const metadata = await sock.groupMetadata(from);
-        const participants = metadata.participants;
-        const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-        
-        isBotAdmin = !!participants.find(p => p.id === botId && (p.admin || p.isSuperAdmin));
-        isUserAdmin = !!participants.find(p => p.id === sender && (p.admin || p.isSuperAdmin));
+      const metadata = await sock.groupMetadata(from).catch(() => null);
+      if (metadata) {
+        isUserAdmin = !!metadata.participants.find(p => p.id === sender && (p.admin || p.isSuperAdmin));
+      }
     }
-
     if (!isUserAdmin) {
-        return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
+      return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
     }
   }
 
-  // 7. Exécution
   try {
+    console.log(`⚡ [${cmdName}] par ${senderNumber} (Owner: ${isOwner})`);
     addStat(senderNumber, cmdName);
-    
-    await command.execute({
-      sock,
-      msg,
-      from,
-      sender,
-      senderNumber,
-      isOwner,
-      isGroup,
-      args,
-      text,
-      store,
-      noTagGroups,
-      prefix
-    });
+    await command.execute({ sock, msg, from, sender, senderNumber, isOwner, isGroup, args, text, store, noTagGroups, prefix: PREFIX });
   } catch (err) {
-    console.error(`❌ Erreur ${cmdName}:`, err);
-    await sock.sendMessage(from, { text: `❌ Une erreur est survenue : ${err.message}` });
+    console.error(`❌ Erreur ${cmdName}:`, err.message);
+    await sock.sendMessage(from, { text: `❌ Erreur : ${err.message}` }).catch(() => {});
   }
 }

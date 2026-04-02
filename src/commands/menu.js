@@ -209,12 +209,7 @@ ${PREFIX}contact — Contacter l'équipe
 ╚══════════════════════════════╝
 > Propulsé par Baileys 🔥`;
 
-      try {
-        await sock.sendMessage(from, { text: menu });
-        console.log('✅ Menu envoyé à', from);
-      } catch(e) {
-        console.error('❌ Erreur envoi menu:', e.message, '| from=', from);
-      }
+      await sock.sendMessage(from, { text: menu });
     },
   },
 

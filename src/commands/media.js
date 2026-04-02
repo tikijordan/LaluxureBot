@@ -104,28 +104,51 @@ const mediaCommands = {
     description: 'Extrait un média à vue unique.',
     execute: async ({ sock, msg, from }) => {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (!quoted) return sock.sendMessage(from, { text: '❌ Répondez à un message à vue unique.' });
+      if (!quoted) return sock.sendMessage(from, { text: '❌ Réponds à un message à vue unique.' });
 
-      // Déballer le message ViewOnce
-      const viewOnceContent = quoted.viewOnceMessage?.message || 
-                              quoted.viewOnceMessageV2?.message || 
-                              quoted.viewOnceMessageV2Extension?.message;
+      // --- Méthode directe (inspirée de extract.js) ---
+      // Dépaqueter tous les wrappers ViewOnce connus, puis fallback sur le message brut.
+      // Cas couverts :
+      //   • viewOnceMessage              → ancien format
+      //   • viewOnceMessageV2            → format actuel courant
+      //   • viewOnceMessageV2Extension   → format étendu
+      //   • quoted directement           → message déjà exposé OU média cité normal
+      const innerMsg = quoted.viewOnceMessage?.message
+                    || quoted.viewOnceMessageV2?.message
+                    || quoted.viewOnceMessageV2Extension?.message
+                    || quoted; // fallback — même logique que extract.js
 
-      const found = extractMedia(viewOnceContent);
-      if (!found) return sock.sendMessage(from, { text: '❌ Ce n\'est pas un média à vue unique valide.' });
+      // Détecter le type réel du contenu (imageMessage, videoMessage, audioMessage)
+      const type = getContentType(innerMsg);
+
+      if (!type || !/^(image|video|audio)Message$/.test(type)) {
+        return sock.sendMessage(from, { text: '❌ Ce message ne contient pas de média valide (image, vidéo ou audio).' });
+      }
+
+      // Extraire l'objet média brut — ex: innerMsg.imageMessage
+      const mediaObj  = innerMsg[type];
+      const mediaType = type.replace('Message', ''); // 'image' | 'video' | 'audio'
+
+      await sock.sendMessage(from, { text: '🔄 Extraction en cours...' });
 
       try {
-        const buffer = await downloadMedia(found.mediaMsg, found.mediaType);
-        const caption = `✅ Extrait \nLégende: ${found.mediaMsg?.caption || 'Aucune'}`;
+        // Téléchargement direct — même logique que extract.js :
+        // downloadContentFromMessage(targetMsg, mediaType) où targetMsg = l'objet média brut
+        const stream = await downloadContentFromMessage(mediaObj, mediaType);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
-        if (found.mediaType === 'image') {
+        const caption = `✅ Extrait\nLégende : ${mediaObj?.caption || 'Aucune'}`;
+
+        if (mediaType === 'image') {
           await sock.sendMessage(from, { image: buffer, caption }, { quoted: msg });
-        } else if (found.mediaType === 'video') {
+        } else if (mediaType === 'video') {
           await sock.sendMessage(from, { video: buffer, caption }, { quoted: msg });
-        } else if (found.mediaType === 'audio') {
+        } else {
           await sock.sendMessage(from, { audio: buffer, mimetype: 'audio/mp4' }, { quoted: msg });
         }
       } catch (e) {
+        console.error('[VO] Erreur extraction:', e.message);
         await sock.sendMessage(from, { text: '❌ Échec : le média a peut-être expiré.' });
       }
     },
