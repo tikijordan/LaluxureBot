@@ -2,10 +2,12 @@
 node_modules/
 
 # Session WhatsApp (JAMAIS push ça)
+
 session.zip
 
 # Variables sensibles
 .env
+env.txt
 
 # Données locales
 data/
