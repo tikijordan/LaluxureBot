@@ -22,28 +22,19 @@ import qrcodeterminal from 'qrcode-terminal';
 
 dotenv.config();
 
-// Supprimer les erreurs Bad MAC / session du terminal
+// Supprimer les erreurs de session du terminal pour plus de clarté
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (data, ...a) => {
   const s = data.toString();
-  if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt') ||
-      s.includes('libsignal') || s.includes('Closing open session') || s.includes('Closing session:') ||
-      s.includes('registrationId') || s.includes('_chains') || s.includes('currentRatchet') ||
-      s.includes('indexInfo') || s.includes('ephemeralKeyPair')) return true;
+  if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt')) return true;
   return _stderrWrite(data, ...a);
-};
-const _consoleError = console.error.bind(console);
-console.error = (...a) => {
-  const s = a.join(' ');
-  if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt') ||
-      s.includes('libsignal') || s.includes('MessageCounterError')) return;
-  _consoleError(...a);
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = process.env.PREFIX || '/';
 const OWNER  = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 
+// Création des dossiers nécessaires
 ['../auth_info','../data','../data/notes','../data/stats','../data/banned']
   .forEach(d => fse.ensureDirSync(path.join(__dirname, d)));
 
@@ -52,20 +43,14 @@ global.mutedMembers = new Set();
 
 import { handleCommand } from './handler.js';
 import { isAntilinkEnabled, containsLink } from './utils/antilink.js';
-import { getWelcomeConfig } from './utils/welcome.js';
-import { isBanned } from './utils/banned.js';
-import { containsBadWord } from './utils/filter.js';
-import { isTooFast } from './utils/slowmode.js';
-import { isVip } from './utils/vip.js';
-import { isWhitelisted } from './utils/whitelist.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { findReply } from './utils/autoreply.js';
+import { isBanned } from './utils/banned.js';
 
 const store = {
   contacts: {},
   bind: (ev) => {
     ev.on('contacts.upsert', (list) => { for (const c of list) store.contacts[c.id] = c; });
-    ev.on('contacts.update', (list) => { for (const c of list) if (c.id) store.contacts[c.id] = { ...store.contacts[c.id], ...c }; });
   },
 };
 
@@ -82,115 +67,89 @@ async function connectToWhatsApp() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    browser: ['Ubuntu', 'Chrome', '20.0.0'],
+    browser: ["Ubuntu", "Chrome", "20.0.0"],
     syncFullHistory: false,
     markOnlineOnConnect: true,
-    emitOwnEvents: true,
-    retryRequestDelayMs: 2000,
-    maxMsgRetryCount: 2,
     connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000,
+    defaultQueryTimeoutMs: 0,
   });
+
+  // --- LOGIQUE DE CONNEXION (CODE OU QR) ---
+  if (!sock.authState.creds.registered) {
+    if (OWNER) {
+      console.log(`\n🔑 Génération du code de jumelage pour : ${OWNER}...`);
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(OWNER);
+          console.log('\n╔════════════════════════════════════╗');
+          console.log(`║  VOTRE CODE DE JUMELAGE : ${code}`);
+          console.log('╚════════════════════════════════════╝\n');
+          console.log('👉 Sur WhatsApp : Appareils connectés > Lier un appareil > Lier avec le numéro de téléphone\n');
+        } catch (e) {
+          console.error("Erreur pairing code:", e.message);
+        }
+      }, 5000);
+    } else {
+      console.log("\n⚠️ Aucun OWNER_NUMBER détecté. Utilisation du QR Code...");
+    }
+  }
 
   store.bind(sock.ev);
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      console.log('\n📱 SCANNEZ CE QR CODE:\n');
+    if (qr && !sock.authState.creds.registered) {
+      console.log('\n📱 SCANNEZ CE QR CODE (Si vous n\'utilisez pas le code) :\n');
       qrcodeterminal.generate(qr, { small: true });
     }
+
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       if (code === DisconnectReason.loggedOut) {
         console.log('❌ Session expirée. Supprimez auth_info/ et relancez.');
       } else {
-        setTimeout(connectToWhatsApp, code === DisconnectReason.restartRequired ? 2000 : 5000);
+        setTimeout(connectToWhatsApp, 3000);
       }
     }
+
     if (connection === 'open') {
-      const num = sock.user?.id?.split(':')[0] || sock.user?.id;
-      console.log('\n╔══════════════════════════════════╗');
-      console.log(`║  ✅ CONNECTÉ : ${num}`);
-      console.log(`║  PREFIX      : ${PREFIX}`);
-      console.log(`║  OWNER       : ${OWNER}`);
-      console.log('╚══════════════════════════════════╝\n');
+      console.log('\n✅ BOT CONNECTÉ AVEC SUCCÈS !');
     }
   });
 
+  // --- GESTION DES MESSAGES ---
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
-      if (msg.key.remoteJid === 'status@broadcast') continue;
+      if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
 
       try {
-        if (!msg.message) continue;
-
-        const rawJid  = msg.key.remoteJid;
-        const fromMe  = msg.key.fromMe;
+        const rawJid = msg.key.remoteJid;
+        const fromMe = msg.key.fromMe;
         const isGroup = rawJid.endsWith('@g.us');
-        const isLid   = rawJid.endsWith('@lid');
-
-        // Destination réelle pour sock.sendMessage
-        let from;
-        if (isGroup) {
-          from = rawJid;
-        } else if (isLid || fromMe) {
-          from = `${OWNER}@s.whatsapp.net`;
-        } else {
-          from = rawJid;
-        }
-
-        // Qui a envoyé
-        let senderJid, senderNumber;
-        if (isGroup) {
-          senderJid    = msg.key.participant || '';
-          senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
-        } else {
-          senderNumber = fromMe ? OWNER : rawJid.split('@')[0].replace(/\D/g, '');
-          senderJid    = `${senderNumber}@s.whatsapp.net`;
-        }
-
+        const from = isGroup ? rawJid : (fromMe ? `${OWNER}@s.whatsapp.net` : rawJid);
+        
+        let senderJid = isGroup ? (msg.key.participant || '') : (fromMe ? `${OWNER}@s.whatsapp.net` : rawJid);
+        let senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
         const isOwner = senderNumber === OWNER || fromMe;
 
-        // Extraction du texte
         const ct = getContentType(msg.message);
-        let body = '';
-        if (ct === 'conversation')        body = msg.message.conversation || '';
-        else if (ct === 'extendedTextMessage') body = msg.message.extendedTextMessage?.text || '';
-        else if (ct === 'imageMessage')   body = msg.message.imageMessage?.caption || '';
-        else if (ct === 'videoMessage')   body = msg.message.videoMessage?.caption || '';
+        let body = (ct === 'conversation') ? msg.message.conversation : 
+                   (ct === 'extendedTextMessage') ? msg.message.extendedTextMessage?.text :
+                   (ct === 'imageMessage') ? msg.message.imageMessage?.caption :
+                   (ct === 'videoMessage') ? msg.message.videoMessage?.caption : '';
 
+        if (!body) body = '';
         const isCmd = body.startsWith(PREFIX);
 
-        // Anti-boucle
         if (fromMe && !isCmd) continue;
+        console.log(`📩 [${isGroup ? 'GRP' : 'PV'}] ${senderNumber}: ${body.substring(0, 30)}`);
 
-        console.log(`📩 [${isGroup ? 'GRP' : 'PV'}] ${senderNumber}: ${body.substring(0, 40)}`);
-
-        // Modération groupe
-        if (isGroup && !isOwner) {
-          if (isBanned(from, senderNumber)) {
-            await sock.groupParticipantsUpdate(from, [senderJid], 'remove').catch(() => {});
-            continue;
-          }
-          if (isAntilinkEnabled(from) && containsLink(body)) {
-            await sock.sendMessage(from, { delete: msg.key });
-            continue;
-          }
-        }
-
-        // Stats & auto-reply
+        // Logique de groupe, stats et commandes
         if (isGroup) trackGroupMsg(from, senderJid);
-        if (isGroup && !isCmd) {
-          const rep = findReply(from, body);
-          if (rep) await sock.sendMessage(from, { text: rep });
-        }
-
-        // Exécution commande — on passe tout le contexte déjà calculé
         await handleCommand(sock, msg, store, { body, from, isGroup, isOwner, senderNumber, sender: senderJid });
 
       } catch (err) {
-        console.error('❌ Erreur:', err.message);
+        console.error('❌ Erreur message:', err.message);
       }
     }
   });
@@ -198,11 +157,11 @@ async function connectToWhatsApp() {
   return sock;
 }
 
-// Serveur HTTP pour les hébergeurs
+// Serveur pour maintenir Render actif
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ status: 'online', bot: process.env.BOT_NAME || 'WhatsApp Bot' }));
-}).listen(PORT, () => console.log(`🌐 Serveur HTTP actif sur port ${PORT}`));
+  res.end(JSON.stringify({ status: 'online' }));
+}).listen(PORT, () => console.log(`🌐 Serveur sur port ${PORT}`));
 
 connectToWhatsApp().catch(console.error);
