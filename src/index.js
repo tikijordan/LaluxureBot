@@ -1,6 +1,7 @@
 /**
  * @file        index.js
- * @project     WhatsApp Bot (Version Ultra-Stable Render)
+ * @project     WhatsApp Bot (Version Render Immortelle)
+ * @description Pairing Code corrigé + Session String + Auto-ping 2min
  */
 
 import http from 'http';
@@ -29,7 +30,7 @@ const OWNER = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 const SESSION_STRING = process.env.SESSION_STRING;
 const PREFIX = process.env.PREFIX || '/';
 
-// --- NETTOYAGE DES LOGS POUR LA STABILITÉ ---
+// --- FILTRE ANTI-LOGS INUTILES ---
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (data, ...a) => {
     const s = data.toString();
@@ -37,7 +38,7 @@ process.stderr.write = (data, ...a) => {
     return _stderrWrite(data, ...a);
 };
 
-// --- RESTAURATION DE LA SESSION DEPUIS L'ENVIRONNEMENT ---
+// --- RESTAURATION AUTOMATIQUE DE LA SESSION ---
 if (SESSION_STRING && !fs.existsSync(AUTH_PATH)) {
     console.log("📂 Restauration de la session depuis SESSION_STRING...");
     fse.ensureDirSync(AUTH_PATH);
@@ -46,13 +47,13 @@ if (SESSION_STRING && !fs.existsSync(AUTH_PATH)) {
         for (const [fileName, content] of Object.entries(sessionData)) {
             fs.writeFileSync(path.join(AUTH_PATH, fileName), content);
         }
-        console.log("✅ Session restaurée avec succès.");
+        console.log("✅ Session restaurée.");
     } catch (e) {
-        console.error("❌ Erreur lors de la lecture de SESSION_STRING.");
+        console.error("❌ Erreur de lecture de la variable SESSION_STRING.");
     }
 }
 
-// Imports des handlers
+// Imports locaux (Assure-toi que ces fichiers existent dans ton projet)
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 
@@ -69,7 +70,7 @@ async function connectToWhatsApp() {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
-        // Identité fixe pour éviter le rejet du pairing code
+        // IMPORTANT : Cette ligne fixe l'identité du bot pour valider le code
         browser: ["Chrome (Linux)", "Chrome", "110.0.5481.177"],
         syncFullHistory: false,
         markOnlineOnConnect: true,
@@ -77,22 +78,24 @@ async function connectToWhatsApp() {
         defaultQueryTimeoutMs: 0,
     });
 
-    // --- LOGIQUE PAIRING CODE AMÉLIORÉE ---
+    // --- LOGIQUE DU PAIRING CODE (CORRIGÉE) ---
     if (!sock.authState.creds.registered) {
         if (OWNER) {
-            console.log(`\n⏳ Attente de 10s avant génération du code pour : ${OWNER}...`);
+            console.log(`\n⏳ Attente de 10s pour stabiliser la connexion pour : ${OWNER}...`);
             setTimeout(async () => {
                 try {
+                    // Demande du code à WhatsApp
                     const code = await sock.requestPairingCode(OWNER);
+                    const codeFinal = code?.match(/.{1,4}/g)?.join('-') || code;
+                    
                     console.log('\n╔════════════════════════════════════╗');
-                    console.log(`║  VOTRE CODE DE JUMELAGE : ${code.toUpperCase()}`);
+                    console.log(`║  VOTRE CODE : ${codeFinal.toUpperCase()}`);
                     console.log('╚════════════════════════════════════╝\n');
+                    console.log('👉 WhatsApp > Appareils connectés > Lier avec le numéro de téléphone\n');
                 } catch (e) {
-                    console.error("❌ Échec génération code. Vérifiez le format du numéro.");
+                    console.error("❌ Erreur Pairing Code. Vérifiez votre numéro dans le .env");
                 }
-            }, 10000);
-        } else {
-            console.log("\n⚠️ Aucun numéro OWNER_NUMBER trouvé dans le .env");
+            }, 10000); 
         }
     }
 
@@ -107,9 +110,9 @@ async function connectToWhatsApp() {
         }
 
         if (connection === 'open') {
-            console.log('\n✅ BOT CONNECTÉ !');
+            console.log('\n✅ BOT CONNECTÉ ET PRÊT !');
             
-            // Si c'est une nouvelle connexion, générer la string pour Render
+            // Si c'est la première connexion, générer la string pour Render
             if (!SESSION_STRING) {
                 const files = fs.readdirSync(AUTH_PATH);
                 const sessionData = {};
@@ -117,7 +120,7 @@ async function connectToWhatsApp() {
                     if(f.endsWith('.json')) sessionData[f] = fs.readFileSync(path.join(AUTH_PATH, f), 'utf-8');
                 });
                 const sString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-                console.log('\n⚠️ COPIEZ CETTE LIGNE DANS LES VARIABLES RENDER (SESSION_STRING) :\n');
+                console.log('\n⚠️ SAUVEGARDEZ CETTE LIGNE DANS RENDER (SESSION_STRING) :\n');
                 console.log(sString);
                 console.log('\n--------------------------------------------------\n');
             }
@@ -126,10 +129,10 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
             if (code !== DisconnectReason.loggedOut) {
-                console.log('🔄 Reconnexion automatique...');
+                console.log('🔄 Connexion perdue. Tentative de reconnexion...');
                 setTimeout(connectToWhatsApp, 3000);
             } else {
-                console.log('❌ Déconnecté. Supprimez auth_info et SESSION_STRING pour recommencer.');
+                console.log('❌ Session déconnectée. Supprimez auth_info pour recommencer.');
             }
         }
     });
@@ -154,7 +157,7 @@ async function connectToWhatsApp() {
                 if (isGroup) trackGroupMsg(from, senderJid);
                 await handleCommand(sock, msg, {}, { body, from, isGroup, isOwner, senderNumber, sender: senderJid });
             } catch (err) {
-                console.error('❌ Erreur message:', err.message);
+                console.error('❌ Erreur traitement message:', err.message);
             }
         }
     });
@@ -162,7 +165,7 @@ async function connectToWhatsApp() {
     return sock;
 }
 
-// --- SERVEUR HTTP & AUTO-PING (CHAQUE 2 MIN) ---
+// --- SERVEUR & AUTO-PING (CHAQUE 2 MINUTES) ---
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -175,10 +178,12 @@ http.createServer((req, res) => {
         if (url && !url.includes('undefined')) {
             try { 
                 await axios.get(url);
-                console.log('📡 Auto-ping : Session maintenue.');
-            } catch (e) {}
+                console.log('📡 Auto-ping (2min) : OK');
+            } catch (e) {
+                // Erreur ignorée (le serveur est peut-être juste occupé)
+            }
         }
-    }, 2 * 60 * 1000); // 2 minutes
+    }, 2 * 60 * 1000); 
 });
 
 connectToWhatsApp().catch(console.error);
