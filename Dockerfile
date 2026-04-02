@@ -1,14 +1,15 @@
 FROM node:20-slim
 
-# Installer ffmpeg et wget
+# Installer ffmpeg, wget et ca-certificates
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     wget \
+    ca-certificates \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
 # Installer yt-dlp depuis le release officiel GitHub
-RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && \
+RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app
