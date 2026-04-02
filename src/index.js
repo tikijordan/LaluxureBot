@@ -31,13 +31,28 @@ const OWNER       = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 const PREFIX      = process.env.PREFIX || '/';
 const SESSION_STR = process.env.SESSION_STRING;
 
-// Filtre anti-logs Baileys inutiles
+// Filtre anti-logs Baileys inutiles (session crypto, ratchet, clés Signal)
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (data, ...a) => {
     const s = data.toString();
     if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt') ||
-        s.includes('libsignal') || s.includes('MessageCounterError')) return true;
+        s.includes('libsignal') || s.includes('MessageCounterError') ||
+        s.includes('Closing open session') || s.includes('Closing session:') ||
+        s.includes('registrationId') || s.includes('_chains') || s.includes('currentRatchet') ||
+        s.includes('indexInfo') || s.includes('ephemeralKeyPair') ||
+        s.includes('SessionEntry') || s.includes('chainKey') || s.includes('chainType') ||
+        s.includes('rootKey') || s.includes('baseKey') || s.includes('RemoteIdentity')) return true;
     return _stderrWrite(data, ...a);
+};
+// Filtre console.error pour les mêmes patterns
+const _consoleError = console.error.bind(console);
+console.error = (...a) => {
+    const s = a.join(' ');
+    if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt') ||
+        s.includes('libsignal') || s.includes('MessageCounterError') ||
+        s.includes('Closing session') || s.includes('registrationId') ||
+        s.includes('_chains') || s.includes('currentRatchet') || s.includes('ephemeralKeyPair')) return;
+    _consoleError(...a);
 };
 
 // Restauration session depuis SESSION_STRING (Render / VPS)
@@ -270,6 +285,7 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
     console.log('Serveur HTTP actif sur port ' + PORT);
 
+    // ── Auto-ping HTTP (anti-sleep Render) ──────────────────────────
     setInterval(async () => {
         const url = process.env.RENDER_EXTERNAL_URL
                  || (process.env.RENDER_SERVICE_NAME ? 'https://' + process.env.RENDER_SERVICE_NAME + '.onrender.com' : null);
@@ -279,4 +295,30 @@ http.createServer((req, res) => {
     }, 2 * 60 * 1000);
 });
 
-connectToWhatsApp().catch(console.error);
+// ── Auto-ping WhatsApp (maintien de la connexion WA) ────────────────
+// Envoie une présence "available" toutes les 1 minute pour éviter
+// que le socket se déconnecte silencieusement sur les hébergeurs.
+let _waSock = null;
+const WA_PING_INTERVAL = parseInt(process.env.WA_PING_INTERVAL_MS || '60000'); // 1 min 
+
+function startWaPing(sock) {
+    _waSock = sock;
+    setInterval(async () => {
+        if (!_waSock) return;
+        try {
+            await _waSock.sendPresenceUpdate('available');
+        } catch { /* connexion coupée — reconnexion gérée par connection.update */ }
+    }, WA_PING_INTERVAL);
+}
+
+async function connectToWhatsAppWithPing() {
+    const sock = await connectToWhatsApp();
+    startWaPing(sock);
+    // Reattacher le ping après chaque reconnexion
+    sock.ev.on('connection.update', ({ connection }) => {
+        if (connection === 'open') _waSock = sock;
+        if (connection === 'close') _waSock = null;
+    });
+}
+
+connectToWhatsAppWithPing().catch(console.error);
