@@ -5,6 +5,7 @@
  */
 
 import http from 'http';
+import axios from 'axios';
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -22,6 +23,12 @@ import qrcodeterminal from 'qrcode-terminal';
 
 dotenv.config();
 
+// Configuration des constantes
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PREFIX = process.env.PREFIX || '/';
+const OWNER  = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
+
 // Supprimer les erreurs de session du terminal pour plus de clarté
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (data, ...a) => {
@@ -29,10 +36,6 @@ process.stderr.write = (data, ...a) => {
   if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt')) return true;
   return _stderrWrite(data, ...a);
 };
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PREFIX = process.env.PREFIX || '/';
-const OWNER  = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 
 // Création des dossiers nécessaires
 ['../auth_info','../data','../data/notes','../data/stats','../data/banned']
@@ -42,10 +45,7 @@ global.botMessages  = new Map();
 global.mutedMembers = new Set();
 
 import { handleCommand } from './handler.js';
-import { isAntilinkEnabled, containsLink } from './utils/antilink.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
-import { findReply } from './utils/autoreply.js';
-import { isBanned } from './utils/banned.js';
 
 const store = {
   contacts: {},
@@ -74,7 +74,7 @@ async function connectToWhatsApp() {
     defaultQueryTimeoutMs: 0,
   });
 
-  // --- LOGIQUE DE CONNEXION (CODE OU QR) ---
+  // --- LOGIQUE DE CONNEXION (PAIRING CODE) ---
   if (!sock.authState.creds.registered) {
     if (OWNER) {
       console.log(`\n🔑 Génération du code de jumelage pour : ${OWNER}...`);
@@ -84,13 +84,12 @@ async function connectToWhatsApp() {
           console.log('\n╔════════════════════════════════════╗');
           console.log(`║  VOTRE CODE DE JUMELAGE : ${code}`);
           console.log('╚════════════════════════════════════╝\n');
-          console.log('👉 Sur WhatsApp : Appareils connectés > Lier un appareil > Lier avec le numéro de téléphone\n');
         } catch (e) {
           console.error("Erreur pairing code:", e.message);
         }
       }, 5000);
     } else {
-      console.log("\n⚠️ Aucun OWNER_NUMBER détecté. Utilisation du QR Code...");
+      console.log("\n⚠️ Aucun OWNER_NUMBER détecté dans le .env.");
     }
   }
 
@@ -99,7 +98,7 @@ async function connectToWhatsApp() {
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr && !sock.authState.creds.registered) {
-      console.log('\n📱 SCANNEZ CE QR CODE (Si vous n\'utilisez pas le code) :\n');
+      console.log('\n📱 OU SCANNEZ CE QR CODE :\n');
       qrcodeterminal.generate(qr, { small: true });
     }
 
@@ -139,12 +138,8 @@ async function connectToWhatsApp() {
                    (ct === 'videoMessage') ? msg.message.videoMessage?.caption : '';
 
         if (!body) body = '';
-        const isCmd = body.startsWith(PREFIX);
-
-        if (fromMe && !isCmd) continue;
         console.log(`📩 [${isGroup ? 'GRP' : 'PV'}] ${senderNumber}: ${body.substring(0, 30)}`);
 
-        // Logique de groupe, stats et commandes
         if (isGroup) trackGroupMsg(from, senderJid);
         await handleCommand(sock, msg, store, { body, from, isGroup, isOwner, senderNumber, sender: senderJid });
 
@@ -157,11 +152,25 @@ async function connectToWhatsApp() {
   return sock;
 }
 
-// Serveur pour maintenir Render actif
+// --- SERVEUR HTTP & AUTO-PING POUR RENDER ---
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ status: 'online' }));
-}).listen(PORT, () => console.log(`🌐 Serveur sur port ${PORT}`));
+  res.end(JSON.stringify({ status: 'online', timestamp: new Date() }));
+}).listen(PORT, () => {
+  console.log(`🌐 Serveur HTTP actif sur port ${PORT}`);
+  
+  // Auto-ping interne toutes les 10 minutes
+  setInterval(async () => {
+    try {
+      if (RENDER_URL && !RENDER_URL.includes('undefined')) {
+        await axios.get(RENDER_URL);
+        console.log('📡 Auto-ping : Bot maintenu éveillé.');
+      }
+    } catch (e) {
+      console.log('📡 Auto-ping en attente de l\'URL finale...');
+    }
+  }, 2 * 60 * 1000);
+});
 
 connectToWhatsApp().catch(console.error);
