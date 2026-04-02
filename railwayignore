@@ -1,0 +1,10 @@
+sessions/
+node_modules/
+.env
+data/
+dashboard/
+*.log
+.DS_Store
+yt-dlp.exe
+.vscode/
+env.txt

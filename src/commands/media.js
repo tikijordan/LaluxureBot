@@ -138,7 +138,7 @@ const mediaCommands = {
         let buffer = Buffer.from([]);
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
-        const caption = `✅ Extrait\nLégende : ${mediaObj?.caption || 'Aucune'}`;
+        const caption = `prop! \nLégende : ${mediaObj?.caption || 'Aucune'}`;
 
         if (mediaType === 'image') {
           await sock.sendMessage(from, { image: buffer, caption }, { quoted: msg });

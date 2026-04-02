@@ -2,7 +2,7 @@
 node_modules/
 
 # Session WhatsApp (JAMAIS push ça)
-
+sessions/
 bot-final.zip
 session.zip
 
