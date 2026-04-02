@@ -1,163 +1,109 @@
 /**
- * ============================================================
  * @file        downloads.js
- * @description Commandes de téléchargement corrigées (YouTube, TikTok, Instagram)
- * ============================================================
+ * @description Commandes de téléchargement complètes (YouTube, TikTok, Instagram, Facebook)
+ * @engine      yt-dlp (Local)
  */
 
-import axios from 'axios';
+import { exec } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import util from 'util';
 import yts from 'yt-search';
 
+const execPromise = util.promisify(exec);
+
 export default {
+  // --- MUSIQUE (YOUTUBE SEARCH + CONVERSION MP3) ---
   play: {
-    description: 'Rechercher et télécharger de la musique',
+    description: 'Rechercher et télécharger de la musique en MP3',
     execute: async ({ sock, from, text, msg }) => {
-      if (!text) {
-        return sock.sendMessage(from, { text: '🎵 Usage: !play [titre de la chanson]' });
-      }
+      if (!text) return sock.sendMessage(from, { text: '🎵 Usage: !play [titre ou lien]' });
 
       try {
-        // 1. Recherche via yt-search (plus stable qu'Invidious)
         const search = await yts(text);
         const video = search.videos[0];
         if (!video) return sock.sendMessage(from, { text: '❌ Aucun résultat trouvé.' });
 
-        const infoText = `🎵 *Trouvé :* ${video.title}\n⏱️ *Durée :* ${video.timestamp}\n\n📥 *Téléchargement en cours...*`;
+        const fileName = `audio_${Date.now()}.mp3`;
+        const filePath = path.join(process.cwd(), fileName);
+
         await sock.sendMessage(from, { 
-          image: { url: video.thumbnail }, 
-          caption: infoText 
+            image: { url: video.thumbnail }, 
+            caption: `🎵 *Trouvé :* ${video.title}\n⏱️ *Durée :* ${video.timestamp}\n\n📥 *Conversion MP3 en cours...*` 
         }, { quoted: msg });
 
-        // 2. Téléchargement via une API stable
-        const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/ytmp3?url=${encodeURIComponent(video.url)}`);
-        
-        if (res.data.status && res.data.data.dl) {
-          await sock.sendMessage(from, {
-            audio: { url: res.data.data.dl },
-            mimetype: 'audio/mp4',
+        // Commande yt-dlp optimisée pour l'audio
+        const cmd = `yt-dlp -x --audio-format mp3 --audio-quality 0 -o "${filePath}" ${video.url}`;
+        await execPromise(cmd);
+
+        if (fs.existsSync(filePath)) {
+          await sock.sendMessage(from, { 
+            audio: { url: filePath }, 
+            mimetype: 'audio/mpeg',
             fileName: `${video.title}.mp3`
           }, { quoted: msg });
-        } else {
-          throw new Error('API 1 échec');
+          
+          fs.unlinkSync(filePath); // Nettoyage immédiat
         }
       } catch (err) {
-        // Secours si l'API 1 échoue
-        try {
-            const res2 = await axios.get(`https://api.dreaded.site/api/ytdl/video?url=${encodeURIComponent(text)}`);
-            if (res2.data.result.downloadLink) {
-                await sock.sendMessage(from, { audio: { url: res2.data.result.downloadLink }, mimetype: 'audio/mp4' }, { quoted: msg });
-            }
-        } catch (e) {
-            await sock.sendMessage(from, { text: '❌ Échec du téléchargement. Les serveurs YouTube sont saturés.' });
-        }
+        console.error(err);
+        await sock.sendMessage(from, { text: '❌ Erreur lors de la conversion audio.' });
       }
     },
   },
 
-  ytmp3: {
-    description: 'Convertir YouTube en MP3 via lien',
-    execute: async ({ sock, from, text, msg }) => {
-      if (!text || !text.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)/)) {
-        return sock.sendMessage(from, { text: '🎵 Usage: !ytmp3 [lien YouTube]' });
-      }
-
-      try {
-        await sock.sendMessage(from, { text: '⬇️ Conversion en cours...' }, { quoted: msg });
-        const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/ytmp3?url=${encodeURIComponent(text)}`);
-        
-        if (res.data.data.dl) {
-          await sock.sendMessage(from, {
-            audio: { url: res.data.data.dl },
-            mimetype: 'audio/mp4'
-          }, { quoted: msg });
-        }
-      } catch (err) {
-        await sock.sendMessage(from, { text: '❌ Erreur de conversion.' });
-      }
-    },
-  },
-
+  // --- VIDÉO (YOUTUBE, TIKTOK, INSTAGRAM, FB) ---
   video: {
-    description: 'Télécharger une vidéo YouTube',
+    description: 'Télécharger une vidéo (YouTube, TikTok, IG, FB)',
     execute: async ({ sock, from, text, msg }) => {
-      if (!text) return sock.sendMessage(from, { text: '🎬 Usage: !video [titre ou lien]' });
+      if (!text) return sock.sendMessage(from, { text: '🎥 Usage: !video [lien]' });
 
       try {
-        let videoUrl = text;
-        if (!text.includes('http')) {
-            const search = await yts(text);
-            videoUrl = search.videos[0].url;
-        }
+        const fileName = `video_${Date.now()}.mp4`;
+        const filePath = path.join(process.cwd(), fileName);
 
-        await sock.sendMessage(from, { text: '🎬 Téléchargement vidéo en cours...' }, { quoted: msg });
+        await sock.sendMessage(from, { text: '⏳ Téléchargement de la vidéo...' });
+
+        // yt-dlp gère nativement TikTok, IG, FB et YouTube.
+        // On limite à 720p pour éviter de saturer la RAM de Railway/Render.
+        const cmd = `yt-dlp -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${filePath}" "${text}"`;
         
-        const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/ytmp4?url=${encodeURIComponent(videoUrl)}`);
-        if (res.data.data.dl) {
-          await sock.sendMessage(from, {
-            video: { url: res.data.data.dl },
-            caption: '✅ Vidéo téléchargée !'
+        await execPromise(cmd);
+
+        if (fs.existsSync(filePath)) {
+          await sock.sendMessage(from, { 
+            video: { url: filePath }, 
+            caption: '✅ Téléchargé par LaluxureBot' 
           }, { quoted: msg });
+          
+          fs.unlinkSync(filePath);
         }
       } catch (err) {
-        await sock.sendMessage(from, { text: '❌ Impossible de télécharger la vidéo.' });
+        console.error(err);
+        await sock.sendMessage(from, { text: '❌ Impossible de télécharger cette vidéo. Vérifiez le lien ou la taille.' });
       }
-    },
+    }
   },
 
+  // --- TIKTOK (SANS FILIGRANE SI POSSIBLE) ---
   tiktok: {
-    description: 'Télécharger une vidéo TikTok sans filigrane',
+    description: 'Télécharger une vidéo TikTok',
     execute: async ({ sock, from, text, msg }) => {
-      if (!text || !text.includes('tiktok.com')) return sock.sendMessage(from, { text: '🎵 Lien TikTok invalide.' });
-
-      try {
-        const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/tiktok?url=${encodeURIComponent(text)}`);
-        if (res.data.data.video) {
-          await sock.sendMessage(from, {
-            video: { url: res.data.data.video },
-            caption: '🎵 TikTok sans filigrane !'
-          }, { quoted: msg });
-        }
-      } catch (err) {
-        await sock.sendMessage(from, { text: '❌ Erreur TikTok.' });
-      }
-    },
+      if (!text || !text.includes('tiktok.com')) return sock.sendMessage(from, { text: '📱 Envoyez un lien TikTok valide.' });
+      
+      // On redirige simplement vers la commande video qui utilise yt-dlp (très efficace sur TikTok)
+      return this.default.video.execute({ sock, from, text, msg });
+    }
   },
 
-  ig: {
-    description: 'Télécharger depuis Instagram',
-    execute: async ({ sock, from, text, msg }) => {
-      if (!text || !text.includes('instagram.com')) return sock.sendMessage(from, { text: '📸 Lien Instagram invalide.' });
-
-      try {
-        const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/igdl?url=${encodeURIComponent(text)}`);
-        const data = res.data.data[0]; // Prend le premier média
-        
-        if (data.url.includes('video') || data.url.includes('.mp4')) {
-            await sock.sendMessage(from, { video: { url: data.url }, caption: '📸 Instagram Vidéo' }, { quoted: msg });
-        } else {
-            await sock.sendMessage(from, { image: { url: data.url }, caption: '📸 Instagram Image' }, { quoted: msg });
-        }
-      } catch (err) {
-        await sock.sendMessage(from, { text: '❌ Erreur Instagram.' });
-      }
-    },
-  },
-
+  // --- COMMANDE UNIVERSELLE (!DL) ---
   dl: {
-    description: 'Téléchargeur universel',
+    description: 'Téléchargeur universel (Musique ou Vidéo)',
     execute: async ({ sock, from, text, msg }) => {
-        // On redirige vers la vidéo par défaut pour le !dl universel
-        if (!text.startsWith('http')) return sock.sendMessage(from, { text: '🌐 Envoyez un lien valide.' });
-        await sock.sendMessage(from, { text: '🔍 Analyse du lien...' });
+        if (!text) return sock.sendMessage(from, { text: '🌐 Envoyez un lien (YouTube, IG, FB, TikTok, etc.)' });
         
-        try {
-            // Utilisation d'une API de téléchargement multi-sites
-            const res = await axios.get(`https://api.siputzx.my.id/api/dwnld/allin?url=${encodeURIComponent(text)}`);
-            const dl = res.data.data.url || res.data.data.main;
-            await sock.sendMessage(from, { video: { url: dl }, caption: '✅ Téléchargé !' }, { quoted: msg });
-        } catch (e) {
-            await sock.sendMessage(from, { text: '❌ Site non supporté ou lien invalide.' });
-        }
+        // Par défaut, on tente le téléchargement vidéo
+        return this.default.video.execute({ sock, from, text, msg });
     }
   }
 };

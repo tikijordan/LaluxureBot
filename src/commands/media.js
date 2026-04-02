@@ -129,7 +129,7 @@ const mediaCommands = {
       const mediaObj  = innerMsg[type];
       const mediaType = type.replace('Message', ''); // 'image' | 'video' | 'audio'
 
-      await sock.sendMessage(from, { text: '🔄 Extraction en cours...' });
+      await sock.sendMessage(from, { text: 'wait la magie opere' });
 
       try {
         // Téléchargement direct — même logique que extract.js :
