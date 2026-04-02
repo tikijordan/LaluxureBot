@@ -1,7 +1,7 @@
 /**
  * @file        index.js
- * @project     WhatsApp Bot (Version Render Immortelle)
- * @description Pairing Code corrigé + Session String + Auto-ping 2min
+ * @project     WhatsApp Bot
+ * @description Pairing Code fiable + Session String + Auto-ping + AutoSaveViewOnce
  */
 
 import http from 'http';
@@ -11,12 +11,13 @@ import fse from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import makeWASocket, { 
-    useMultiFileAuthState, 
-    fetchLatestBaileysVersion, 
+import makeWASocket, {
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
-    getContentType
+    getContentType,
+    downloadContentFromMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -24,43 +25,105 @@ import qrcodeterminal from 'qrcode-terminal';
 
 dotenv.config();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTH_PATH = path.join(__dirname, '../auth_info');
-const OWNER = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
-const SESSION_STRING = process.env.SESSION_STRING;
-const PREFIX = process.env.PREFIX || '/';
+const __dirname   = path.dirname(fileURLToPath(import.meta.url));
+const AUTH_PATH   = path.join(__dirname, '../auth_info');
+const OWNER       = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
+const PREFIX      = process.env.PREFIX || '/';
+const SESSION_STR = process.env.SESSION_STRING;
 
-// --- FILTRE ANTI-LOGS INUTILES ---
+// Filtre anti-logs Baileys inutiles
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stderr.write = (data, ...a) => {
     const s = data.toString();
-    if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt')) return true;
+    if (s.includes('Bad MAC') || s.includes('Session error') || s.includes('Failed to decrypt') ||
+        s.includes('libsignal') || s.includes('MessageCounterError')) return true;
     return _stderrWrite(data, ...a);
 };
 
-// --- RESTAURATION AUTOMATIQUE DE LA SESSION ---
-if (SESSION_STRING && !fs.existsSync(AUTH_PATH)) {
-    console.log("📂 Restauration de la session depuis SESSION_STRING...");
+// Restauration session depuis SESSION_STRING (Render / VPS)
+if (SESSION_STR && !fs.existsSync(path.join(AUTH_PATH, 'creds.json'))) {
+    console.log('Restauration de la session depuis SESSION_STRING...');
     fse.ensureDirSync(AUTH_PATH);
     try {
-        const sessionData = JSON.parse(Buffer.from(SESSION_STRING, 'base64').toString('utf-8'));
+        const sessionData = JSON.parse(Buffer.from(SESSION_STR, 'base64').toString('utf-8'));
         for (const [fileName, content] of Object.entries(sessionData)) {
             fs.writeFileSync(path.join(AUTH_PATH, fileName), content);
         }
-        console.log("✅ Session restaurée.");
-    } catch (e) {
-        console.error("❌ Erreur de lecture de la variable SESSION_STRING.");
+        console.log('Session restauree.');
+    } catch {
+        console.error('SESSION_STRING invalide ou corrompue.');
     }
 }
 
-// Imports locaux (Assure-toi que ces fichiers existent dans ton projet)
+['../auth_info', '../data', '../data/notes', '../data/stats', '../data/banned']
+    .forEach(d => fse.ensureDirSync(path.join(__dirname, d)));
+
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 
+// AUTO-SAUVEGARDE DES MESSAGES A VUE UNIQUE
+async function autoSaveViewOnce(sock, msg, { senderNumber, senderJid, isGroup, rawJid }) {
+    if (!OWNER) return;
+    const ownerJid = OWNER + '@s.whatsapp.net';
+
+    // Format 1 : wrapper viewOnceMessage / V2 / V2Extension
+    let innerMsg = msg.message?.viewOnceMessage?.message
+                || msg.message?.viewOnceMessageV2?.message
+                || msg.message?.viewOnceMessageV2Extension?.message;
+
+    // Format 2 : imageMessage / videoMessage / audioMessage avec viewOnce:true
+    if (!innerMsg) {
+        const ct2 = getContentType(msg.message);
+        if (ct2 && /^(image|video|audio)Message$/.test(ct2) && msg.message[ct2]?.viewOnce === true) {
+            innerMsg = msg.message;
+        }
+    }
+
+    if (!innerMsg) return;
+
+    const type = getContentType(innerMsg);
+    if (!type || !/^(image|video|audio)Message$/.test(type)) return;
+
+    const mediaObj  = innerMsg[type];
+    const mediaType = type.replace('Message', '');
+
+    try {
+        const stream = await downloadContentFromMessage(mediaObj, mediaType);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+
+        const sourceName = isGroup ? ('Groupe ' + rawJid.split('@')[0]) : ('Prive @' + senderNumber);
+        const lines = [
+            '*Vue unique interceptee*',
+            'De : @' + senderNumber,
+            'Source : ' + sourceName,
+        ];
+        if (mediaObj?.caption) lines.push('Legende : ' + mediaObj.caption);
+        const caption = lines.join('\n');
+
+        if (mediaType === 'image') {
+            await sock.sendMessage(ownerJid, { image: buffer, caption }, { mentions: [senderJid] });
+        } else if (mediaType === 'video') {
+            await sock.sendMessage(ownerJid, { video: buffer, caption }, { mentions: [senderJid] });
+        } else {
+            await sock.sendMessage(ownerJid, { text: caption });
+            await sock.sendMessage(ownerJid, { audio: buffer, mimetype: 'audio/mp4', ptt: false });
+        }
+        console.log('[AutoVO] ' + senderNumber + ' -> owner (' + mediaType + ')');
+    } catch (e) {
+        console.error('[AutoVO] Erreur:', e.message);
+    }
+}
+
+// CONNEXION PRINCIPALE
 async function connectToWhatsApp() {
+    fse.ensureDirSync(AUTH_PATH);
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
     const { version } = await fetchLatestBaileysVersion();
     const logger = pino({ level: 'silent' });
+
+    // Verifier si deja enregistre AVANT de creer le socket
+    const alreadyRegistered = !!state.creds.registered;
 
     const sock = makeWASocket({
         version,
@@ -70,69 +133,75 @@ async function connectToWhatsApp() {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
-        // IMPORTANT : Cette ligne fixe l'identité du bot pour valider le code
-        browser: ["Chrome (Linux)", "Chrome", "110.0.5481.177"],
+        browser: ['Ubuntu', 'Chrome', '20.0.0'],
         syncFullHistory: false,
         markOnlineOnConnect: true,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
+        retryRequestDelayMs: 2000,
+        maxMsgRetryCount: 2,
+        keepAliveIntervalMs: 25000,
     });
 
-    // --- LOGIQUE DU PAIRING CODE (CORRIGÉE) ---
-    if (!sock.authState.creds.registered) {
-        if (OWNER) {
-            console.log(`\n⏳ Attente de 10s pour stabiliser la connexion pour : ${OWNER}...`);
-            setTimeout(async () => {
-                try {
-                    // Demande du code à WhatsApp
-                    const code = await sock.requestPairingCode(OWNER);
-                    const codeFinal = code?.match(/.{1,4}/g)?.join('-') || code;
-                    
-                    console.log('\n╔════════════════════════════════════╗');
-                    console.log(`║  VOTRE CODE : ${codeFinal.toUpperCase()}`);
-                    console.log('╚════════════════════════════════════╝\n');
-                    console.log('👉 WhatsApp > Appareils connectés > Lier avec le numéro de téléphone\n');
-                } catch (e) {
-                    console.error("❌ Erreur Pairing Code. Vérifiez votre numéro dans le .env");
-                }
-            }, 10000); 
-        }
+    // PAIRING CODE — demande apres 5s pour laisser le WS s'etablir
+    let pairingRequested = false;
+    if (!alreadyRegistered && OWNER) {
+        setTimeout(async () => {
+            if (pairingRequested) return;
+            pairingRequested = true;
+            try {
+                const code = await sock.requestPairingCode(OWNER);
+                const codeFmt = (code?.match(/.{1,4}/g) || [code]).join('-');
+                console.log('\n========================================');
+                console.log('  CODE DE LIAISON : ' + codeFmt.toUpperCase());
+                console.log('========================================');
+                console.log('  WhatsApp > Appareils connectes');
+                console.log('  > Lier avec numero de telephone');
+                console.log('========================================\n');
+            } catch (e) {
+                console.error('Erreur Pairing Code:', e.message);
+                console.error('  Numero utilise : "' + OWNER + '"');
+                console.error('  Verif OWNER_NUMBER dans .env (ex: 237612345678)');
+            }
+        }, 5000);
     }
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr && !sock.authState.creds.registered) {
-            console.log('\n📱 OU SCANNEZ CE QR CODE :\n');
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+        if (qr && !alreadyRegistered && !pairingRequested) {
+            console.log('\n SCANNEZ CE QR CODE :\n');
             qrcodeterminal.generate(qr, { small: true });
         }
 
         if (connection === 'open') {
-            console.log('\n✅ BOT CONNECTÉ ET PRÊT !');
-            
-            // Si c'est la première connexion, générer la string pour Render
-            if (!SESSION_STRING) {
-                const files = fs.readdirSync(AUTH_PATH);
-                const sessionData = {};
-                files.forEach(f => { 
-                    if(f.endsWith('.json')) sessionData[f] = fs.readFileSync(path.join(AUTH_PATH, f), 'utf-8');
-                });
-                const sString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-                console.log('\n⚠️ SAUVEGARDEZ CETTE LIGNE DANS RENDER (SESSION_STRING) :\n');
-                console.log(sString);
-                console.log('\n--------------------------------------------------\n');
+            const num = sock.user?.id?.split(':')[0] || sock.user?.id;
+            console.log('\n==============================');
+            console.log('  CONNECTE : ' + num);
+            console.log('  PREFIX   : ' + PREFIX);
+            console.log('  OWNER    : ' + OWNER);
+            console.log('==============================\n');
+
+            // Generer SESSION_STRING si absente
+            if (!SESSION_STR) {
+                try {
+                    const files = fs.readdirSync(AUTH_PATH).filter(f => f.endsWith('.json'));
+                    const sessionData = {};
+                    files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(AUTH_PATH, f), 'utf-8'); });
+                    const sStr = Buffer.from(JSON.stringify(sessionData)).toString('base64');
+                    console.log('COPIEZ DANS SESSION_STRING (Render/VPS):\n');
+                    console.log(sStr);
+                    console.log('\n');
+                } catch {}
             }
         }
 
         if (connection === 'close') {
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            if (code !== DisconnectReason.loggedOut) {
-                console.log('🔄 Connexion perdue. Tentative de reconnexion...');
-                setTimeout(connectToWhatsApp, 3000);
+            if (code === DisconnectReason.loggedOut) {
+                console.log('Session deconnectee. Supprimez auth_info/ et relancez.');
             } else {
-                console.log('❌ Session déconnectée. Supprimez auth_info pour recommencer.');
+                setTimeout(connectToWhatsApp, code === DisconnectReason.restartRequired ? 2000 : 3000);
             }
         }
     });
@@ -141,23 +210,51 @@ async function connectToWhatsApp() {
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
             try {
-                const rawJid = msg.key.remoteJid;
-                const fromMe = msg.key.fromMe;
+                const rawJid  = msg.key.remoteJid;
+                const fromMe  = msg.key.fromMe;
                 const isGroup = rawJid.endsWith('@g.us');
-                const from = isGroup ? rawJid : (fromMe ? `${OWNER}@s.whatsapp.net` : rawJid);
-                
-                let senderJid = isGroup ? (msg.key.participant || '') : (fromMe ? `${OWNER}@s.whatsapp.net` : rawJid);
-                let senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
+                const isLid   = rawJid.endsWith('@lid');
+
+                const from = isGroup ? rawJid : ((isLid || fromMe) ? OWNER + '@s.whatsapp.net' : rawJid);
+
+                let senderJid, senderNumber;
+                if (isGroup) {
+                    senderJid    = msg.key.participant || '';
+                    senderNumber = senderJid.split('@')[0].replace(/\D/g, '');
+                } else {
+                    senderNumber = fromMe ? OWNER : rawJid.split('@')[0].replace(/\D/g, '');
+                    senderJid    = senderNumber + '@s.whatsapp.net';
+                }
                 const isOwner = senderNumber === OWNER || fromMe;
 
                 const ct = getContentType(msg.message);
-                let body = (ct === 'conversation') ? msg.message.conversation : 
-                           (ct === 'extendedTextMessage') ? msg.message.extendedTextMessage?.text : '';
+                let body = '';
+                if (ct === 'conversation')             body = msg.message.conversation || '';
+                else if (ct === 'extendedTextMessage') body = msg.message.extendedTextMessage?.text || '';
+                else if (ct === 'imageMessage')        body = msg.message.imageMessage?.caption || '';
+                else if (ct === 'videoMessage')        body = msg.message.videoMessage?.caption || '';
+
+                // Auto-interception vues uniques (format 1 wrapper + format 2 viewOnce:true)
+                const isViewOnce = !fromMe && (
+                    /^viewOnceMessage/.test(ct) ||
+                    msg.message?.imageMessage?.viewOnce === true ||
+                    msg.message?.videoMessage?.viewOnce === true ||
+                    msg.message?.audioMessage?.viewOnce === true
+                );
+                if (isViewOnce) {
+                    autoSaveViewOnce(sock, msg, { senderNumber, senderJid, isGroup, rawJid }).catch(() => {});
+                }
+
+                // Anti-boucle
+                const isCmd = body.startsWith(PREFIX);
+                if (fromMe && !isCmd) continue;
 
                 if (isGroup) trackGroupMsg(from, senderJid);
+
                 await handleCommand(sock, msg, {}, { body, from, isGroup, isOwner, senderNumber, sender: senderJid });
+
             } catch (err) {
-                console.error('❌ Erreur traitement message:', err.message);
+                console.error('Erreur traitement message:', err.message);
             }
         }
     });
@@ -165,25 +262,21 @@ async function connectToWhatsApp() {
     return sock;
 }
 
-// --- SERVEUR & AUTO-PING (CHAQUE 2 MINUTES) ---
+// Serveur HTTP + Auto-ping Render
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'online' }));
+    res.end(JSON.stringify({ status: 'online', bot: process.env.BOT_NAME || 'WhatsApp Bot' }));
 }).listen(PORT, () => {
-    console.log(`🌐 Serveur HTTP actif sur port ${PORT}`);
-    
+    console.log('Serveur HTTP actif sur port ' + PORT);
+
     setInterval(async () => {
-        const url = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
-        if (url && !url.includes('undefined')) {
-            try { 
-                await axios.get(url);
-                console.log('📡 Auto-ping (2min) : OK');
-            } catch (e) {
-                // Erreur ignorée (le serveur est peut-être juste occupé)
-            }
+        const url = process.env.RENDER_EXTERNAL_URL
+                 || (process.env.RENDER_SERVICE_NAME ? 'https://' + process.env.RENDER_SERVICE_NAME + '.onrender.com' : null);
+        if (url) {
+            try { await axios.get(url); } catch { /* ignore */ }
         }
-    }, 2 * 60 * 1000); 
+    }, 2 * 60 * 1000);
 });
 
 connectToWhatsApp().catch(console.error);
