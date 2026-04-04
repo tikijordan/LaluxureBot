@@ -100,7 +100,7 @@ const mediaCommands = {
   },
 
   // --- COMMANDE VIEWONCE (Extraction) ---
-  viewonce: {
+  vo: {
     description: 'Extrait un média à vue unique.',
     execute: async ({ sock, msg, from }) => {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -157,6 +157,6 @@ const mediaCommands = {
 
 // Ajout des alias
 mediaCommands.s = mediaCommands.sticker;
-mediaCommands.vo = mediaCommands.viewonce;
+mediaCommands.jolie = mediaCommands.vo;
 
 export default mediaCommands;

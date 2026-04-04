@@ -2,737 +2,428 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bot Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp Bot — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@300;500;700;900&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg:       #0a0a0f;
-    --surface:  #111118;
-    --surface2: #16161f;
-    --border:   #1e1e2e;
-    --accent:   #25d366;
-    --accent2:  #128c7e;
-    --danger:   #ff4757;
-    --warn:     #ffa502;
-    --text:     #e8e8f0;
-    --muted:    #5a5a7a;
-    --mono:     'Space Mono', monospace;
-    --sans:     'Syne', sans-serif;
-    --radius:   12px;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
-
-  /* ── Login ──────────────────────────────────────────── */
-  #login-screen {
-    position: fixed; inset: 0;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--bg); z-index: 100;
-    flex-direction: column; gap: 24px;
-  }
-  #login-screen h1 {
-    font-size: 2rem; font-weight: 800;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  }
-  #login-screen p { color: var(--muted); font-family: var(--mono); font-size: .8rem; }
-  .login-box {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 32px;
-    width: 340px; display: flex; flex-direction: column; gap: 16px;
-  }
-  .login-box input {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 12px 16px;
-    color: var(--text); font-family: var(--mono); font-size: .9rem;
-    width: 100%; outline: none; transition: border-color .2s;
-  }
-  .login-box input:focus { border-color: var(--accent); }
-  .login-box .err { color: var(--danger); font-size: .8rem; font-family: var(--mono); display: none; }
-
-  /* ── App ────────────────────────────────────────────── */
-  #app { display: none; flex-direction: column; min-height: 100vh; }
-
-  header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 28px; border-bottom: 1px solid var(--border);
-    background: var(--surface); position: sticky; top: 0; z-index: 10;
-  }
-  .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.1rem; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s infinite; }
-  .dot.offline   { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: none; }
-  .dot.connecting { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-
-  .header-right { display: flex; align-items: center; gap: 12px; }
-  .status-badge { font-family: var(--mono); font-size: .72rem; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--accent); color: var(--accent); background: rgba(37,211,102,.08); }
-  .status-badge.offline { border-color: var(--danger); color: var(--danger); background: rgba(255,71,87,.08); }
-  .status-badge.connecting { border-color: var(--warn); color: var(--warn); background: rgba(255,165,2,.08); }
-
-  main { flex:1; padding: 28px; max-width: 1280px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 28px; }
-
-  .section-title { font-size: .7rem; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
-
-  /* ── Stat Cards ────────────────────────────────────── */
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
-  .card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 20px;
-    display: flex; flex-direction: column; gap: 8px;
-    transition: border-color .2s, transform .15s;
-  }
-  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
-  .card .label { font-size: .68rem; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
-  .card .value { font-size: 1.7rem; font-weight: 800; line-height: 1; }
-  .card .sub   { font-size: .72rem; color: var(--muted); font-family: var(--mono); }
-  .card.accent { border-color: rgba(37,211,102,.25); }
-  .card.accent .value { color: var(--accent); }
-
-  /* ── Session Grid ──────────────────────────────────── */
-  .sessions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-
-  .session-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); overflow: hidden;
-    display: flex; flex-direction: column;
-    transition: border-color .2s, transform .15s;
-  }
-  .session-card:hover { border-color: rgba(37,211,102,.3); transform: translateY(-2px); }
-  .session-card.connected { border-color: rgba(37,211,102,.3); }
-  .session-card.connecting { border-color: rgba(255,165,2,.3); }
-  .session-card.offline    { border-color: rgba(255,71,87,.2); }
-
-  .sc-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 14px 16px; border-bottom: 1px solid var(--border);
-    background: var(--surface2);
-  }
-  .sc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .sc-dot.connected  { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 2s infinite; }
-  .sc-dot.connecting { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
-  .sc-dot.offline    { background: var(--danger); }
-  .sc-name { font-weight: 700; font-size: .9rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sc-id   { font-family: var(--mono); font-size: .65rem; color: var(--muted); }
-
-  .sc-body { padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 12px; }
-
-  .sc-number {
-    font-family: var(--mono); font-size: .85rem; color: var(--accent);
-    background: rgba(37,211,102,.06); border: 1px solid rgba(37,211,102,.15);
-    padding: 6px 10px; border-radius: 6px;
-  }
-  .sc-number.none { color: var(--muted); background: transparent; border-color: var(--border); }
-
-  .sc-qr {
-    display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 8px 0;
-  }
-  .sc-qr img { width: 160px; height: 160px; border-radius: 8px; display: block; }
-  .sc-qr .qr-hint { font-family: var(--mono); font-size: .68rem; color: var(--muted); text-align: center; }
-
-  .sc-stats { display: flex; gap: 8px; }
-  .sc-stat  { flex: 1; text-align: center; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 4px; min-width: 0; }
-  .sc-stat .sv { font-weight: 700; font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sc-stat .sk { font-family: var(--mono); font-size: .62rem; color: var(--muted); text-transform: uppercase; }
-
-  .sc-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
-
-  /* ── Panels ────────────────────────────────────────── */
-  .panels-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media(max-width:800px){ .panels-row { grid-template-columns: 1fr; } }
-
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-
-  /* Tabs */
-  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-  .tab { font-family: var(--mono); font-size: .72rem; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; color: var(--muted); background: transparent; transition: all .15s; }
-  .tab.active { background: rgba(37,211,102,.1); border-color: rgba(37,211,102,.3); color: var(--accent); }
-  .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
-
-  /* Feed */
-  .feed { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
-  .feed-item { display: flex; gap: 10px; align-items: center; padding: 6px 10px; border-radius: 6px; background: var(--bg); }
-  .feed-cmd  { font-family: var(--mono); font-size: .78rem; color: var(--accent); min-width: 80px; }
-  .feed-user { font-family: var(--mono); font-size: .72rem; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .feed-time { font-family: var(--mono); font-size: .68rem; color: var(--border); }
-  .feed-sess { font-size: .65rem; color: var(--warn); font-family: var(--mono); }
-
-  /* Top Commands */
-  .cmd-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
-  .cmd-name { font-family: var(--mono); font-size: .78rem; width: 110px; flex-shrink: 0; }
-  .cmd-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
-  .cmd-fill  { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 3px; transition: width .5s; }
-  .cmd-count { font-family: var(--mono); font-size: .72rem; color: var(--muted); width: 36px; text-align: right; }
-
-  /* Users Table */
-  .users-wrap { overflow-x: auto; max-height: 260px; overflow-y: auto; }
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .75rem; }
-  th { color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-size: .65rem; padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
-  td { padding: 8px 10px; border-bottom: 1px solid rgba(30,30,46,.5); }
-  td.num { color: var(--muted); }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(37,211,102,.03); }
-
-  /* Buttons */
-  .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
-  button { font-family: var(--sans); font-weight: 600; font-size: .78rem; padding: 7px 14px; border-radius: 7px; border: none; cursor: pointer; transition: all .15s; display: inline-flex; align-items: center; gap: 5px; }
-  .btn-primary { background: var(--accent); color: #000; }
-  .btn-primary:hover { background: #1fb858; transform: translateY(-1px); }
-  .btn-danger  { background: rgba(255,71,87,.12); color: var(--danger); border: 1px solid rgba(255,71,87,.25); }
-  .btn-danger:hover { background: rgba(255,71,87,.22); }
-  .btn-ghost   { background: var(--border); color: var(--text); }
-  .btn-ghost:hover { background: #2a2a3e; }
-  .btn-warn    { background: rgba(255,165,2,.1); color: var(--warn); border: 1px solid rgba(255,165,2,.2); }
-  .btn-warn:hover { background: rgba(255,165,2,.2); }
-  button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; }
-
-  /* Send form */
-  .send-form { display: flex; flex-direction: column; gap: 10px; }
-  .send-form select, .send-form input, .send-form textarea {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 14px; color: var(--text); font-family: var(--mono);
-    font-size: .85rem; width: 100%; outline: none; transition: border-color .2s;
-  }
-  .send-form select:focus, .send-form input:focus, .send-form textarea:focus { border-color: var(--accent); }
-  .send-form textarea { resize: vertical; min-height: 80px; }
-  .send-result { padding: 10px 14px; border-radius: 8px; font-family: var(--mono); font-size: .8rem; display: none; }
-  .send-result.ok  { background: rgba(37,211,102,.1); color: var(--accent); border: 1px solid rgba(37,211,102,.2); }
-  .send-result.err { background: rgba(255,71,87,.1);  color: var(--danger); border: 1px solid rgba(255,71,87,.2); }
-
-  /* New session modal */
-  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 200; display: flex; align-items: center; justify-content: center; display: none; }
-  .modal-overlay.show { display: flex; }
-  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; width: 360px; display: flex; flex-direction: column; gap: 16px; }
-  .modal h2 { font-size: 1.1rem; font-weight: 800; }
-  .modal input { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-family: var(--mono); font-size: .85rem; width: 100%; outline: none; transition: border-color .2s; }
-  .modal input:focus { border-color: var(--accent); }
-  .modal p { font-size: .8rem; color: var(--muted); font-family: var(--mono); }
-
-  /* Toast */
-  #toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 10px; font-family: var(--mono); font-size: .82rem; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 999; }
-  #toast.show { opacity: 1; }
-  #toast.ok  { background: rgba(37,211,102,.15); color: var(--accent); border: 1px solid rgba(37,211,102,.3); }
-  #toast.err { background: rgba(255,71,87,.15);  color: var(--danger); border: 1px solid rgba(255,71,87,.3); }
-
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 4px; height: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+:root{--bg:#080b10;--s1:#0d1117;--s2:#161b24;--border:#21262d;--green:#25d366;--green2:#128c7e;--red:#f85149;--yellow:#e3b341;--blue:#58a6ff;--muted:#484f58;--text:#c9d1d9;--bright:#f0f6fc;--mono:'JetBrains Mono',monospace;--sans:'Outfit',sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);display:flex;flex-direction:column}
+#app{display:flex;flex-direction:column;height:100%}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0;gap:12px;flex-wrap:wrap}
+.logo{font-size:1.1rem;font-weight:900;color:var(--bright);letter-spacing:-0.5px;display:flex;align-items:center;gap:8px}
+.logo-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.header-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.main-layout{display:flex;flex:1;overflow:hidden}
+.sidebar{width:240px;background:var(--s1);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
+.content{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px}
+.sidebar-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.sidebar-head span{font-size:.72rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+#sessions-list{flex:1;overflow-y:auto;padding:8px}
+.sess-item{padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid transparent;margin-bottom:4px;transition:all .15s;position:relative}
+.sess-item:hover{background:var(--s2);border-color:var(--border)}
+.sess-item.active{background:var(--s2);border-color:var(--green)}
+.sess-item.active::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:60%;background:var(--green);border-radius:0 2px 2px 0}
+.sess-id{font-family:var(--mono);font-size:.78rem;color:var(--bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-status{display:flex;align-items:center;gap:5px;margin-top:3px}
+.sdot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.sdot.open{background:var(--green);box-shadow:0 0 5px var(--green)}
+.sdot.connecting{background:var(--yellow);animation:blink 1s infinite}
+.sdot.close{background:var(--muted)}
+.sess-label{font-size:.7rem;font-family:var(--mono);color:var(--muted)}
+.sess-empty{padding:20px;text-align:center;color:var(--muted);font-size:.8rem;font-family:var(--mono)}
+button{font-family:var(--sans);font-weight:500;cursor:pointer;border:none;border-radius:6px;padding:7px 14px;font-size:.82rem;transition:all .15s;display:inline-flex;align-items:center;gap:5px}
+.btn-green{background:var(--green);color:#000;font-weight:700}.btn-green:hover{background:#1fb858;transform:translateY(-1px)}
+.btn-red{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}.btn-red:hover{background:rgba(248,81,73,.25)}
+.btn-ghost{background:var(--s2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{border-color:var(--blue);color:var(--blue)}
+.btn-yellow{background:rgba(227,179,65,.15);color:var(--yellow);border:1px solid rgba(227,179,65,.3)}.btn-yellow:hover{background:rgba(227,179,65,.25)}
+button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+.card{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:14px;transition:border-color .2s}.card:hover{border-color:var(--green)}
+.card .lbl{font-size:.62rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px}
+.card .val{font-size:1.65rem;font-weight:900;color:var(--bright);line-height:1}
+.card .sub{font-size:.68rem;color:var(--muted);margin-top:4px;font-family:var(--mono)}
+.card.hi{border-color:rgba(37,211,102,.3)}.card.hi .val{color:var(--green)}
+.sec-title{font-size:.62rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:2px;margin-bottom:10px}
+.panel{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+.qr-zone{min-height:180px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px}
+.qr-zone img{width:160px;height:160px;border-radius:8px;image-rendering:pixelated}
+.qr-placeholder{width:160px;height:160px;border:1px dashed var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:.75rem;text-align:center;padding:12px}
+.qr-hint{font-family:var(--mono);font-size:.72rem;color:var(--muted);text-align:center}
+.pairing{font-family:var(--mono);font-size:1.7rem;font-weight:700;letter-spacing:5px;color:var(--green);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.2);padding:12px 18px;border-radius:8px}
+.irow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+.irow:last-child{border-bottom:none}
+.ikey{font-family:var(--mono);font-size:.72rem;color:var(--muted)}
+.ival{font-family:var(--mono);font-size:.8rem;color:var(--bright)}
+.feed{max-height:240px;overflow-y:auto}
+.feed::-webkit-scrollbar{width:3px}.feed::-webkit-scrollbar-thumb{background:var(--border)}
+.feed-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(33,38,45,.5)}
+.feed-row:last-child{border-bottom:none}
+.feed-cmd{background:rgba(37,211,102,.1);color:var(--green);font-family:var(--mono);font-size:.7rem;padding:2px 6px;border-radius:4px;white-space:nowrap}
+.feed-user{font-family:var(--mono);font-size:.72rem;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feed-time{font-family:var(--mono);font-size:.66rem;color:var(--muted);white-space:nowrap}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.bar-name{font-family:var(--mono);font-size:.72rem;width:85px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;background:linear-gradient(90deg,var(--green2),var(--green));border-radius:3px;transition:width .5s ease}
+.bar-num{font-family:var(--mono);font-size:.68rem;color:var(--muted);width:30px;text-align:right}
+.tbl{width:100%;border-collapse:collapse;font-size:.75rem}
+.tbl th{text-align:left;padding:6px 10px;font-family:var(--mono);font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border)}
+.tbl td{padding:8px 10px;border-bottom:1px solid rgba(33,38,45,.4);font-family:var(--mono)}
+.tbl tr:hover td{background:rgba(255,255,255,.02)}
+.tbl-wrap{overflow-x:auto;max-height:260px;overflow-y:auto}
+/* Terminal */
+.terminal{background:#050508;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.term-head{padding:8px 14px;background:var(--s2);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.term-dots{display:flex;gap:5px}
+.td2{width:10px;height:10px;border-radius:50%}
+.term-body{height:260px;overflow-y:auto;padding:10px 14px;font-family:var(--mono);font-size:.73rem;line-height:1.65}
+.term-body::-webkit-scrollbar{width:3px}.term-body::-webkit-scrollbar-thumb{background:var(--border)}
+.log-line{display:flex;gap:8px;margin-bottom:1px}
+.log-time{color:var(--muted);white-space:nowrap;flex-shrink:0}
+.log-msg.info{color:var(--text)}.log-msg.success{color:var(--green)}.log-msg.warn{color:var(--yellow)}.log-msg.error{color:var(--red)}
+/* Send form */
+.send-form{display:flex;flex-direction:column;gap:10px}
+.send-form input,.send-form textarea{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:.82rem;outline:none;width:100%;resize:none;transition:border-color .2s}
+.send-form input:focus,.send-form textarea:focus{border-color:var(--green)}
+.send-result{display:none;padding:7px 10px;border-radius:6px;font-family:var(--mono);font-size:.75rem}
+.send-result.ok{background:rgba(37,211,102,.1);color:var(--green)}.send-result.err{background:rgba(248,81,73,.1);color:var(--red)}
+/* Tabs */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:12px}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:7px 12px;font-family:var(--sans);font-size:.8rem;font-weight:500;margin-bottom:-1px;border-radius:0;cursor:pointer}
+.tab.active{color:var(--green);border-bottom-color:var(--green)}
+.tab-p{display:none}.tab-p.active{display:block}
+/* No session */
+.no-session{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:var(--muted);text-align:center}
+.no-session h2{color:var(--text);font-size:1.2rem;font-weight:700}
+.no-session p{font-family:var(--mono);font-size:.78rem;max-width:300px;line-height:1.6}
+/* Toast */
+#toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:8px;font-family:var(--mono);font-size:.78rem;background:var(--s2);border:1px solid var(--border);transform:translateY(60px);opacity:0;transition:all .25s;z-index:999;pointer-events:none}
+#toast.show{transform:none;opacity:1}
+#toast.ok{border-color:var(--green);color:var(--green)}
+#toast.err{border-color:var(--red);color:var(--red)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.68rem;font-family:var(--mono)}
+.badge.online{background:rgba(37,211,102,.15);color:var(--green)}
+.badge.offline{background:rgba(72,79,88,.3);color:var(--muted)}
+.badge.connecting{background:rgba(227,179,65,.15);color:var(--yellow)}
+@media(max-width:600px){.sidebar{display:none}}
 </style>
 </head>
 <body>
+<div id="app">
+  <header>
+    <div class="logo"><div class="logo-dot"></div>WhatsApp Bot</div>
+    <div class="header-right">
+      <span id="hdr-status" class="badge offline">Aucune session</span>
+      <button class="btn-ghost" onclick="refreshAll()">↻</button><button class="btn-ghost" style="color:#f85149" onclick="doLogout()">⏏ Déconnexion</button>
+    </div>
+  </header>
+  <div class="main-layout">
+    <div class="sidebar">
+      <div class="sidebar-head">
+        <span>Sessions</span>
+        <div style="display:flex;gap:4px">
+          <button class="btn-green" style="padding:4px 8px;font-size:.7rem" onclick="newSession()" id="btn-new" title="Nouvelle session QR">QR</button>
+          <button class="btn-ghost" style="padding:4px 8px;font-size:.7rem" onclick="showPairModal()" title="Connexion par code">📱</button>
+        </div>
+      </div>
+      <div id="sessions-list"><div class="sess-empty">Chargement...</div></div>
+    </div>
+    <div class="content" id="main-content">
+      <div class="no-session">
+        <div style="font-size:3rem">📱</div>
+        <h2>Aucune session</h2>
+        <p>Créez une nouvelle session ou sélectionnez-en une pour commencer.</p>
+        <button class="btn-green" onclick="newSession()">+ Créer une session</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
 
-<!-- ── Login ──────────────────────────────────────────────── -->
-<div id="login-screen">
-  <h1>⚡ Bot Dashboard</h1>
-  <p>Entrez votre token d'accès</p>
-  <div class="login-box">
-    <input id="token-input" type="password" placeholder="Token dashboard...">
-    <button class="btn-primary" onclick="doLogin()">Connexion</button>
-    <span class="err" id="login-err">Token invalide</span>
+<!-- Modal Pairing Code -->
+<div id="pair-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center">
+  <div style="background:var(--s1);border:1px solid var(--border);border-radius:14px;padding:28px;width:320px;display:flex;flex-direction:column;gap:14px">
+    <div style="font-weight:700;font-size:1rem;color:var(--bright)">📱 Connexion par code</div>
+    <div style="font-family:var(--mono);font-size:.75rem;color:var(--muted);line-height:1.5">
+      Entrez votre numéro WhatsApp avec l'indicatif pays (ex: 237612345678).<br>
+      Ouvrez WhatsApp → <strong>Appareils liés</strong> → <strong>Lier un appareil</strong> → <strong>Lier avec numéro</strong>.
+    </div>
+    <input type="tel" id="pair-phone" placeholder="Ex: 237612345678" style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:.85rem;outline:none;width:100%" oninput="this.style.borderColor='var(--green)'">
+    <div style="display:flex;gap:8px">
+      <button class="btn-green" style="flex:1" onclick="startPairing()">Obtenir le code</button>
+      <button class="btn-ghost" onclick="closePairModal()">Annuler</button>
+    </div>
+    <div id="pair-result" style="display:none;font-family:var(--mono);font-size:.8rem;padding:8px 12px;border-radius:6px"></div>
   </div>
 </div>
 
-<!-- ── App ────────────────────────────────────────────────── -->
-<div id="app">
-  <header>
-    <div class="logo">
-      <div class="dot" id="status-dot"></div>
-      <span id="bot-name">Bot WhatsApp</span>
-    </div>
-    <div class="header-right">
-      <span class="status-badge" id="status-badge">○ Déconnecté</span>
-      <span id="session-count" style="font-family:var(--mono);font-size:.72rem;color:var(--muted)">0 session(s)</span>
-    </div>
-  </header>
+<script>
+let currentSession=null,refreshInterval=null,logInterval=null,logIndex=0,allSessions=[];
 
-  <main>
-    <!-- ── Statistiques globales ── -->
+function startPolling(){
+  clearInterval(refreshInterval);clearInterval(logInterval);
+  refreshInterval=setInterval(refreshAll,4000);
+  logInterval=setInterval(pollLogs,2000);
+  refreshAll();pollLogs();
+}
+
+async function refreshAll(){
+  await refreshSessions();
+  if(currentSession) await refreshSession(currentSession);
+}
+
+async function refreshSessions(){
+  try{
+    const r=await api('/api/sessions');
+    allSessions=r.sessions||[];
+    renderSidebar();
+    const on=allSessions.filter(s=>s.connection==='open').length;
+    const hdr=document.getElementById('hdr-status');
+    hdr.textContent=on>0?`${on} connectée(s)`:allSessions.length>0?'En attente...':'Aucune session';
+    hdr.className='badge '+(on>0?'online':allSessions.length>0?'connecting':'offline');
+  }catch{}
+}
+
+async function refreshSession(id){
+  try{const s=await api(`/api/sessions/${encodeURIComponent(id)}`);renderMain(s);}catch{}
+}
+
+async function pollLogs(){
+  try{
+    const r=await api(`/api/logs?since=${logIndex}`);
+    if(r.logs&&r.logs.length>0){appendLogs(r.logs);logIndex=r.total;}
+  }catch{}
+}
+
+function renderSidebar(){
+  const el=document.getElementById('sessions-list');
+  if(allSessions.length===0){el.innerHTML='<div class="sess-empty">Aucune session.<br>Cliquez + Nouvelle.</div>';return;}
+  el.innerHTML=allSessions.map(s=>`
+    <div class="sess-item${currentSession===s.id?' active':''}" onclick="selectSession('${esc(s.id)}')">
+      <div class="sess-id">${esc(s.connectedNumber||s.id)}</div>
+      <div class="sess-status"><div class="sdot ${s.connection}"></div>
+      <span class="sess-label">${s.connection==='open'?'Connecté':s.connection==='connecting'?'Connexion...':'Déconnecté'}</span></div>
+    </div>`).join('');
+}
+
+function selectSession(id){
+  currentSession=id;renderSidebar();refreshSession(id);
+}
+
+function renderMain(s){
+  const mc=document.getElementById('main-content');
+  // Garder le terminal si déjà présent
+  const existingTerm=mc.querySelector('.terminal');
+  mc.innerHTML=`
     <div>
-      <div class="section-title">Statistiques globales</div>
+      <div class="sec-title">${esc(s.connectedNumber||s.id)}</div>
       <div class="cards">
-        <div class="card accent">
-          <div class="label">Commandes</div>
-          <div class="value" id="c-total">—</div>
-          <div class="sub">total historique</div>
-        </div>
-        <div class="card">
-          <div class="label">Utilisateurs</div>
-          <div class="value" id="c-users">—</div>
-          <div class="sub">uniques</div>
-        </div>
-        <div class="card">
-          <div class="label">Uptime</div>
-          <div class="value" id="c-uptime">—</div>
-          <div class="sub" id="c-uptime-raw">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Mémoire</div>
-          <div class="value" id="c-mem">—</div>
-          <div class="sub">Mo utilisés</div>
-        </div>
-        <div class="card">
-          <div class="label">Sessions</div>
-          <div class="value" id="c-sessions">—</div>
-          <div class="sub" id="c-sessions-active">actives</div>
-        </div>
-        <div class="card">
-          <div class="label">Node.js</div>
-          <div class="value" style="font-size:1rem;padding-top:4px" id="c-node">—</div>
-          <div class="sub">runtime</div>
-        </div>
+        <div class="card hi"><div class="lbl">Commandes</div><div class="val">${(s.totalCommands||0).toLocaleString()}</div><div class="sub">total</div></div>
+        <div class="card"><div class="lbl">Utilisateurs</div><div class="val">${(s.totalUsers||0).toLocaleString()}</div><div class="sub">uniques</div></div>
+        <div class="card"><div class="lbl">Messages</div><div class="val">${(s.messagesCount||0).toLocaleString()}</div><div class="sub">session</div></div>
+        <div class="card"><div class="lbl">Uptime</div><div class="val" style="font-size:1rem;padding-top:8px">${s.uptimeHuman||'—'}</div><div class="sub">${s.memory||'—'} MB</div></div>
+        <div class="card"><div class="lbl">Préfixe</div><div class="val" style="font-size:2.4rem">${esc(s.prefix||'!')}</div><div class="sub">Node ${esc(s.node||'')}</div></div>
       </div>
     </div>
-
-    <!-- ── Sessions ── -->
-    <div>
-      <div class="section-title">
-        <span>Sessions WhatsApp</span>
-        <button class="btn-primary" onclick="openNewSession()" style="font-size:.75rem;padding:6px 14px">＋ Nouvelle session</button>
+    <div class="grid2">
+      <div class="panel">
+        <div class="sec-title">Connexion</div>
+        <div class="qr-zone" id="qr-zone">${renderQR(s)}</div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn-yellow" onclick="restart('${esc(s.id)}')">↺ Relancer</button>
+          <button class="btn-red" onclick="logout('${esc(s.id)}')">⏏ Déconnecter</button>
+        </div>
+        <div style="margin-top:12px">
+          <div class="irow"><span class="ikey">Statut</span><span class="ival">${statusLabel(s.connection)}</span></div>
+          <div class="irow"><span class="ikey">Numéro</span><span class="ival">${esc(s.connectedNumber||'—')}</span></div>
+          <div class="irow"><span class="ikey">Dernier ping</span><span class="ival">${s.lastPing?new Date(s.lastPing).toLocaleTimeString('fr'):'—'}</span></div>
+        </div>
       </div>
-      <div class="sessions-grid" id="sessions-grid">
-        <div style="color:var(--muted);font-family:var(--mono);font-size:.8rem;padding:20px">Chargement...</div>
-      </div>
-    </div>
-
-    <!-- ── Activité & Stats ── -->
-    <div class="panels-row">
-      <!-- Activité récente -->
       <div class="panel">
         <div class="tabs">
-          <button class="tab active" onclick="switchTab('feed')">Activité récente</button>
-          <button class="tab" onclick="switchTab('send')">Envoyer message</button>
+          <button class="tab active" onclick="tab(this,'tp-act')">Activité</button>
+          <button class="tab" onclick="tab(this,'tp-top')">Top cmds</button>
+          <button class="tab" onclick="tab(this,'tp-users')">Utilisateurs</button>
+          <button class="tab" onclick="tab(this,'tp-send')">Envoyer</button>
         </div>
-        <div class="tab-pane active" id="tab-feed">
-          <div class="feed" id="feed">
-            <div style="color:var(--muted);font-family:var(--mono);font-size:.8rem">Aucune activité</div>
-          </div>
-        </div>
-        <div class="tab-pane" id="tab-send">
+        <div class="tab-p active" id="tp-act"><div class="feed" id="feed">${renderFeed(s.recentCommands||[])}</div></div>
+        <div class="tab-p" id="tp-top"><div id="top-cmds">${renderTopCmds(s.topCommands||[])}</div></div>
+        <div class="tab-p" id="tp-users"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Numéro</th><th>Cmds</th><th>Top</th><th>Vu</th></tr></thead><tbody>${renderUsers(s.users||[])}</tbody></table></div></div>
+        <div class="tab-p" id="tp-send">
           <div class="send-form">
-            <select id="send-session">
-              <option value="">— Choisir une session —</option>
-            </select>
-            <input id="send-to" type="text" placeholder="Numéro (ex: 237612345678)">
-            <textarea id="send-text" placeholder="Message..."></textarea>
-            <button class="btn-primary" onclick="sendMsg()">📤 Envoyer</button>
+            <input type="text" id="send-to" placeholder="Numéro (ex: 237612345678)">
+            <textarea id="send-text" rows="3" placeholder="Message..."></textarea>
+            <button class="btn-green" onclick="sendMsg('${esc(s.id)}')">📤 Envoyer</button>
             <div class="send-result" id="send-result"></div>
           </div>
         </div>
       </div>
-
-      <!-- Top commandes & Utilisateurs -->
-      <div class="panel">
-        <div class="tabs">
-          <button class="tab active" onclick="switchTab2('top-cmds')">Top commandes</button>
-          <button class="tab" onclick="switchTab2('users')">Utilisateurs</button>
-        </div>
-        <div class="tab-pane active" id="tab-top-cmds">
-          <div id="cmd-bar"></div>
-        </div>
-        <div class="tab-pane" id="tab-users">
-          <div class="users-wrap">
-            <table>
-              <thead><tr><th>#</th><th>Numéro</th><th>Cmds</th><th>Favori</th><th>Vu le</th></tr></thead>
-              <tbody id="users-body"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
     </div>
-  </main>
-</div>
-
-<!-- ── Modal nouvelle session ── -->
-<div class="modal-overlay" id="modal-new">
-  <div class="modal">
-    <h2>➕ Nouvelle session</h2>
-    <p>Un QR code sera généré. Scannez-le avec WhatsApp pour vous connecter.<br>Le numéro sera automatiquement détecté.</p>
-    <input id="new-sess-name" type="text" placeholder="Nom de la session (optionnel)">
-    <div class="btn-group">
-      <button class="btn-primary" onclick="createSession()">Créer & Obtenir QR</button>
-      <button class="btn-ghost" onclick="closeModal()">Annuler</button>
-    </div>
-  </div>
-</div>
-
-<div id="toast"></div>
-
-<script>
-let TOKEN = '';
-let REFRESH_INT = null;
-let es = null; // EventSource SSE
-
-// ── Login ──────────────────────────────────────────────────────
-document.getElementById('token-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-
-async function doLogin() {
-  const t = document.getElementById('token-input').value.trim();
-  if (!t) return;
-  const res = await fetch('/api/info?token=' + encodeURIComponent(t));
-  if (res.status === 401) { document.getElementById('login-err').style.display = 'block'; return; }
-  TOKEN = t;
-  document.getElementById('login-screen').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
-  startRealtime();
-}
-
-const urlToken = new URLSearchParams(location.search).get('token');
-if (urlToken) { document.getElementById('token-input').value = urlToken; doLogin(); }
-
-// ── API ────────────────────────────────────────────────────────
-async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' } };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  return res.json();
-}
-
-// ── SSE — temps réel ───────────────────────────────────────────
-function startRealtime() {
-  // Premier chargement complet
-  refresh();
-  // Polling de secours toutes les 10s (QR + stats fichier)
-  REFRESH_INT = setInterval(refresh, 10000);
-
-  // SSE pour les mises à jour instantanées
-  if (es) es.close();
-  es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));
-
-  // État initial complet
-  es.addEventListener('init', e => {
-    const d = JSON.parse(e.data);
-    updateSessions(d.sessions || []);
-    updateSendSessionSelect(d.sessions || []);
-    updateHeaderStatus(d.sessions || []);
-  });
-
-  // Mise à jour d'une session (connexion, QR, déconnexion)
-  es.addEventListener('session', e => {
-    const sess = JSON.parse(e.data);
-    patchSession(sess);
-  });
-
-  // Nouvelle commande reçue → mise à jour instantanée du feed + compteurs
-  es.addEventListener('command', e => {
-    const d = JSON.parse(e.data);
-    appendFeedItem(d);
-    patchSessionCounters(d.sessionId, d.commandsCount, d.messagesCount);
-    // Rafraîchir les top commandes et stats toutes les 5 commandes
-    if (d.commandsCount % 5 === 0) refresh();
-  });
-
-  // Ping reçu → mettre à jour le lastPing d'une session
-  es.addEventListener('ping', e => {
-    const d = JSON.parse(e.data);
-    const card = document.querySelector(`[data-session-id="${d.id}"] .sc-ping`);
-    if (card) card.textContent = new Date(d.lastPing).toLocaleTimeString('fr', {hour:'2-digit', minute:'2-digit'});
-  });
-
-  es.onerror = () => {
-    // SSE coupé → le polling de secours prend le relais silencieusement
-  };
-}
-
-// ── Full refresh (stats fichier, top cmds, users) ──────────────
-async function refresh() {
-  try {
-    const [info, stats] = await Promise.all([api('/api/info'), api('/api/stats')]);
-    updateGlobalCards(info);
-    updateSessions(info.sessions || []);
-    updateFeed(info.recentCommands || []);
-    updateTopCmds(info.topCommands || []);
-    updateUsers(stats.users || []);
-    updateSendSessionSelect(info.sessions || []);
-    updateHeaderStatus(info.sessions || []);
-  } catch {}
-}
-
-// ── Patch une session dans la grille sans tout re-render ────────
-function patchSession(sess) {
-  // Met à jour l'état dans la grille en re-rendant cette carte uniquement
-  const existing = [...(document.querySelectorAll('.session-card'))].find(
-    el => el.dataset.sessionId === sess.id
-  );
-  const newHtml = buildSessionCard(sess);
-  if (existing) {
-    existing.outerHTML = newHtml;
-  } else {
-    document.getElementById('sessions-grid').insertAdjacentHTML('beforeend', newHtml);
+    <div id="term-container"></div>`;
+  // Réinjecter le terminal existant ou en créer un vide
+  const tc=document.getElementById('term-container');
+  if(existingTerm){tc.appendChild(existingTerm);}
+  else{
+    tc.innerHTML=`<div class="terminal"><div class="term-head"><div class="term-dots"><div class="td2" style="background:#f85149"></div><div class="td2" style="background:#e3b341"></div><div class="td2" style="background:#25d366"></div></div><span style="font-family:var(--mono);font-size:.7rem;color:var(--muted)">Logs — Temps réel</span><button class="btn-ghost" style="padding:3px 8px;font-size:.68rem" onclick="clearTerm()">Vider</button></div><div class="term-body" id="terminal-body"></div></div>`;
   }
-  updateHeaderStatus([...sessions_cache.values()]);
 }
 
-// Cache local des sessions pour le header
-const sessions_cache = new Map();
-
-function patchSessionCounters(sessionId, cmdCount, msgCount) {
-  const el = document.querySelector(`[data-session-id="${sessionId}"]`);
-  if (!el) return;
-  const cmdsEl = el.querySelector('.sc-cmds');
-  const msgsEl = el.querySelector('.sc-msgs');
-  if (cmdsEl) cmdsEl.textContent = cmdCount.toLocaleString();
-  if (msgsEl) msgsEl.textContent = msgCount.toLocaleString();
+function renderQR(s){
+  if(s.connection==='open') return `<div style="text-align:center"><div style="font-size:2.5rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:8px;font-size:.85rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.72rem;margin-top:4px">${esc(s.connectedNumber||'')}</div></div>`;
+  if(s.qrCode){const u='https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050508&color=25d366&qzone=2';return `<img src="${u}" alt="QR"><div class="qr-hint">Scannez avec WhatsApp</div>`;}
+  if(s.pairingCode) return `<div class="pairing">${esc(s.pairingCode)}</div><div class="qr-hint" style="margin-top:8px">WhatsApp → Appareils → Lier avec numéro</div>`;
+  return `<div class="qr-placeholder">En attente...<br>Cliquez Relancer.</div>`;
 }
 
-// Ajouter une entrée au feed sans tout re-render
-function appendFeedItem(d) {
-  const feed = document.getElementById('feed');
-  const noActivity = feed.querySelector('[data-empty]');
-  if (noActivity) noActivity.remove();
-  const time = new Date(d.time).toLocaleTimeString('fr', {hour:'2-digit', minute:'2-digit'});
-  const item = `<div class="feed-item">
-    <span class="feed-cmd">${escHtml(d.cmd)}</span>
-    <span class="feed-user">${escHtml(d.user)}</span>
-    <span class="feed-time">${time}</span>
-  </div>`;
-  feed.insertAdjacentHTML('afterbegin', item);
-  // Limiter à 30 entrées
-  while (feed.children.length > 30) feed.lastChild.remove();
+function statusLabel(c){return c==='open'?'✅ Connecté':c==='connecting'?'⏳ Connexion...':'❌ Déconnecté';}
+
+function renderFeed(cmds){
+  if(!cmds.length) return '<div style="padding:16px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.75rem">Aucune activité</div>';
+  return [...cmds].reverse().map(c=>`<div class="feed-row"><span class="feed-cmd">!${esc(c.cmd)}</span><span class="feed-user">${esc(c.user)}</span><span class="feed-time">${new Date(c.time).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'})}</span></div>`).join('');
 }
 
-// ── Header status ──────────────────────────────────────────────
-function updateHeaderStatus(sessionsList) {
-  const connected = sessionsList.filter(s => s.connection === 'open').length;
-  const anyConn   = connected > 0;
-  const anyConnecting = sessionsList.some(s => s.connection === 'connecting');
-  const dot   = document.getElementById('status-dot');
-  const badge = document.getElementById('status-badge');
-  const count = document.getElementById('session-count');
-  const state = anyConn ? 'open' : anyConnecting ? 'connecting' : 'close';
-  dot.className = 'dot ' + (state === 'open' ? '' : state === 'connecting' ? 'connecting' : 'offline');
-  badge.className = 'status-badge ' + (state === 'open' ? '' : state === 'connecting' ? 'connecting' : 'offline');
-  badge.textContent = state === 'open' ? `● ${connected} connectée(s)` : state === 'connecting' ? '◌ Connexion...' : '○ Déconnecté';
-  count.textContent = `${sessionsList.length} session(s)`;
+function renderTopCmds(cmds){
+  if(!cmds.length) return '<div style="color:var(--muted);font-family:var(--mono);font-size:.75rem;padding:8px 0">Aucune donnée</div>';
+  const max=cmds[0]?.count||1;
+  return cmds.map(c=>`<div class="bar-row"><span class="bar-name">!${esc(c.cmd)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c.count/max*100)}%"></div></div><span class="bar-num">${c.count}</span></div>`).join('');
 }
 
-// ── Global Cards ───────────────────────────────────────────────
-function updateGlobalCards(d) {
-  document.getElementById('c-total').textContent    = (d.totalCommands || 0).toLocaleString();
-  document.getElementById('c-users').textContent    = (d.totalUsers || 0).toLocaleString();
-  document.getElementById('c-uptime').textContent   = d.uptimeHuman || '—';
-  document.getElementById('c-uptime-raw').textContent = d.uptime ? d.uptime + 's' : '—';
-  document.getElementById('c-mem').textContent      = d.memory || '—';
-  document.getElementById('c-node').textContent     = d.node || '—';
-  document.getElementById('bot-name').textContent   = d.botName || 'Bot WhatsApp';
-  const sessions = d.sessions || [];
-  const active = sessions.filter(s => s.connection === 'open').length;
-  document.getElementById('c-sessions').textContent = sessions.length;
-  document.getElementById('c-sessions-active').textContent = active + ' actives';
+function renderUsers(users){
+  if(!users.length) return '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">Aucun utilisateur</td></tr>';
+  return users.map((u,i)=>`<tr><td style="color:var(--muted)">${i+1}</td><td>${esc(u.number)}</td><td><strong>${u.total}</strong></td><td>${u.topCmd?'!'+esc(u.topCmd):'—'}</td><td>${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('fr'):'—'}</td></tr>`).join('');
 }
 
-// ── Sessions Grid ──────────────────────────────────────────────
-function sessionStatusClass(conn) {
-  return conn === 'open' ? 'connected' : conn === 'connecting' ? 'connecting' : 'offline';
-}
-function sessionStatusLabel(conn) {
-  return conn === 'open' ? '✅ En ligne' : conn === 'connecting' ? '⏳ Connexion...' : '❌ Hors ligne';
-}
-
-function buildSessionCard(s) {
-  const cls  = sessionStatusClass(s.connection);
-  sessions_cache.set(s.id, s);
-
-  let qrHtml = '';
-  if (s.connection === 'open') {
-    qrHtml = `<div class="sc-qr"><div style="font-size:2.5rem">✅</div><div class="qr-hint">Session active</div></div>`;
-  } else if (s.qrCode) {
-    const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(s.qrCode) + '&bgcolor=111118&color=25d366&qzone=2';
-    qrHtml = `<div class="sc-qr">
-      <img src="${qrUrl}" alt="QR Code">
-      <div class="qr-hint">Ouvrez WhatsApp → Appareils connectés<br>→ Lier un appareil → Scanner</div>
-    </div>`;
-  } else {
-    qrHtml = `<div class="sc-qr" style="opacity:.4"><div style="font-size:2rem">📵</div><div class="qr-hint">Cliquez "Relancer" pour un QR</div></div>`;
-  }
-
-  const numHtml = s.owner
-    ? `<div class="sc-number">📱 +${s.owner}</div>`
-    : `<div class="sc-number none">Numéro non détecté</div>`;
-
-  const pingStr = s.lastPing
-    ? new Date(s.lastPing).toLocaleTimeString('fr', {hour:'2-digit', minute:'2-digit'})
-    : '—';
-
-  return `<div class="session-card ${cls}" data-session-id="${escHtml(s.id)}">
-    <div class="sc-header">
-      <div class="sc-dot ${cls}"></div>
-      <div class="sc-name">${escHtml(s.name)}</div>
-      <div class="sc-id">${escHtml(s.id)}</div>
-    </div>
-    <div class="sc-body">
-      ${numHtml}
-      <div style="font-family:var(--mono);font-size:.72rem;color:var(--muted)">${sessionStatusLabel(s.connection)} · préfixe: <span style="color:var(--accent)">${escHtml(s.prefix || '/')}</span></div>
-      ${qrHtml}
-      <div class="sc-stats">
-        <div class="sc-stat"><div class="sv sc-msgs">${(s.messagesCount||0).toLocaleString()}</div><div class="sk">msgs</div></div>
-        <div class="sc-stat"><div class="sv sc-cmds">${(s.commandsCount||0).toLocaleString()}</div><div class="sk">cmds</div></div>
-        <div class="sc-stat"><div class="sv sc-ping">${pingStr}</div><div class="sk">ping</div></div>
-      </div>
-      <div class="sc-actions">
-        <button class="btn-warn" onclick="restartSession('${escHtml(s.id)}')">↺ Relancer</button>
-        <button class="btn-ghost" onclick="logoutSession('${escHtml(s.id)}')">🔄 Nouveau QR</button>
-        <button class="btn-danger" onclick="deleteSession('${escHtml(s.id)}', '${escHtml(s.name)}')">🗑</button>
-      </div>
-    </div>
-  </div>`;
+function appendLogs(newLogs){
+  let tb=document.getElementById('terminal-body');
+  if(!tb) return;
+  newLogs.forEach(l=>{
+    const d=document.createElement('div');
+    d.className='log-line';
+    d.innerHTML=`<span class="log-time">${l.time.slice(11,19)}</span><span class="log-msg ${l.level}">${esc(l.msg)}</span>`;
+    tb.appendChild(d);
+  });
+  tb.scrollTop=tb.scrollHeight;
 }
 
-function updateSessions(sessionsList) {
-  const grid = document.getElementById('sessions-grid');
-  if (!sessionsList.length) {
-    grid.innerHTML = `<div style="color:var(--muted);font-family:var(--mono);font-size:.8rem;padding:20px">Aucune session. Cliquez sur "Nouvelle session".</div>`;
+function clearTerm(){const t=document.getElementById('terminal-body');if(t) t.innerHTML='';}
+
+async function newSession(){
+  const btn=document.getElementById('btn-new');
+  btn.disabled=true;btn.textContent='...';
+  const r=await api('/api/sessions','POST');
+  btn.disabled=false;btn.textContent='+ Nouvelle';
+  if(r.ok){toast('Session créée, QR en cours...','ok');await refreshSessions();selectSession(r.sessionId);}
+  else toast('Erreur','err');
+}
+
+async function restart(id){
+  const r=await api(`/api/sessions/${encodeURIComponent(id)}/restart`,'POST');
+  toast(r.message||'Reconnexion...','ok');
+  setTimeout(()=>refreshSession(id),3000);
+}
+
+async function logout(id){
+  if(!confirm('Déconnecter et supprimer cette session ?')) return;
+  const r=await api(`/api/sessions/${encodeURIComponent(id)}/logout`,'POST');
+  toast(r.message||'Déconnecté','ok');
+  currentSession=null;
+  document.getElementById('main-content').innerHTML='<div class="no-session"><div style="font-size:2.5rem">📱</div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
+  refreshSessions();
+}
+
+async function sendMsg(id){
+  const to=document.getElementById('send-to')?.value?.trim();
+  const text=document.getElementById('send-text')?.value?.trim();
+  const res=document.getElementById('send-result');
+  if(!to||!text){res.textContent='⚠️ Requis';res.className='send-result err';res.style.display='block';return;}
+  const r=await api(`/api/sessions/${encodeURIComponent(id)}/send`,'POST',{to,text});
+  if(r.ok){res.textContent='✅ Envoyé !';res.className='send-result ok';document.getElementById('send-text').value='';}
+  else{res.textContent='❌ '+(r.error||'Erreur');res.className='send-result err';}
+  res.style.display='block';setTimeout(()=>res.style.display='none',3000);
+}
+
+function tab(btn,paneId){
+  btn.closest('.panel').querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  btn.closest('.panel').querySelectorAll('.tab-p').forEach(p=>p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(paneId)?.classList.add('active');
+}
+
+async function api(path,method='GET',body=null){
+  const o={method,headers:{'Content-Type':'application/json'}};
+  if(body) o.body=JSON.stringify(body);
+  const r=await fetch(path,o);return r.json();
+}
+
+function toast(msg,type='ok'){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.className='show '+type;
+  setTimeout(()=>el.className='',3000);
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+async function doLogout(){await fetch("/logout",{method:"POST"});location.href="/login";}
+
+function showPairModal(){
+  document.getElementById('pair-modal').style.display='flex';
+  document.getElementById('pair-phone').value='';
+  document.getElementById('pair-result').style.display='none';
+  setTimeout(()=>document.getElementById('pair-phone').focus(),100);
+}
+function closePairModal(){
+  document.getElementById('pair-modal').style.display='none';
+}
+
+async function startPairing(){
+  const phone=document.getElementById('pair-phone').value.trim().replace(/\D/g,'');
+  const res=document.getElementById('pair-result');
+  if(!phone||phone.length<7){
+    res.textContent='⚠️ Numéro invalide';
+    res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
     return;
   }
-  grid.innerHTML = sessionsList.map(buildSessionCard).join('');
-}
+  res.textContent='⏳ Création de la session...';
+  res.style.cssText='display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
 
-// ── Feed ────────────────────────────────────────────────────────
-function updateFeed(cmds) {
-  const feed = document.getElementById('feed');
-  if (!cmds.length) {
-    feed.innerHTML = `<div style="color:var(--muted);font-family:var(--mono);font-size:.8rem" data-empty>Aucune activité</div>`;
+  // Créer la session avec le numéro
+  const r=await api('/api/sessions','POST',{phone});
+  if(!r.ok){
+    res.textContent='❌ '+(r.error||'Erreur');
+    res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
     return;
   }
-  feed.innerHTML = [...cmds].reverse().map(c => `
-    <div class="feed-item">
-      <span class="feed-cmd">${escHtml(c.cmd)}</span>
-      <span class="feed-user">${escHtml(c.user)}</span>
-      <span class="feed-time">${new Date(c.time).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'})}</span>
-    </div>`).join('');
+  const sid=r.sessionId;
+  res.textContent='⏳ Code en cours... (10s)';
+  await refreshSessions();
+  selectSession(sid);
+
+  // Attendre et afficher le code
+  let attempts=0;
+  const poll=setInterval(async()=>{
+    attempts++;
+    const s=await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(()=>null);
+    if(!s) return;
+    if(s.pairingCode){
+      res.innerHTML=`✅ Votre code: <strong style="font-size:1.3rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.72rem;color:var(--muted)">Valable ~60s — WhatsApp → Lier avec numéro</span>`;
+      res.style.cssText='display:block;background:rgba(37,211,102,.08);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.8rem;line-height:1.6';
+      clearInterval(poll);
+    }
+    if(s.connection==='open'){ clearInterval(poll); closePairModal(); toast('✅ Connecté !','ok'); }
+    if(attempts>15) clearInterval(poll);
+  },2000);
 }
 
-// ── Top Commands ────────────────────────────────────────────────
-function updateTopCmds(cmds) {
-  if (!cmds.length) return;
-  const max = cmds[0]?.count || 1;
-  document.getElementById('cmd-bar').innerHTML = cmds.map(c => `
-    <div class="cmd-row">
-      <span class="cmd-name">${escHtml(c.cmd)}</span>
-      <div class="cmd-track"><div class="cmd-fill" style="width:${Math.round(c.count/max*100)}%"></div></div>
-      <span class="cmd-count">${c.count}</span>
-    </div>`).join('');
-}
+// Fermer modal en cliquant dehors
+document.getElementById('pair-modal').addEventListener('click',function(e){
+  if(e.target===this) closePairModal();
+});
 
-// ── Users Table ─────────────────────────────────────────────────
-function updateUsers(users) {
-  document.getElementById('users-body').innerHTML = users.map((u, i) => `
-    <tr>
-      <td class="num">${i+1}</td>
-      <td>${escHtml(u.number)}</td>
-      <td><strong>${u.total}</strong></td>
-      <td>${u.topCmd ? escHtml(u.topCmd) : '—'}</td>
-      <td>${u.lastSeen ? new Date(u.lastSeen).toLocaleDateString('fr') : '—'}</td>
-    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">Aucun utilisateur</td></tr>';
-}
-
-// ── Send session select ─────────────────────────────────────────
-function updateSendSessionSelect(sessionsList) {
-  const sel = document.getElementById('send-session');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">— Choisir une session —</option>' +
-    sessionsList.filter(s => s.connection === 'open').map(s =>
-      `<option value="${escHtml(s.id)}" ${s.id === cur ? 'selected' : ''}>${escHtml(s.name)} (+${s.owner || '?'})</option>`
-    ).join('');
-}
-
-// ── Actions ─────────────────────────────────────────────────────
-async function restartSession(id) {
-  const r = await api(`/api/sessions/${id}/restart`, 'POST');
-  toast(r.message || 'Reconnexion lancée', 'ok');
-  setTimeout(refresh, 2000);
-}
-
-async function logoutSession(id) {
-  if (!confirm('Déconnecter cette session ? Un nouveau QR sera généré.')) return;
-  const r = await api(`/api/sessions/${id}/logout`, 'POST');
-  toast(r.message || 'Déconnecté', 'ok');
-  setTimeout(refresh, 2000);
-}
-
-async function deleteSession(id, name) {
-  if (!confirm(`Supprimer définitivement la session "${name}" ?`)) return;
-  const r = await api(`/api/sessions/${id}`, 'DELETE');
-  toast(r.message || 'Session supprimée', 'ok');
-  setTimeout(refresh, 500);
-}
-
-async function sendMsg() {
-  const sessionId = document.getElementById('send-session').value;
-  const to   = document.getElementById('send-to').value.trim();
-  const text = document.getElementById('send-text').value.trim();
-  const res  = document.getElementById('send-result');
-  if (!sessionId) { res.textContent = '⚠️ Choisissez une session'; res.className='send-result err'; res.style.display='block'; return; }
-  if (!to || !text) { res.textContent = '⚠️ Numéro et message requis'; res.className='send-result err'; res.style.display='block'; return; }
-  const r = await api(`/api/sessions/${sessionId}/send`, 'POST', { to, text });
-  if (r.ok) {
-    res.textContent = '✅ Message envoyé !'; res.className='send-result ok';
-    document.getElementById('send-text').value = '';
-  } else {
-    res.textContent = '❌ ' + (r.error || 'Erreur'); res.className='send-result err';
-  }
-  res.style.display = 'block';
-  setTimeout(() => res.style.display='none', 3000);
-}
-
-// ── Modal nouvelle session ──────────────────────────────────────
-function openNewSession() { document.getElementById('modal-new').classList.add('show'); document.getElementById('new-sess-name').focus(); }
-function closeModal() { document.getElementById('modal-new').classList.remove('show'); }
-document.getElementById('modal-new').addEventListener('click', e => { if (e.target.id === 'modal-new') closeModal(); });
-document.getElementById('new-sess-name').addEventListener('keydown', e => { if (e.key === 'Enter') createSession(); });
-
-async function createSession() {
-  const name = document.getElementById('new-sess-name').value.trim();
-  const r = await api('/api/sessions', 'POST', name ? { name } : {});
-  if (r.ok) {
-    toast(`Session "${r.name}" créée — QR en cours...`, 'ok');
-    closeModal();
-    document.getElementById('new-sess-name').value = '';
-    setTimeout(refresh, 2000);
-  } else {
-    toast(r.error || 'Erreur', 'err');
-  }
-}
-
-// ── Tabs ────────────────────────────────────────────────────────
-function switchTab(name) {
-  ['feed','send'].forEach(n => {
-    document.getElementById('tab-'+n).classList.toggle('active', n === name);
-  });
-  document.querySelectorAll('.panel:first-child .tabs .tab').forEach((t,i) => {
-    t.classList.toggle('active', (i===0&&name==='feed')||(i===1&&name==='send'));
-  });
-}
-function switchTab2(name) {
-  ['top-cmds','users'].forEach(n => {
-    document.getElementById('tab-'+n).classList.toggle('active', n === name);
-  });
-  document.querySelectorAll('.panel:last-child .tabs .tab').forEach((t,i) => {
-    t.classList.toggle('active', (i===0&&name==='top-cmds')||(i===1&&name==='users'));
-  });
-}
-
-// ── Toast ───────────────────────────────────────────────────────
-function toast(msg, type='ok') {
-  const el = document.getElementById('toast');
-  el.textContent = msg; el.className = 'show ' + type;
-  setTimeout(() => el.className = '', 3000);
-}
-
-// ── Utilitaire ─────────────────────────────────────────────────
-function escHtml(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+startPolling();
 </script>
 </body>
 </html>

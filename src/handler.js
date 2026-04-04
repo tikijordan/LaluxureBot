@@ -10,7 +10,6 @@ import { getContentType } from '@whiskeysockets/baileys';
 import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
-import { canUseBot } from './utils/botmode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,7 +79,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             senderNumber = fromMe ? OWNER : rawJid.split('@')[0].replace(/\D/g, '');
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
-        isOwner = (OWNER && senderNumber === OWNER) || fromMe;
+        isOwner = fromMe || (OWNER && senderNumber === OWNER);
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
@@ -101,9 +100,8 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
-    // Mode bot (public/self/owner)
-    // En groupe, on laisse toujours passer — canUseBot ne doit pas bloquer les groupes
-    if (!isGroup && !canUseBot(isOwner) && !['public', 'self', 'owner'].includes(cmdName)) return;
+    // botMode transmis depuis index.js (le blocage est géré dans index.js)
+    const botMode = ctx.botMode || 'public';
 
     const command = commands[cmdName];
     if (!command) return;
@@ -138,6 +136,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sock, msg, from, sender, senderNumber,
             isOwner, isGroup, args, text, store,
             noTagGroups,
+            botMode,
             prefix: PREFIX,
             owner: OWNER,
         });

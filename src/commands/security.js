@@ -7,19 +7,43 @@
  * @license     MIT — See LICENSE file for details
  * @description Commandes de securite — Mode prive/public, bot admin
  * ============================================================
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software to use, copy, modify, merge,
- * publish, distribute, sublicense, and/or sell copies, subject
- * to the MIT License conditions. See LICENSE for full terms.
- * ============================================================
  */
 // ============================================================
 // COMMANDES: antispam, unban, notag, yestag, private, public, botmode
 // ============================================================
 
 import { getAntispamStatus, unban } from '../utils/antispam.js';
-import { getBotMode, setPrivateMode, setPublicMode } from '../utils/botmode.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const BOTMODE_FILE = path.join(__dirname, '../../data/botmode.json');
+
+// ── GESTION DU BOTMODE (persistant) ──────────────────────────
+function getBotMode() {
+  try {
+    if (fs.existsSync(BOTMODE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(BOTMODE_FILE, 'utf-8'));
+      return data.mode || 'public';
+    }
+  } catch {}
+  return 'public';
+}
+
+function setBotMode(mode) {
+  try {
+    const dir = path.dirname(BOTMODE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(BOTMODE_FILE, JSON.stringify({ mode }, null, 2));
+  } catch (e) {
+    console.error('❌ Erreur écriture botmode:', e.message);
+  }
+}
+
+// ── GESTION DU NO-TAG (global en mémoire) ────────────────────
+// On utilise global.noTagGroups pour que ce soit partagé avec le handler principal
+if (!global.noTagGroups) global.noTagGroups = new Set();
 
 export default {
 
@@ -56,31 +80,30 @@ export default {
   // ── ANTI-TAG ────────────────────────────────────────────────
   notag: {
     description: 'Activer protection anti-tag',
-    execute: async ({ sock, from, isGroup, noTagGroups }) => {
+    execute: async ({ sock, from, isGroup }) => {
       if (!isGroup) {
         await sock.sendMessage(from, { text: '❌ Cette commande fonctionne uniquement dans les groupes.' });
         return;
       }
-      noTagGroups.add(from);
-      await sock.sendMessage(from, { text: '🔕 Protection anti-tag *activée*.' });
+      global.noTagGroups.add(from);
+      await sock.sendMessage(from, { text: '🔕 Protection anti-tag *activée*.\n\n_Les messages qui taguent @tous seront supprimés (sauf admins)._' });
     },
   },
 
   yestag: {
     description: 'Désactiver protection anti-tag',
-    execute: async ({ sock, from, isGroup, noTagGroups }) => {
+    execute: async ({ sock, from, isGroup }) => {
       if (!isGroup) {
         await sock.sendMessage(from, { text: '❌ Cette commande fonctionne uniquement dans les groupes.' });
         return;
       }
-      noTagGroups.delete(from);
+      global.noTagGroups.delete(from);
       await sock.sendMessage(from, { text: '🔔 Protection anti-tag *désactivée*.' });
     },
   },
 
   // ── MODE BOT ─────────────────────────────────────────────────
 
-  // Voir le mode actuel
   botmode: {
     description: 'Voir le mode actuel du bot (admin)',
     adminOnly: true,
@@ -96,7 +119,6 @@ export default {
     },
   },
 
-  // Passer en mode privé → seul l'owner peut utiliser le bot
   private: {
     description: 'Passer le bot en mode privé (admin seulement)',
     adminOnly: true,
@@ -110,17 +132,15 @@ export default {
         return;
       }
 
-      setPrivateMode();
+      setBotMode('private');
 
-      const msg =
-        `🔴 *Mode Privé Activé*\n\n` +
-        `Le bot répond désormais *uniquement à l'administrateur*.\n\n` +
-        `Les autres utilisateurs verront un message de restriction.\n\n` +
-        `➡️ Pour revenir en mode public: *!public*`;
+      await sock.sendMessage(from, {
+        text: `🔴 *Mode Privé Activé*\n\n` +
+          `Le bot répond désormais *uniquement à l'administrateur*.\n\n` +
+          `Les autres utilisateurs verront un message de restriction.\n\n` +
+          `➡️ Pour revenir en mode public: *!public*`,
+      });
 
-      await sock.sendMessage(from, { text: msg });
-
-      // Notifier le groupe si on est dans un groupe
       if (isGroup) {
         await sock.sendMessage(from, {
           text: `🔴 *[BOT]* Ce bot est passé en *mode privé*.\nSeul l'administrateur peut l'utiliser pour le moment.`,
@@ -131,7 +151,6 @@ export default {
     },
   },
 
-  // Passer en mode public → tout le monde peut utiliser le bot
   public: {
     description: 'Passer le bot en mode public (tout le monde)',
     adminOnly: true,
@@ -145,17 +164,15 @@ export default {
         return;
       }
 
-      setPublicMode();
+      setBotMode('public');
 
-      const msg =
-        `🟢 *Mode Public Activé*\n\n` +
-        `Le bot répond désormais à *tout le monde*.\n\n` +
-        `Les commandes réservées à l'admin restent protégées.\n\n` +
-        `➡️ Pour repasser en mode privé: *!private*`;
+      await sock.sendMessage(from, {
+        text: `🟢 *Mode Public Activé*\n\n` +
+          `Le bot répond désormais à *tout le monde*.\n\n` +
+          `Les commandes réservées à l'admin restent protégées.\n\n` +
+          `➡️ Pour repasser en mode privé: *!private*`,
+      });
 
-      await sock.sendMessage(from, { text: msg });
-
-      // Notifier le groupe
       if (isGroup) {
         await sock.sendMessage(from, {
           text: `🟢 *[BOT]* Ce bot est de retour en *mode public*.\nTout le monde peut l'utiliser à nouveau !`,
@@ -166,3 +183,7 @@ export default {
     },
   },
 };
+
+// ── EXPORT des helpers pour le handler principal ──────────────
+// Importe ces fonctions dans index.js pour lire le mode bot
+export { getBotMode };

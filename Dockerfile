@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y \
 
 # Installer yt-dlp depuis le release officiel GitHub
 RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp
+    chmod a+rx /usr/local/bin/yt-dlp && \
+     yt-dlp -U
 
 WORKDIR /app
 
