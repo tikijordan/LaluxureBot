@@ -33,7 +33,6 @@ const PORT          = parseInt(process.env.PORT || '3000');
 const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
 const startTime     = Date.now();
 
-
 fse.ensureDirSync(SESSIONS_ROOT);
 fse.ensureDirSync(DATA_ROOT);
 ['stats','notes','banned'].forEach(d => fse.ensureDirSync(path.join(DATA_ROOT, d)));
@@ -42,6 +41,14 @@ fse.ensureDirSync(DATA_ROOT);
 if (!global.noTagGroups)  global.noTagGroups  = new Set();
 if (!global.mutedMembers) global.mutedMembers  = new Set();
 if (!global.botMessages)  global.botMessages   = new Map();
+
+// ══════════════════════════════════════════════════════════════
+// DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
+// Clé : msg.key.id (identifiant unique Baileys)
+// Nettoyage automatique toutes les 5 minutes (évite les fuites mémoire)
+// ══════════════════════════════════════════════════════════════
+const processedMsgIds = new Set();
+setInterval(() => processedMsgIds.clear(), 5 * 60 * 1000);
 
 // Filtre anti-logs Baileys
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
@@ -111,14 +118,24 @@ async function startSession(sessionId, phoneNumber = null) {
         connectedNumber: null, sock: null, pingInterval: null,
         commandsCount: 0, messagesCount: 0, recentCommands: [],
         lastPing: null, createdAt: new Date().toISOString(),
+        authPath, // ← on stocke le chemin courant dans le state
     };
     state.connection = 'connecting';
     state.qrCode = null;
     state.pairingCode = null;
+    state.authPath = authPath;
     sessions.set(sessionId, state);
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
 
-    const { state: auth, saveCreds } = await useMultiFileAuthState(authPath);
+    const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
+
+    // ── FIX ENOENT : on s'assure que le dossier existe avant chaque écriture ──
+    // Après un renommage de session, authPath peut changer → on lit state.authPath
+    const saveCreds = async () => {
+        try { fse.ensureDirSync(state.authPath); } catch {}
+        return _saveCreds();
+    };
+
     const { version } = await fetchLatestBaileysVersion();
     const logger = pino({ level: 'silent' });
 
@@ -136,7 +153,6 @@ async function startSession(sessionId, phoneNumber = null) {
 
     // ── Pairing code : demander le code après connexion WS
     if (phoneNumber && !auth.creds.registered) {
-        // Attendre que le socket soit prêt (petit délai)
         setTimeout(async () => {
             try {
                 const num = phoneNumber.replace(/\D/g, '');
@@ -151,7 +167,6 @@ async function startSession(sessionId, phoneNumber = null) {
 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
         if (qr && !phoneNumber) {
-            // QR seulement si pas de pairing code demandé
             state.qrCode = qr;
             state.connection = 'connecting';
             qrcodeterminal.generate(qr, { small: true });
@@ -176,8 +191,13 @@ async function startSession(sessionId, phoneNumber = null) {
                     try {
                         fse.ensureDirSync(newPath);
                         fse.copySync(authPath, newPath, { overwrite: true });
+                        // Mettre à jour authPath dans le state AVANT la suppression
+                        // pour que saveCreds écrive au bon endroit
+                        state.authPath = newPath;
                         setTimeout(() => { try { fse.removeSync(authPath); } catch {} }, 2000);
                     } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
+                } else {
+                    state.authPath = newPath;
                 }
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
             }
@@ -186,7 +206,7 @@ async function startSession(sessionId, phoneNumber = null) {
 
             // SESSION_STRING dans les logs
             try {
-                const aPath = path.join(SESSIONS_ROOT, state.id);
+                const aPath = state.authPath;
                 const files = fs.readdirSync(aPath).filter(f => f.endsWith('.json'));
                 const sessionData = {};
                 files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
@@ -215,16 +235,27 @@ async function startSession(sessionId, phoneNumber = null) {
         }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        // ── FIX DOUBLE RÉPONSE #1 : ignorer tout sauf les vrais nouveaux messages ──
+        // 'notify' = message reçu en temps réel
+        // 'append' = sync historique (au démarrage) → NE PAS traiter
+        if (type !== 'notify') return;
+
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
+
+            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message ──
+            // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
+            const msgId = msg.key.id;
+            if (!msgId || processedMsgIds.has(msgId)) continue;
+            processedMsgIds.add(msgId);
+
             state.messagesCount++;
             try {
                 const rawJid  = msg.key.remoteJid;
                 const fromMe  = msg.key.fromMe;
                 const isGroup = rawJid.endsWith('@g.us');
                 const isLid   = rawJid.endsWith('@lid');
-                // OWNER = numéro du compte WhatsApp connecté (chiffres uniquement)
                 const OWNER = (state.connectedNumber || '').replace(/\D/g, '');
                 const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
 
@@ -260,11 +291,9 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
 
                 // ── Mode privé : bloquer les non-owners ──────────────────
-                // getBotMode() retourne 'public' par défaut si le fichier n'existe pas
                 const currentBotMode = getBotMode();
                 if (isCmd && !isOwner && currentBotMode === 'private') {
                     const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
-                    // Laisser !public et !botmode accessibles pour que l'owner puisse rétablir
                     if (!['public', 'botmode'].includes(cmdCheck)) {
                         await sock.sendMessage(from, {
                             text: `🔴 *Bot en mode privé*\nSeul l'administrateur peut utiliser le bot pour le moment.`,
@@ -283,6 +312,8 @@ async function startSession(sessionId, phoneNumber = null) {
                     body, from, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
                     botMode: currentBotMode,
+                    prefix: PREFIX,
+                    owner: OWNER,
                 });
             } catch(err) { addLog('error', `[${state.id}] ${err.message}`); }
         }
@@ -355,10 +386,8 @@ setInterval(() => {
     dashSessions.forEach((v,k) => { if (now>v.expires)    dashSessions.delete(k); });
 }, 5 * 60 * 1000);
 
-// Token 256 bits (cryptographiquement sûr)
 function genToken() { return randomBytes(32).toString('hex'); }
 
-// Comparaison timing-safe (résistante aux timing attacks)
 function checkPassword(input) {
     try {
         const h = createHash('sha256').update(input).digest();
@@ -366,7 +395,6 @@ function checkPassword(input) {
     } catch { return false; }
 }
 
-// Rate limit global
 function isRateLimited(ip) {
     const now = Date.now();
     const e = rateLimiter.get(ip);
@@ -374,7 +402,6 @@ function isRateLimited(ip) {
     return ++e.count > RATE_MAX;
 }
 
-// Anti-bruteforce /login : 5 tentatives / 15 min → lockout 30 min
 function checkLoginAttempt(ip) {
     const now = Date.now();
     const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:0 };
@@ -392,7 +419,6 @@ function checkLoginAttempt(ip) {
 }
 function recordLoginSuccess(ip) { loginTracker.delete(ip); }
 
-// Auth par cookie
 function isAuthenticated(req) {
     const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
     if (!token || !/^[0-9a-f]{64}$/.test(token)) return false;
@@ -401,7 +427,6 @@ function isAuthenticated(req) {
     return true;
 }
 
-// Path traversal — whitelist stricte
 function sanitizeId(raw) {
     const id = decodeURIComponent(raw||'');
     if (!/^[\w\-+]{1,50}$/.test(id)) return null;
@@ -411,7 +436,6 @@ function sanitizeId(raw) {
     return id;
 }
 
-// Body limité à 512 KB
 function readBodySafe(req) {
     return new Promise((resolve, reject) => {
         let b='', size=0;
@@ -421,32 +445,27 @@ function readBodySafe(req) {
     });
 }
 
-// Masquer les secrets dans les logs
 function maskSensitive(msg) {
     return msg
         .replace(/(SESSION_STRING)[^\s,}]*/gi, '$1=[MASQUÉ]')
         .replace(/([A-Za-z0-9+/]{80,}={0,2})/g, m => m.slice(0,10)+'...[MASQUÉ]');
 }
 
-// Headers de sécurité HTTP
 const SECURITY_HEADERS = {
     'X-Content-Type-Options':  'nosniff',
     'X-Frame-Options':         'DENY',
     'X-XSS-Protection':        '1; mode=block',
     'Referrer-Policy':         'strict-origin',
-    'Content-Security-Policy': "default-src \'self\'; script-src \'self\' \'unsafe-inline\' https://fonts.googleapis.com; style-src \'self\' \'unsafe-inline\' https://fonts.googleapis.com https://fonts.gstatic.com; img-src \'self\' data: https://api.qrserver.com; font-src https://fonts.gstatic.com; connect-src \'self\'",
+    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https://api.qrserver.com; font-src https://fonts.gstatic.com; connect-src 'self'",
     ...(IS_HTTPS ? { 'Strict-Transport-Security': 'max-age=63072000; includeSubDomains' } : {}),
 };
 
-// Alias utilisé dans quelques routes du handler HTTP
 const SEC_HEADERS = SECURITY_HEADERS;
 
-// Helpers auth manquants
 function getSessionToken(req) {
     return (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1] || null;
 }
 function recordFailedLogin(ip) {
-    // checkLoginAttempt incrémente déjà le compteur — on appelle juste pour l'effet de bord
     checkLoginAttempt(ip);
 }
 function clearLoginAttempts(ip) {
@@ -462,13 +481,11 @@ http.createServer(async (req, res) => {
     const pathname = url.pathname;
     const method   = req.method;
 
-    // ── Rate limiting ──────────────────────────────────────────────
     if (isRateLimited(ip)) {
         res.writeHead(429, { 'Content-Type':'application/json', 'Retry-After':'60' });
         return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
     }
 
-    // ── CORS restreint ──────────────────────────────────────────────
     const origin = req.headers['origin'] || '';
     const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
     const corsHeaders = {
@@ -488,9 +505,7 @@ http.createServer(async (req, res) => {
         r.end(html);
     }
 
-    // ── Routes publiques (sans auth) ───────────────────────────────
-
-    // GET / — dashboard (redirige vers /login si non auth)
+    // GET / — dashboard
     if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
         if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
         const hp = path.join(DASH_DIR,'index.html');
@@ -498,7 +513,7 @@ http.createServer(async (req, res) => {
         res.writeHead(302,{Location:'/login'}); return res.end();
     }
 
-    // GET /login — page de connexion
+    // GET /login
     if (pathname==='/login' && method==='GET') {
         const errCode = url.searchParams.get('error');
         const lockMin = url.searchParams.get('min') || '30';
@@ -529,13 +544,8 @@ button:hover{background:#1fb858}
         return sendHtml(res, html);
     }
 
-    // POST /login — authentification
+    // POST /login
     if (pathname==='/login' && method==='POST') {
-        // Anti brute-force
-        //if (isBruteForced(ip)) {
-          //  res.writeHead(429,{'Content-Type':'text/html; charset=utf-8',...SEC_HEADERS,'Retry-After':'900'});
-            //return res.end('<!DOCTYPE html><html><body style="font-family:monospace;background:#080b10;color:#f85149;padding:40px">IP bloquée 15 min — trop de tentatives.</body></html>');
-        //}
         let b = '';
         await new Promise(r => { req.on('data',c=>b+=c.slice(0,500)); req.on('end',r); });
         const pwd = new URLSearchParams(b).get('password') || '';
@@ -544,7 +554,6 @@ button:hover{background:#1fb858}
             addLog('warn', `[Auth] Échec login depuis ${ip}`);
             res.writeHead(302,{Location:'/login?error=1'}); return res.end();
         }
-        // Succès — invalider l'ancien token si présent (anti session fixation)
         const oldToken = getSessionToken(req);
         if (oldToken) dashSessions.delete(oldToken);
         clearLoginAttempts(ip);
@@ -623,7 +632,7 @@ button:hover{background:#1fb858}
         });
     }
 
-    // POST /api/sessions/:id/pair — demander un pairing code
+    // POST /api/sessions/:id/pair
     const pairmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/pair$/);
     if (pairmatch && method==='POST') {
         const sid = sanitizeId(pairmatch[1]);
@@ -637,7 +646,6 @@ button:hover{background:#1fb858}
         if (s.connection === 'open') return sendJson(res,{error:'Déjà connecté'},400);
         try {
             if (!s.sock) {
-                // Créer une nouvelle session avec pairing
                 await startSession(sid, phone);
                 return sendJson(res,{ok:true, message:'Session démarrée, code en cours...'});
             }
@@ -699,7 +707,6 @@ button:hover{background:#1fb858}
         let body;
         try { body = await readBodySafe(req); } catch { return sendJson(res,{error:'Payload trop grand'},413); }
         if (!s||s.connection!=='open') return sendJson(res,{error:'Session non connectée'},503);
-        // Validation numéro de téléphone (chiffres uniquement, 7-15 digits)
         const toNum = (body.to||'').replace(/\D/g,'');
         if (!toNum || toNum.length < 7 || toNum.length > 15) return sendJson(res,{error:'Numéro invalide (7-15 chiffres)'},400);
         if (!body.text || typeof body.text !== 'string' || body.text.length > 4096) return sendJson(res,{error:'Message invalide (max 4096 chars)'},400);
@@ -713,14 +720,13 @@ button:hover{background:#1fb858}
     sendJson(res,{ error:'Route inconnue' },404);
 
 }).listen(PORT, BIND_HOST, () => {
-    // ── Railway : URL publique via RAILWAY_PUBLIC_DOMAIN ──
     const railwayUrl = process.env.RAILWAY_PUBLIC_DOMAIN
         ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
         : null;
- 
+
     addLog('success', `Dashboard démarré sur le port ${PORT} (${BIND_HOST}) — mot de passe requis`);
     if (railwayUrl) addLog('success', `URL publique Railway: ${railwayUrl}`);
- 
+
     if (DASH_PASSWORD === 'changeme') {
         addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables Railway !');
     }

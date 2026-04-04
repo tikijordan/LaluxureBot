@@ -23,6 +23,15 @@ let commands = {};
 // noTagGroups par défaut (utilisé seulement si non fourni par la session)
 const _defaultNoTagGroups = new Set();
 
+// ══════════════════════════════════════════════════════════════
+// DÉDUPLICATION HANDLER — filet de sécurité contre les doubles appels
+// Distinct du cache dans index.js : couvre le cas où handler est
+// appelé directement depuis un autre module sans passer par index.js.
+// Clé : msg.key.id — nettoyage toutes les 5 min
+// ══════════════════════════════════════════════════════════════
+const _handledMsgIds = new Set();
+setInterval(() => _handledMsgIds.clear(), 5 * 60 * 1000);
+
 /**
  * Traite un message entrant et exécute la commande correspondante.
  *
@@ -42,6 +51,13 @@ const _defaultNoTagGroups = new Set();
  *   - onCommand    {function} Callback dashboard (cmd, user)
  */
 export async function handleCommand(sock, msg, store, ctx = {}) {
+
+    // ── Déduplication au niveau handler ───────────────────────
+    const msgId = msg?.key?.id;
+    if (msgId) {
+        if (_handledMsgIds.has(msgId)) return; // déjà traité → on ignore
+        _handledMsgIds.add(msgId);
+    }
 
     // ── Résolution du préfixe et du propriétaire (contexte session ou fallback) ──
     const PREFIX = ctx.prefix || process.env.PREFIX || '/';
