@@ -15,10 +15,13 @@ RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest
     chmod a+rx /usr/local/bin/yt-dlp && \
     yt-dlp -U
 
-# Configurer yt-dlp pour utiliser Node.js (déjà présent dans node:20-slim)
-# comme runtime JavaScript (nécessaire pour certains formats YouTube)
+# Configurer yt-dlp :
+#  - runtime JS    : node (présent dans node:20-slim)
+#  - player_client : ios + android (bypass la détection bot YouTube sans cookies)
+#  - no-check-certificates : évite les erreurs SSL dans certains VPS
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--js-runtimes node\n" > /root/.config/yt-dlp/config
+    printf -- "--js-runtimes node\n--extractor-args youtube:player_client=ios,android\n--no-check-certificates\n" \
+    > /root/.config/yt-dlp/config
 
 WORKDIR /app
 

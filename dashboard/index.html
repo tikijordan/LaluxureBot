@@ -75,7 +75,6 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 .tbl td{padding:8px 10px;border-bottom:1px solid rgba(33,38,45,.4);font-family:var(--mono)}
 .tbl tr:hover td{background:rgba(255,255,255,.02)}
 .tbl-wrap{overflow-x:auto;max-height:260px;overflow-y:auto}
-/* Terminal */
 .terminal{background:#050508;border:1px solid var(--border);border-radius:10px;overflow:hidden}
 .term-head{padding:8px 14px;background:var(--s2);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .term-dots{display:flex;gap:5px}
@@ -85,22 +84,18 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 .log-line{display:flex;gap:8px;margin-bottom:1px}
 .log-time{color:var(--muted);white-space:nowrap;flex-shrink:0}
 .log-msg.info{color:var(--text)}.log-msg.success{color:var(--green)}.log-msg.warn{color:var(--yellow)}.log-msg.error{color:var(--red)}
-/* Send form */
 .send-form{display:flex;flex-direction:column;gap:10px}
 .send-form input,.send-form textarea{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:.82rem;outline:none;width:100%;resize:none;transition:border-color .2s}
 .send-form input:focus,.send-form textarea:focus{border-color:var(--green)}
 .send-result{display:none;padding:7px 10px;border-radius:6px;font-family:var(--mono);font-size:.75rem}
 .send-result.ok{background:rgba(37,211,102,.1);color:var(--green)}.send-result.err{background:rgba(248,81,73,.1);color:var(--red)}
-/* Tabs */
 .tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:12px}
 .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:7px 12px;font-family:var(--sans);font-size:.8rem;font-weight:500;margin-bottom:-1px;border-radius:0;cursor:pointer}
 .tab.active{color:var(--green);border-bottom-color:var(--green)}
 .tab-p{display:none}.tab-p.active{display:block}
-/* No session */
 .no-session{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:var(--muted);text-align:center}
 .no-session h2{color:var(--text);font-size:1.2rem;font-weight:700}
 .no-session p{font-family:var(--mono);font-size:.78rem;max-width:300px;line-height:1.6}
-/* Toast */
 #toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:8px;font-family:var(--mono);font-size:.78rem;background:var(--s2);border:1px solid var(--border);transform:translateY(60px);opacity:0;transition:all .25s;z-index:999;pointer-events:none}
 #toast.show{transform:none;opacity:1}
 #toast.ok{border-color:var(--green);color:var(--green)}
@@ -109,6 +104,11 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 .badge.online{background:rgba(37,211,102,.15);color:var(--green)}
 .badge.offline{background:rgba(72,79,88,.3);color:var(--muted)}
 .badge.connecting{background:rgba(227,179,65,.15);color:var(--yellow)}
+/* Indicateur refresh */
+#sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);opacity:0;transition:opacity .2s;flex-shrink:0}
+#sync-dot.pulse{animation:syncpulse .5s ease}
+@keyframes syncpulse{0%{opacity:1}100%{opacity:0}}
+#last-update{font-family:var(--mono);font-size:.65rem;color:var(--muted)}
 @media(max-width:600px){.sidebar{display:none}}
 </style>
 </head>
@@ -117,8 +117,11 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
   <header>
     <div class="logo"><div class="logo-dot"></div>WhatsApp Bot</div>
     <div class="header-right">
+      <div id="sync-dot"></div>
+      <span id="last-update"></span>
       <span id="hdr-status" class="badge offline">Aucune session</span>
-      <button class="btn-ghost" onclick="refreshAll()">↻</button><button class="btn-ghost" style="color:#f85149" onclick="doLogout()">⏏ Déconnexion</button>
+      <button class="btn-ghost" onclick="refreshAll(true)">↻</button>
+      <button class="btn-ghost" style="color:#f85149" onclick="doLogout()">⏏ Déconnexion</button>
     </div>
   </header>
   <div class="main-layout">
@@ -145,7 +148,7 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 <div id="toast"></div>
 
 <!-- Modal Pairing Code -->
-<div id="pair-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center">
+<div id="pair-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center">
   <div style="background:var(--s1);border:1px solid var(--border);border-radius:14px;padding:28px;width:320px;display:flex;flex-direction:column;gap:14px">
     <div style="font-weight:700;font-size:1rem;color:var(--bright)">📱 Connexion par code</div>
     <div style="font-family:var(--mono);font-size:.75rem;color:var(--muted);line-height:1.5">
@@ -162,70 +165,168 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 </div>
 
 <script>
-let currentSession=null,refreshInterval=null,logInterval=null,logIndex=0,allSessions=[];
+// ══════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════
+let currentSession = null;
+let allSessions    = [];
+let logIndex       = 0;
 
-function startPolling(){
-  clearInterval(refreshInterval);clearInterval(logInterval);
-  refreshInterval=setInterval(refreshAll,4000);
-  logInterval=setInterval(pollLogs,2000);
-  refreshAll();pollLogs();
+// Intervalles
+let timerSession = null; // toutes les 3s
+let timerLog     = null; // toutes les 2s
+let timerSidebar = null; // toutes les 5s
+
+// Verrous pour éviter les appels concurrents
+let fetchingSession = false;
+let fetchingLogs    = false;
+
+// Snapshot des dernières données → comparaison avant re-render
+let lastSessionData = null;
+
+// ══════════════════════════════════════════════════════════════
+// POLLING — pause quand l'onglet n'est pas visible (Page Visibility API)
+// ══════════════════════════════════════════════════════════════
+function startPolling() {
+  stopPolling();
+  timerSidebar = setInterval(refreshSessions, 5000);
+  timerSession = setInterval(tickSession,    3000);
+  timerLog     = setInterval(tickLogs,       2000);
+  refreshAll(true);
 }
 
-async function refreshAll(){
+function stopPolling() {
+  clearInterval(timerSession);
+  clearInterval(timerLog);
+  clearInterval(timerSidebar);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopPolling();
+  else { startPolling(); }
+});
+
+// ══════════════════════════════════════════════════════════════
+// TICK FONCTIONS
+// ══════════════════════════════════════════════════════════════
+async function tickSession() {
+  if (fetchingSession || !currentSession) return;
+  fetchingSession = true;
+  try { await refreshSession(currentSession); } finally { fetchingSession = false; }
+}
+
+async function tickLogs() {
+  if (fetchingLogs) return;
+  fetchingLogs = true;
+  try { await pollLogs(); } finally { fetchingLogs = false; }
+}
+
+// ══════════════════════════════════════════════════════════════
+// REFRESH
+// ══════════════════════════════════════════════════════════════
+async function refreshAll(force = false) {
   await refreshSessions();
-  if(currentSession) await refreshSession(currentSession);
+  if (currentSession) {
+    fetchingSession = true;
+    try { await refreshSession(currentSession, force); } finally { fetchingSession = false; }
+  }
 }
 
-async function refreshSessions(){
-  try{
-    const r=await api('/api/sessions');
-    allSessions=r.sessions||[];
+async function refreshSessions() {
+  try {
+    const r = await api('/api/sessions');
+    allSessions = r.sessions || [];
     renderSidebar();
-    const on=allSessions.filter(s=>s.connection==='open').length;
-    const hdr=document.getElementById('hdr-status');
-    hdr.textContent=on>0?`${on} connectée(s)`:allSessions.length>0?'En attente...':'Aucune session';
-    hdr.className='badge '+(on>0?'online':allSessions.length>0?'connecting':'offline');
-  }catch{}
+    const on = allSessions.filter(s => s.connection === 'open').length;
+    const hdr = document.getElementById('hdr-status');
+    hdr.textContent = on > 0 ? `${on} connectée(s)` : allSessions.length > 0 ? 'En attente...' : 'Aucune session';
+    hdr.className   = 'badge ' + (on > 0 ? 'online' : allSessions.length > 0 ? 'connecting' : 'offline');
+  } catch {}
 }
 
-async function refreshSession(id){
-  try{const s=await api(`/api/sessions/${encodeURIComponent(id)}`);renderMain(s);}catch{}
+async function refreshSession(id, force = false) {
+  try {
+    const s = await api(`/api/sessions/${encodeURIComponent(id)}`);
+    patchMain(s, force);
+    flashSync();
+    updateLastUpdate();
+  } catch {}
 }
 
-async function pollLogs(){
-  try{
-    const r=await api(`/api/logs?since=${logIndex}`);
-    if(r.logs&&r.logs.length>0){appendLogs(r.logs);logIndex=r.total;}
-  }catch{}
+// ══════════════════════════════════════════════════════════════
+// MISE À JOUR PARTIELLE — ne reconstruit que ce qui change
+// ══════════════════════════════════════════════════════════════
+function patchMain(s, force = false) {
+  const mc = document.getElementById('main-content');
+
+  // Premier rendu ou changement de session → construction complète
+  if (!lastSessionData || lastSessionData.id !== s.id || force) {
+    lastSessionData = s;
+    buildMain(s);
+    return;
+  }
+
+  const prev = lastSessionData;
+  lastSessionData = s;
+
+  // ── Cartes stats (chiffres seulement) ──────────────────────
+  patchText('stat-cmds',    (s.totalCommands  || 0).toLocaleString());
+  patchText('stat-users',   (s.totalUsers     || 0).toLocaleString());
+  patchText('stat-msgs',    (s.messagesCount  || 0).toLocaleString());
+  patchText('stat-uptime',  s.uptimeHuman || '—');
+  patchText('stat-mem',     (s.memory || '—') + ' MB');
+
+  // ── QR / état connexion ────────────────────────────────────
+  if (prev.connection !== s.connection || prev.qrCode !== s.qrCode || prev.pairingCode !== s.pairingCode) {
+    const qz = document.getElementById('qr-zone');
+    if (qz) qz.innerHTML = renderQR(s);
+  }
+
+  // ── Statut infos ────────────────────────────────────────────
+  patchText('info-status', statusLabel(s.connection));
+  patchText('info-number', s.connectedNumber || '—');
+  patchText('info-ping',   s.lastPing ? new Date(s.lastPing).toLocaleTimeString('fr') : '—');
+
+  // ── Feed activité ────────────────────────────────────────────
+  const prevLen = prev.recentCommands?.length || 0;
+  const currLen = s.recentCommands?.length    || 0;
+  if (prevLen !== currLen || JSON.stringify(prev.recentCommands?.slice(-1)) !== JSON.stringify(s.recentCommands?.slice(-1))) {
+    const feed = document.getElementById('feed');
+    if (feed) feed.innerHTML = renderFeed(s.recentCommands || []);
+  }
+
+  // ── Top commandes ────────────────────────────────────────────
+  if (JSON.stringify(prev.topCommands) !== JSON.stringify(s.topCommands)) {
+    const tc = document.getElementById('top-cmds');
+    if (tc) tc.innerHTML = renderTopCmds(s.topCommands || []);
+  }
+
+  // ── Tableau utilisateurs ─────────────────────────────────────
+  if (JSON.stringify(prev.users) !== JSON.stringify(s.users)) {
+    const ub = document.getElementById('users-tbody');
+    if (ub) ub.innerHTML = renderUsers(s.users || []);
+  }
 }
 
-function renderSidebar(){
-  const el=document.getElementById('sessions-list');
-  if(allSessions.length===0){el.innerHTML='<div class="sess-empty">Aucune session.<br>Cliquez + Nouvelle.</div>';return;}
-  el.innerHTML=allSessions.map(s=>`
-    <div class="sess-item${currentSession===s.id?' active':''}" onclick="selectSession('${esc(s.id)}')">
-      <div class="sess-id">${esc(s.connectedNumber||s.id)}</div>
-      <div class="sess-status"><div class="sdot ${s.connection}"></div>
-      <span class="sess-label">${s.connection==='open'?'Connecté':s.connection==='connecting'?'Connexion...':'Déconnecté'}</span></div>
-    </div>`).join('');
+// Helpers patch texte sans innerHTML global
+function patchText(id, val) {
+  const el = document.getElementById(id);
+  if (el && el.textContent !== String(val)) el.textContent = val;
 }
 
-function selectSession(id){
-  currentSession=id;renderSidebar();refreshSession(id);
-}
+// Construction complète du DOM de la session (une seule fois ou si force)
+function buildMain(s) {
+  const mc = document.getElementById('main-content');
+  const existingTerm = mc.querySelector('.terminal');
 
-function renderMain(s){
-  const mc=document.getElementById('main-content');
-  // Garder le terminal si déjà présent
-  const existingTerm=mc.querySelector('.terminal');
-  mc.innerHTML=`
+  mc.innerHTML = `
     <div>
-      <div class="sec-title">${esc(s.connectedNumber||s.id)}</div>
+      <div class="sec-title" id="sec-title">${esc(s.connectedNumber || s.id)}</div>
       <div class="cards">
-        <div class="card hi"><div class="lbl">Commandes</div><div class="val">${(s.totalCommands||0).toLocaleString()}</div><div class="sub">total</div></div>
-        <div class="card"><div class="lbl">Utilisateurs</div><div class="val">${(s.totalUsers||0).toLocaleString()}</div><div class="sub">uniques</div></div>
-        <div class="card"><div class="lbl">Messages</div><div class="val">${(s.messagesCount||0).toLocaleString()}</div><div class="sub">session</div></div>
-        <div class="card"><div class="lbl">Uptime</div><div class="val" style="font-size:1rem;padding-top:8px">${s.uptimeHuman||'—'}</div><div class="sub">${s.memory||'—'} MB</div></div>
+        <div class="card hi"><div class="lbl">Commandes</div><div class="val" id="stat-cmds">${(s.totalCommands||0).toLocaleString()}</div><div class="sub">total</div></div>
+        <div class="card"><div class="lbl">Utilisateurs</div><div class="val" id="stat-users">${(s.totalUsers||0).toLocaleString()}</div><div class="sub">uniques</div></div>
+        <div class="card"><div class="lbl">Messages</div><div class="val" id="stat-msgs">${(s.messagesCount||0).toLocaleString()}</div><div class="sub">session</div></div>
+        <div class="card"><div class="lbl">Uptime</div><div class="val" id="stat-uptime" style="font-size:1rem;padding-top:8px">${s.uptimeHuman||'—'}</div><div class="sub" id="stat-mem">${s.memory||'—'} MB</div></div>
         <div class="card"><div class="lbl">Préfixe</div><div class="val" style="font-size:2.4rem">${esc(s.prefix||'!')}</div><div class="sub">Node ${esc(s.node||'')}</div></div>
       </div>
     </div>
@@ -238,9 +339,9 @@ function renderMain(s){
           <button class="btn-red" onclick="logout('${esc(s.id)}')">⏏ Déconnecter</button>
         </div>
         <div style="margin-top:12px">
-          <div class="irow"><span class="ikey">Statut</span><span class="ival">${statusLabel(s.connection)}</span></div>
-          <div class="irow"><span class="ikey">Numéro</span><span class="ival">${esc(s.connectedNumber||'—')}</span></div>
-          <div class="irow"><span class="ikey">Dernier ping</span><span class="ival">${s.lastPing?new Date(s.lastPing).toLocaleTimeString('fr'):'—'}</span></div>
+          <div class="irow"><span class="ikey">Statut</span><span class="ival" id="info-status">${statusLabel(s.connection)}</span></div>
+          <div class="irow"><span class="ikey">Numéro</span><span class="ival" id="info-number">${esc(s.connectedNumber||'—')}</span></div>
+          <div class="irow"><span class="ikey">Dernier ping</span><span class="ival" id="info-ping">${s.lastPing?new Date(s.lastPing).toLocaleTimeString('fr'):'—'}</span></div>
         </div>
       </div>
       <div class="panel">
@@ -252,7 +353,7 @@ function renderMain(s){
         </div>
         <div class="tab-p active" id="tp-act"><div class="feed" id="feed">${renderFeed(s.recentCommands||[])}</div></div>
         <div class="tab-p" id="tp-top"><div id="top-cmds">${renderTopCmds(s.topCommands||[])}</div></div>
-        <div class="tab-p" id="tp-users"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Numéro</th><th>Cmds</th><th>Top</th><th>Vu</th></tr></thead><tbody>${renderUsers(s.users||[])}</tbody></table></div></div>
+        <div class="tab-p" id="tp-users"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Numéro</th><th>Cmds</th><th>Top</th><th>Vu</th></tr></thead><tbody id="users-tbody">${renderUsers(s.users||[])}</tbody></table></div></div>
         <div class="tab-p" id="tp-send">
           <div class="send-form">
             <input type="text" id="send-to" placeholder="Numéro (ex: 237612345678)">
@@ -264,165 +365,246 @@ function renderMain(s){
       </div>
     </div>
     <div id="term-container"></div>`;
-  // Réinjecter le terminal existant ou en créer un vide
-  const tc=document.getElementById('term-container');
-  if(existingTerm){tc.appendChild(existingTerm);}
-  else{
-    tc.innerHTML=`<div class="terminal"><div class="term-head"><div class="term-dots"><div class="td2" style="background:#f85149"></div><div class="td2" style="background:#e3b341"></div><div class="td2" style="background:#25d366"></div></div><span style="font-family:var(--mono);font-size:.7rem;color:var(--muted)">Logs — Temps réel</span><button class="btn-ghost" style="padding:3px 8px;font-size:.68rem" onclick="clearTerm()">Vider</button></div><div class="term-body" id="terminal-body"></div></div>`;
+
+  const tc = document.getElementById('term-container');
+  if (existingTerm) {
+    tc.appendChild(existingTerm);
+  } else {
+    tc.innerHTML = `<div class="terminal"><div class="term-head"><div class="term-dots"><div class="td2" style="background:#f85149"></div><div class="td2" style="background:#e3b341"></div><div class="td2" style="background:#25d366"></div></div><span style="font-family:var(--mono);font-size:.7rem;color:var(--muted)">Logs — Temps réel</span><button class="btn-ghost" style="padding:3px 8px;font-size:.68rem" onclick="clearTerm()">Vider</button></div><div class="term-body" id="terminal-body"></div></div>`;
   }
 }
 
-function renderQR(s){
-  if(s.connection==='open') return `<div style="text-align:center"><div style="font-size:2.5rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:8px;font-size:.85rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.72rem;margin-top:4px">${esc(s.connectedNumber||'')}</div></div>`;
-  if(s.qrCode){const u='https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050508&color=25d366&qzone=2';return `<img src="${u}" alt="QR"><div class="qr-hint">Scannez avec WhatsApp</div>`;}
-  if(s.pairingCode) return `<div class="pairing">${esc(s.pairingCode)}</div><div class="qr-hint" style="margin-top:8px">WhatsApp → Appareils → Lier avec numéro</div>`;
+// ══════════════════════════════════════════════════════════════
+// INDICATEURS VISUELS
+// ══════════════════════════════════════════════════════════════
+function flashSync() {
+  const dot = document.getElementById('sync-dot');
+  if (!dot) return;
+  dot.style.opacity = '1';
+  setTimeout(() => { dot.style.opacity = '0'; }, 400);
+}
+
+function updateLastUpdate() {
+  const el = document.getElementById('last-update');
+  if (el) el.textContent = 'Màj ' + new Date().toLocaleTimeString('fr', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+// ══════════════════════════════════════════════════════════════
+// LOGS
+// ══════════════════════════════════════════════════════════════
+async function pollLogs() {
+  try {
+    const r = await api(`/api/logs?since=${logIndex}`);
+    if (r.logs && r.logs.length > 0) { appendLogs(r.logs); logIndex = r.total; }
+  } catch {}
+}
+
+function appendLogs(newLogs) {
+  const tb = document.getElementById('terminal-body');
+  if (!tb) return;
+  const atBottom = tb.scrollHeight - tb.clientHeight - tb.scrollTop < 30;
+  const frag = document.createDocumentFragment();
+  newLogs.forEach(l => {
+    const d = document.createElement('div');
+    d.className = 'log-line';
+    d.innerHTML = `<span class="log-time">${l.time.slice(11,19)}</span><span class="log-msg ${l.level}">${esc(l.msg)}</span>`;
+    frag.appendChild(d);
+  });
+  tb.appendChild(frag);
+  // Limiter à 500 lignes max
+  while (tb.children.length > 500) tb.removeChild(tb.firstChild);
+  if (atBottom) tb.scrollTop = tb.scrollHeight;
+}
+
+function clearTerm() {
+  const t = document.getElementById('terminal-body');
+  if (t) t.innerHTML = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+// RENDER HELPERS
+// ══════════════════════════════════════════════════════════════
+function renderQR(s) {
+  if (s.connection === 'open')
+    return `<div style="text-align:center"><div style="font-size:2.5rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:8px;font-size:.85rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.72rem;margin-top:4px">${esc(s.connectedNumber||'')}</div></div>`;
+  if (s.qrCode) {
+    const u = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050508&color=25d366&qzone=2';
+    return `<img src="${u}" alt="QR"><div class="qr-hint">Scannez avec WhatsApp</div>`;
+  }
+  if (s.pairingCode)
+    return `<div class="pairing">${esc(s.pairingCode)}</div><div class="qr-hint" style="margin-top:8px">WhatsApp → Appareils → Lier avec numéro</div>`;
   return `<div class="qr-placeholder">En attente...<br>Cliquez Relancer.</div>`;
 }
 
-function statusLabel(c){return c==='open'?'✅ Connecté':c==='connecting'?'⏳ Connexion...':'❌ Déconnecté';}
-
-function renderFeed(cmds){
-  if(!cmds.length) return '<div style="padding:16px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.75rem">Aucune activité</div>';
-  return [...cmds].reverse().map(c=>`<div class="feed-row"><span class="feed-cmd">!${esc(c.cmd)}</span><span class="feed-user">${esc(c.user)}</span><span class="feed-time">${new Date(c.time).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'})}</span></div>`).join('');
+function statusLabel(c) {
+  return c==='open'?'✅ Connecté':c==='connecting'?'⏳ Connexion...':'❌ Déconnecté';
 }
 
-function renderTopCmds(cmds){
-  if(!cmds.length) return '<div style="color:var(--muted);font-family:var(--mono);font-size:.75rem;padding:8px 0">Aucune donnée</div>';
-  const max=cmds[0]?.count||1;
-  return cmds.map(c=>`<div class="bar-row"><span class="bar-name">!${esc(c.cmd)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c.count/max*100)}%"></div></div><span class="bar-num">${c.count}</span></div>`).join('');
+function renderFeed(cmds) {
+  if (!cmds.length) return '<div style="padding:16px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.75rem">Aucune activité</div>';
+  return [...cmds].reverse().map(c =>
+    `<div class="feed-row"><span class="feed-cmd">!${esc(c.cmd)}</span><span class="feed-user">${esc(c.user)}</span><span class="feed-time">${new Date(c.time).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'})}</span></div>`
+  ).join('');
 }
 
-function renderUsers(users){
-  if(!users.length) return '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">Aucun utilisateur</td></tr>';
-  return users.map((u,i)=>`<tr><td style="color:var(--muted)">${i+1}</td><td>${esc(u.number)}</td><td><strong>${u.total}</strong></td><td>${u.topCmd?'!'+esc(u.topCmd):'—'}</td><td>${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('fr'):'—'}</td></tr>`).join('');
+function renderTopCmds(cmds) {
+  if (!cmds.length) return '<div style="color:var(--muted);font-family:var(--mono);font-size:.75rem;padding:8px 0">Aucune donnée</div>';
+  const max = cmds[0]?.count || 1;
+  return cmds.map(c =>
+    `<div class="bar-row"><span class="bar-name">!${esc(c.cmd)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c.count/max*100)}%"></div></div><span class="bar-num">${c.count}</span></div>`
+  ).join('');
 }
 
-function appendLogs(newLogs){
-  let tb=document.getElementById('terminal-body');
-  if(!tb) return;
-  newLogs.forEach(l=>{
-    const d=document.createElement('div');
-    d.className='log-line';
-    d.innerHTML=`<span class="log-time">${l.time.slice(11,19)}</span><span class="log-msg ${l.level}">${esc(l.msg)}</span>`;
-    tb.appendChild(d);
-  });
-  tb.scrollTop=tb.scrollHeight;
+function renderUsers(users) {
+  if (!users.length) return '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">Aucun utilisateur</td></tr>';
+  return users.map((u, i) =>
+    `<tr><td style="color:var(--muted)">${i+1}</td><td>${esc(u.number)}</td><td><strong>${u.total}</strong></td><td>${u.topCmd?'!'+esc(u.topCmd):'—'}</td><td>${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('fr'):'—'}</td></tr>`
+  ).join('');
 }
 
-function clearTerm(){const t=document.getElementById('terminal-body');if(t) t.innerHTML='';}
-
-async function newSession(){
-  const btn=document.getElementById('btn-new');
-  btn.disabled=true;btn.textContent='...';
-  const r=await api('/api/sessions','POST');
-  btn.disabled=false;btn.textContent='+ Nouvelle';
-  if(r.ok){toast('Session créée, QR en cours...','ok');await refreshSessions();selectSession(r.sessionId);}
-  else toast('Erreur','err');
+function renderSidebar() {
+  const el = document.getElementById('sessions-list');
+  if (allSessions.length === 0) { el.innerHTML = '<div class="sess-empty">Aucune session.<br>Cliquez + Nouvelle.</div>'; return; }
+  el.innerHTML = allSessions.map(s =>
+    `<div class="sess-item${currentSession===s.id?' active':''}" onclick="selectSession('${esc(s.id)}')">
+      <div class="sess-id">${esc(s.connectedNumber||s.id)}</div>
+      <div class="sess-status"><div class="sdot ${s.connection}"></div>
+      <span class="sess-label">${s.connection==='open'?'Connecté':s.connection==='connecting'?'Connexion...':'Déconnecté'}</span></div>
+    </div>`
+  ).join('');
 }
 
-async function restart(id){
-  const r=await api(`/api/sessions/${encodeURIComponent(id)}/restart`,'POST');
-  toast(r.message||'Reconnexion...','ok');
-  setTimeout(()=>refreshSession(id),3000);
+// ══════════════════════════════════════════════════════════════
+// ACTIONS
+// ══════════════════════════════════════════════════════════════
+function selectSession(id) {
+  currentSession = id;
+  lastSessionData = null; // force reconstruction complète au prochain tick
+  renderSidebar();
+  fetchingSession = true;
+  refreshSession(id, true).finally(() => { fetchingSession = false; });
 }
 
-async function logout(id){
-  if(!confirm('Déconnecter et supprimer cette session ?')) return;
-  const r=await api(`/api/sessions/${encodeURIComponent(id)}/logout`,'POST');
-  toast(r.message||'Déconnecté','ok');
-  currentSession=null;
-  document.getElementById('main-content').innerHTML='<div class="no-session"><div style="font-size:2.5rem">📱</div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
+async function newSession() {
+  const btn = document.getElementById('btn-new');
+  btn.disabled = true; btn.textContent = '...';
+  const r = await api('/api/sessions', 'POST');
+  btn.disabled = false; btn.textContent = 'QR';
+  if (r.ok) { toast('Session créée, QR en cours...', 'ok'); await refreshSessions(); selectSession(r.sessionId); }
+  else toast('Erreur', 'err');
+}
+
+async function restart(id) {
+  const r = await api(`/api/sessions/${encodeURIComponent(id)}/restart`, 'POST');
+  toast(r.message || 'Reconnexion...', 'ok');
+  setTimeout(() => refreshSession(id, true), 3000);
+}
+
+async function logout(id) {
+  if (!confirm('Déconnecter et supprimer cette session ?')) return;
+  const r = await api(`/api/sessions/${encodeURIComponent(id)}/logout`, 'POST');
+  toast(r.message || 'Déconnecté', 'ok');
+  currentSession = null; lastSessionData = null;
+  document.getElementById('main-content').innerHTML = '<div class="no-session"><div style="font-size:2.5rem">📱</div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
   refreshSessions();
 }
 
-async function sendMsg(id){
-  const to=document.getElementById('send-to')?.value?.trim();
-  const text=document.getElementById('send-text')?.value?.trim();
-  const res=document.getElementById('send-result');
-  if(!to||!text){res.textContent='⚠️ Requis';res.className='send-result err';res.style.display='block';return;}
-  const r=await api(`/api/sessions/${encodeURIComponent(id)}/send`,'POST',{to,text});
-  if(r.ok){res.textContent='✅ Envoyé !';res.className='send-result ok';document.getElementById('send-text').value='';}
-  else{res.textContent='❌ '+(r.error||'Erreur');res.className='send-result err';}
-  res.style.display='block';setTimeout(()=>res.style.display='none',3000);
+async function sendMsg(id) {
+  const to   = document.getElementById('send-to')?.value?.trim();
+  const text = document.getElementById('send-text')?.value?.trim();
+  const res  = document.getElementById('send-result');
+  if (!to || !text) { res.textContent = '⚠️ Requis'; res.className = 'send-result err'; res.style.display = 'block'; return; }
+  const r = await api(`/api/sessions/${encodeURIComponent(id)}/send`, 'POST', {to, text});
+  if (r.ok) { res.textContent = '✅ Envoyé !'; res.className = 'send-result ok'; document.getElementById('send-text').value = ''; }
+  else { res.textContent = '❌ ' + (r.error || 'Erreur'); res.className = 'send-result err'; }
+  res.style.display = 'block';
+  setTimeout(() => res.style.display = 'none', 3000);
 }
 
-function tab(btn,paneId){
-  btn.closest('.panel').querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  btn.closest('.panel').querySelectorAll('.tab-p').forEach(p=>p.classList.remove('active'));
+function tab(btn, paneId) {
+  btn.closest('.panel').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.closest('.panel').querySelectorAll('.tab-p').forEach(p => p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById(paneId)?.classList.add('active');
 }
 
-async function api(path,method='GET',body=null){
-  const o={method,headers:{'Content-Type':'application/json'}};
-  if(body) o.body=JSON.stringify(body);
-  const r=await fetch(path,o);return r.json();
+// ══════════════════════════════════════════════════════════════
+// UTILS
+// ══════════════════════════════════════════════════════════════
+async function api(path, method = 'GET', body = null) {
+  const o = {method, headers:{'Content-Type':'application/json'}};
+  if (body) o.body = JSON.stringify(body);
+  const r = await fetch(path, o);
+  return r.json();
 }
 
-function toast(msg,type='ok'){
-  const el=document.getElementById('toast');
-  el.textContent=msg;el.className='show '+type;
-  setTimeout(()=>el.className='',3000);
+function toast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'show ' + type;
+  setTimeout(() => el.className = '', 3000);
 }
 
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-
-async function doLogout(){await fetch("/logout",{method:"POST"});location.href="/login";}
-
-function showPairModal(){
-  document.getElementById('pair-modal').style.display='flex';
-  document.getElementById('pair-phone').value='';
-  document.getElementById('pair-result').style.display='none';
-  setTimeout(()=>document.getElementById('pair-phone').focus(),100);
-}
-function closePairModal(){
-  document.getElementById('pair-modal').style.display='none';
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-async function startPairing(){
-  const phone=document.getElementById('pair-phone').value.trim().replace(/\D/g,'');
-  const res=document.getElementById('pair-result');
-  if(!phone||phone.length<7){
-    res.textContent='⚠️ Numéro invalide';
-    res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
+async function doLogout() { await fetch('/logout', {method:'POST'}); location.href = '/login'; }
+
+// ── Modal pairing ─────────────────────────────────────────────
+function showPairModal() {
+  document.getElementById('pair-modal').style.display = 'flex';
+  document.getElementById('pair-phone').value = '';
+  document.getElementById('pair-result').style.display = 'none';
+  setTimeout(() => document.getElementById('pair-phone').focus(), 100);
+}
+function closePairModal() {
+  document.getElementById('pair-modal').style.display = 'none';
+}
+
+async function startPairing() {
+  const phone = document.getElementById('pair-phone').value.trim().replace(/\D/g,'');
+  const res   = document.getElementById('pair-result');
+  if (!phone || phone.length < 7) {
+    res.textContent = '⚠️ Numéro invalide';
+    res.style.cssText = 'display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
     return;
   }
-  res.textContent='⏳ Création de la session...';
-  res.style.cssText='display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
+  res.textContent = '⏳ Création de la session...';
+  res.style.cssText = 'display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
 
-  // Créer la session avec le numéro
-  const r=await api('/api/sessions','POST',{phone});
-  if(!r.ok){
-    res.textContent='❌ '+(r.error||'Erreur');
-    res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
+  const r = await api('/api/sessions', 'POST', {phone});
+  if (!r.ok) {
+    res.textContent = '❌ ' + (r.error || 'Erreur');
+    res.style.cssText = 'display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
     return;
   }
-  const sid=r.sessionId;
-  res.textContent='⏳ Code en cours... (10s)';
+  const sid = r.sessionId;
+  res.textContent = '⏳ Code en cours... (10s)';
   await refreshSessions();
   selectSession(sid);
 
-  // Attendre et afficher le code
-  let attempts=0;
-  const poll=setInterval(async()=>{
+  let attempts = 0;
+  const poll = setInterval(async () => {
     attempts++;
-    const s=await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(()=>null);
-    if(!s) return;
-    if(s.pairingCode){
-      res.innerHTML=`✅ Votre code: <strong style="font-size:1.3rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.72rem;color:var(--muted)">Valable ~60s — WhatsApp → Lier avec numéro</span>`;
-      res.style.cssText='display:block;background:rgba(37,211,102,.08);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.8rem;line-height:1.6';
+    const s = await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(() => null);
+    if (!s) return;
+    if (s.pairingCode) {
+      res.innerHTML = `✅ Votre code: <strong style="font-size:1.3rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.72rem;color:var(--muted)">Valable ~60s — WhatsApp → Lier avec numéro</span>`;
+      res.style.cssText = 'display:block;background:rgba(37,211,102,.08);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.8rem;line-height:1.6';
       clearInterval(poll);
     }
-    if(s.connection==='open'){ clearInterval(poll); closePairModal(); toast('✅ Connecté !','ok'); }
-    if(attempts>15) clearInterval(poll);
-  },2000);
+    if (s.connection === 'open') { clearInterval(poll); closePairModal(); toast('✅ Connecté !', 'ok'); }
+    if (attempts > 15) clearInterval(poll);
+  }, 2000);
 }
 
-// Fermer modal en cliquant dehors
-document.getElementById('pair-modal').addEventListener('click',function(e){
-  if(e.target===this) closePairModal();
+document.getElementById('pair-modal').addEventListener('click', function(e) {
+  if (e.target === this) closePairModal();
 });
 
+// ══════════════════════════════════════════════════════════════
+// DÉMARRAGE
+// ══════════════════════════════════════════════════════════════
 startPolling();
 </script>
 </body>
