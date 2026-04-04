@@ -18,7 +18,7 @@ RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest
 # Configurer yt-dlp pour utiliser Node.js (déjà présent dans node:20-slim)
 # comme runtime JavaScript (nécessaire pour certains formats YouTube)
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--js-runtimes nodejs\n" > /root/.config/yt-dlp/config
+    printf -- "--js-runtimes node\n" > /root/.config/yt-dlp/config
 
 WORKDIR /app
 

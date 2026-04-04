@@ -181,24 +181,35 @@ async function startSession(sessionId, phoneNumber = null) {
             state.connectedNumber = num;
 
             // Renommer la session avec le numéro réel
-            // Fix ENOENT : on copie puis supprime au lieu de moveSync (évite les conflits saveCreds)
+            // FIX ENOENT (définitif) :
+            //   _saveCreds() a l'ancien authPath capturé dans sa closure → il faut
+            //   réinitialiser useMultiFileAuthState sur le nouveau chemin et rebrancher
+            //   l'event AVANT de supprimer l'ancien dossier.
             if (sessionId !== num && !sessions.has(num)) {
                 sessions.set(num, state);
                 sessions.delete(sessionId);
                 state.id = num;
                 const newPath = path.join(SESSIONS_ROOT, num);
-                if (!fs.existsSync(newPath)) {
-                    try {
-                        fse.ensureDirSync(newPath);
+                try {
+                    fse.ensureDirSync(newPath);
+                    if (!fs.existsSync(newPath) || authPath !== newPath) {
                         fse.copySync(authPath, newPath, { overwrite: true });
-                        // Mettre à jour authPath dans le state AVANT la suppression
-                        // pour que saveCreds écrive au bon endroit
-                        state.authPath = newPath;
-                        setTimeout(() => { try { fse.removeSync(authPath); } catch {} }, 2000);
-                    } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
-                } else {
+                    }
                     state.authPath = newPath;
-                }
+
+                    // Rebrancher saveCreds sur le nouveau dossier
+                    // (l'ancienne closure pointe encore sur authPath = ancien chemin)
+                    sock.ev.off('creds.update', saveCreds);
+                    const { saveCreds: _newSaveCreds } = await useMultiFileAuthState(newPath);
+                    const newSaveCreds = async () => {
+                        try { fse.ensureDirSync(state.authPath); } catch {}
+                        return _newSaveCreds();
+                    };
+                    sock.ev.on('creds.update', newSaveCreds);
+
+                    // Supprimer l'ancien dossier seulement après avoir rebranché
+                    setTimeout(() => { try { if (authPath !== newPath) fse.removeSync(authPath); } catch {} }, 5000);
+                } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
             }
 
