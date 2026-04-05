@@ -13,10 +13,10 @@ import yts from 'yt-search';
 const execPromise = util.promisify(exec);
 
 // Taille max envoyable via WhatsApp (50 Mo)
-const MAX_SIZE_BYTES = 50 * 1024 * 1024;
+const MAX_SIZE_BYTES = 150 * 1024 * 1024;
 
 // Timeout global du processus (90 secondes)
-const PROCESS_TIMEOUT = 90_000;
+const PROCESS_TIMEOUT = 6000_000;
 
 // Dossier de téléchargement — /tmp sur Railway (éphémère), sinon ./downloads/ en local
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
