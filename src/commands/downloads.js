@@ -35,21 +35,41 @@ function cleanup(filePath) {
  * Exécute yt-dlp avec des options universelles
  */
 async function runYtdlp(url, isAudio, filePath) {
-    // Suppression de --allow-dynamic-js qui cause l'erreur sur votre version
-    // Utilisation de --extractor-args pour forcer le comportement si nécessaire
+    const isYoutube = /youtube\.com|youtu\.be/i.test(url);
+    const isTiktok  = /tiktok\.com/i.test(url);
+
     const args = [
         '--no-check-certificate',
         '--no-cache-dir',
         '--socket-timeout 30',
         '--no-playlist',
-        '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"',
-        `-o "${filePath}"`
+        '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"',
+        `-o "${filePath}"`,
     ];
+
+    // ── YouTube : contournement détection bot ──────────────────
+    if (isYoutube) {
+        // Utiliser le client iOS + Android qui ne nécessite pas de cookies
+        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
+        // Forcer le protocole m3u8 si disponible (moins bloqué)
+        args.push('--extractor-args "youtube:skip=translated_subs"');
+        // PO Token workaround — désactiver la vérification d'âge
+        args.push('--age-limit 99');
+        // Cookies depuis variable d'env si disponibles (optionnel)
+        if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
+            args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
+        }
+    }
+
+    // ── TikTok : impersonation navigateur ─────────────────────
+    if (isTiktok) {
+        args.push('--impersonate "chrome"');
+    }
 
     if (isAudio) {
         args.push('-x', '--audio-format mp3', '--audio-quality 0');
     } else {
-        args.push('-f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]"', '--merge-output-format mp4');
+        args.push('-f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]"', '--merge-output-format mp4');
     }
 
     const cmd = `yt-dlp ${args.join(' ')} "${url}"`;

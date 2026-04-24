@@ -7,22 +7,22 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-dev \
+    python3-pip \
     build-essential \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-# Installer yt-dlp depuis le release officiel GitHub
-RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -O /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp && \
-    yt-dlp -U
+# Installer curl_cffi (nécessaire pour TikTok impersonation) et yt-dlp via pip
+RUN pip3 install --break-system-packages curl_cffi yt-dlp
+
+# S'assurer que yt-dlp est à jour
+RUN yt-dlp -U || true
 
 # Configurer yt-dlp :
-#  - runtime JS    : node (présent dans node:20-slim)
-#  - player_client : ios + android (bypass la détection bot YouTube sans cookies)
-#  - no-check-certificates : évite les erreurs SSL dans certains VPS
+#  - player_client : ios + android + web_creator (bypass détection bot YouTube)
+#  - no-check-certificates : évite les erreurs SSL
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--js-runtimes node\n--extractor-args youtube:player_client=ios,android\n--no-check-certificates\n" \
+    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--no-check-certificates\n--socket-timeout 30\n" \
     > /root/.config/yt-dlp/config
 
 WORKDIR /app
