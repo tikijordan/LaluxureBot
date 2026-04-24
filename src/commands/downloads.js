@@ -12,27 +12,31 @@ import yts from 'yt-search';
 
 const execPromise = util.promisify(exec);
 
-// Taille max envoyable via WhatsApp (50 Mo)
-const MAX_SIZE_BYTES = 150 * 1024 * 1024;
-
-// Timeout global du processus (90 secondes)
+const MAX_SIZE_BYTES  = 150 * 1024 * 1024;
 const PROCESS_TIMEOUT = 6000_000;
 
-// Dossier de téléchargement — /tmp sur Railway (éphémère), sinon ./downloads/ en local
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     ? '/tmp/bot-downloads'
     : path.join(process.cwd(), 'downloads');
 
-// Créer le dossier s'il n'existe pas
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
-// Nettoie le fichier temporaire s'il existe
 function cleanup(filePath) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
 
+// Vérifie si curl_cffi est disponible (pour TikTok impersonate)
+let hasCurlCffi = false;
+try {
+    const { stdout } = await execPromise('python3 -c "import curl_cffi; print(\'ok\')"').catch(() => ({ stdout: '' }));
+    hasCurlCffi = stdout.trim() === 'ok';
+} catch {}
+
+// Vérifie si node peut être utilisé comme runtime JS pour yt-dlp
+const nodeRuntime = process.execPath; // chemin absolu de node en cours
+
 /**
- * Exécute yt-dlp avec des options universelles
+ * Exécute yt-dlp avec des options adaptées par plateforme
  */
 async function runYtdlp(url, isAudio, filePath) {
     const isYoutube = /youtube\.com|youtu\.be/i.test(url);
@@ -43,33 +47,37 @@ async function runYtdlp(url, isAudio, filePath) {
         '--no-cache-dir',
         '--socket-timeout 30',
         '--no-playlist',
-        '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"',
+        `--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"`,
         `-o "${filePath}"`,
     ];
 
-    // ── YouTube : contournement détection bot ──────────────────
+    // ── Runtime JS — node est présent dans l'image, on l'indique à yt-dlp ──
+    args.push(`--js-runtimes "node:${nodeRuntime}"`);
+
+    // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // Utiliser le client iOS + Android qui ne nécessite pas de cookies
-        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
-        // Forcer le protocole m3u8 si disponible (moins bloqué)
-        args.push('--extractor-args "youtube:skip=translated_subs"');
-        // PO Token workaround — désactiver la vérification d'âge
+        // Clients mobiles : contournent la vérification bot sans cookies
+        args.push('--extractor-args "youtube:player_client=ios,android"');
         args.push('--age-limit 99');
-        // Cookies depuis variable d'env si disponibles (optionnel)
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
         }
     }
 
-    // ── TikTok : impersonation navigateur ─────────────────────
-    if (isTiktok) {
-        args.push('--impersonate "chrome"');
+    // ── TikTok ─────────────────────────────────────────────────
+    if (isTiktok && hasCurlCffi) {
+        // curl_cffi disponible → impersonation Chrome
+        args.push('--impersonate "chrome-124"');
     }
+    // Si curl_cffi absent, yt-dlp tente quand même sans impersonation
 
     if (isAudio) {
         args.push('-x', '--audio-format mp3', '--audio-quality 0');
     } else {
-        args.push('-f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]"', '--merge-output-format mp4');
+        args.push(
+            '-f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]"',
+            '--merge-output-format mp4'
+        );
     }
 
     const cmd = `yt-dlp ${args.join(' ')} "${url}"`;
@@ -88,7 +96,7 @@ async function downloadVideo({ sock, from, text, msg }) {
         await runYtdlp(text, false, filePath);
 
         if (!fs.existsSync(filePath)) {
-            return sock.sendMessage(from, { text: '❌ Échec : Le fichier n\'a pas pu être généré.' });
+            return sock.sendMessage(from, { text: "❌ Échec : Le fichier n'a pas pu être généré." });
         }
 
         const size = fs.statSync(filePath).size;
@@ -105,7 +113,7 @@ async function downloadVideo({ sock, from, text, msg }) {
 
     } catch (err) {
         console.error('[video]', err.stderr || err.message);
-        await sock.sendMessage(from, { text: `❌ Erreur : ${err.message.split('\n')[0]}` });
+        await sock.sendMessage(from, { text: `❌ Erreur : ${(err.stderr || err.message).split('\n')[0]}` });
     } finally {
         cleanup(filePath);
     }
@@ -140,7 +148,7 @@ const cmds = {
                 const preview = thumb
                     ? { image: { url: thumb }, caption: `🎵 *${title}*\n⏱️ ${duration}\n\n📥 Conversion MP3 en cours...` }
                     : { text: `🎵 Conversion MP3 en cours...\n*${title}*` };
-                
+
                 await sock.sendMessage(from, preview, { quoted: msg });
 
                 await runYtdlp(url, true, filePath);
@@ -157,7 +165,7 @@ const cmds = {
 
             } catch (err) {
                 console.error('[play]', err.stderr || err.message);
-                await sock.sendMessage(from, { text: `❌ Erreur lors du téléchargement. Veuillez réessayer.` });
+                await sock.sendMessage(from, { text: '❌ Erreur lors du téléchargement. Veuillez réessayer.' });
             } finally {
                 cleanup(filePath);
             }
@@ -186,7 +194,7 @@ const cmds = {
     ytmp4: {
         description: 'YouTube → MP4',
         execute: async (ctx) => downloadVideo(ctx),
-    }
+    },
 };
 
 export default cmds;
