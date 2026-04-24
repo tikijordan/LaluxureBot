@@ -45,10 +45,20 @@ if (!global.botMessages)  global.botMessages   = new Map();
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
 // Clé : msg.key.id (identifiant unique Baileys)
-// Nettoyage automatique toutes les 5 minutes (évite les fuites mémoire)
 // ══════════════════════════════════════════════════════════════
-const processedMsgIds = new Set();
-setInterval(() => processedMsgIds.clear(), 5 * 60 * 1000);
+// DÉDUPLICATION MESSAGES — Map avec TTL par message (10 min)
+// Évite le clear() global qui causait des doubles réponses
+// ══════════════════════════════════════════════════════════════
+const processedMsgIds = new Map(); // msgId → timestamp
+const MSG_TTL = 10 * 60 * 1000;   // 10 minutes par message
+
+// Nettoyage ciblé : seuls les messages expirés sont supprimés
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, ts] of processedMsgIds) {
+        if (now - ts > MSG_TTL) processedMsgIds.delete(id);
+    }
+}, 60 * 1000); // check toutes les minutes
 
 // Filtre anti-logs Baileys
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
@@ -251,10 +261,10 @@ async function startSession(sessionId, phoneNumber = null) {
             if (isGistConfigured()) schedulePush(SESSIONS_ROOT, sessions);
 
             if (state.pingInterval) clearInterval(state.pingInterval);
-            // Ping toutes les 3 secondes pour maintenir la connexion active
+            // Ping toutes les 30 secondes — maintient la connexion sans surcharger le socket
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
-            }, 3000);
+            }, 30_000);
         }
 
         if (connection === 'close') {
@@ -284,7 +294,7 @@ async function startSession(sessionId, phoneNumber = null) {
             // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
             const msgId = msg.key.id;
             if (!msgId || processedMsgIds.has(msgId)) continue;
-            processedMsgIds.add(msgId);
+            processedMsgIds.set(msgId, Date.now());
 
             state.messagesCount++;
             try {

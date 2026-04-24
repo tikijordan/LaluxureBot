@@ -29,8 +29,18 @@ const _defaultNoTagGroups = new Set();
 // appelé directement depuis un autre module sans passer par index.js.
 // Clé : msg.key.id — nettoyage toutes les 5 min
 // ══════════════════════════════════════════════════════════════
-const _handledMsgIds = new Set();
-setInterval(() => _handledMsgIds.clear(), 5 * 60 * 1000);
+// ══════════════════════════════════════════════════════════════
+// DÉDUPLICATION HANDLER — Map avec TTL (10 min par message)
+// Couvre le cas où handler est appelé directement sans passer par index.js
+// ══════════════════════════════════════════════════════════════
+const _handledMsgIds = new Map();
+const _HANDLER_TTL   = 10 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, ts] of _handledMsgIds) {
+        if (now - ts > _HANDLER_TTL) _handledMsgIds.delete(id);
+    }
+}, 60 * 1000);
 
 /**
  * Traite un message entrant et exécute la commande correspondante.
@@ -55,8 +65,8 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     // ── Déduplication au niveau handler ───────────────────────
     const msgId = msg?.key?.id;
     if (msgId) {
-        if (_handledMsgIds.has(msgId)) return; // déjà traité → on ignore
-        _handledMsgIds.add(msgId);
+        if (_handledMsgIds.has(msgId)) return;
+        _handledMsgIds.set(msgId, Date.now());
     }
 
     // ── Résolution du préfixe et du propriétaire (contexte session ou fallback) ──
