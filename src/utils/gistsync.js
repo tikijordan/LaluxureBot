@@ -1,905 +1,181 @@
 /**
- * @file        index.js
- * @description Multi-sessions WhatsApp Bot — Dashboard intégré, sans .env obligatoire
+ * @file        gistsync.js
+ * @description Synchronisation des sessions WhatsApp via GitHub Gist
+ *              Permet la persistance entre redéploiements Railway sans volume
+ *
+ * Variables d'environnement requises :
+ *   GITHUB_TOKEN  — token GitHub avec scope "gist"
+ *   GIST_ID       — ID du Gist secret (32 chars dans l'URL du Gist)
  */
 
-import http from 'http';
-import axios from 'axios';
-import fs from 'fs';
-import fse from 'fs-extra';
+import fs   from 'fs';
+import fse  from 'fs-extra';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-import makeWASocket, {
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-    DisconnectReason,
-    getContentType,
-    downloadContentFromMessage,
-} from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
-import pino from 'pino';
-import qrcodeterminal from 'qrcode-terminal';
-
-dotenv.config();
-
-const __dirname     = path.dirname(fileURLToPath(import.meta.url));
-const SESSIONS_ROOT = path.join(__dirname, '../sessions');
-const DATA_ROOT     = path.join(__dirname, '../data');
-const DASH_DIR      = path.join(__dirname, '../dashboard');
-const PREFIX        = process.env.PREFIX || '!';
-const PORT          = parseInt(process.env.PORT || '3000');
-const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
-const startTime     = Date.now();
-
-fse.ensureDirSync(SESSIONS_ROOT);
-fse.ensureDirSync(DATA_ROOT);
-['stats','notes','banned'].forEach(d => fse.ensureDirSync(path.join(DATA_ROOT, d)));
-
-// État global partagé avec les commandes
-if (!global.noTagGroups)  global.noTagGroups  = new Set();
-if (!global.mutedMembers) global.mutedMembers  = new Set();
-if (!global.botMessages)  global.botMessages   = new Map();
-
-// ══════════════════════════════════════════════════════════════
-// DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
-// Clé : msg.key.id (identifiant unique Baileys)
-// Nettoyage automatique toutes les 5 minutes (évite les fuites mémoire)
-// ══════════════════════════════════════════════════════════════
-const processedMsgIds = new Set();
-setInterval(() => processedMsgIds.clear(), 5 * 60 * 1000);
-
-// Filtre anti-logs Baileys
-const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
-    'MessageCounterError','Closing open session','Closing session:',
-    'registrationId','_chains','currentRatchet','indexInfo',
-    'ephemeralKeyPair','SessionEntry','chainKey','chainType',
-    'rootKey','baseKey','RemoteIdentity'];
-const _sw = process.stderr.write.bind(process.stderr);
-process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.includes(n))) return true; return _sw(d,...a); };
-const _ce = console.error.bind(console);
-console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
-
-import { handleCommand } from './handler.js';
-import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
-import { getBotMode } from './commands/security.js';
-import { initDB, saveSession, restoreSession, listSessions, deleteSession } from './utils/sessiondb.js';
-import { isGistConfigured, pullSessionsFromGist, writeSessionFiles, schedulePush } from './utils/gistsync.js';
-
-// Sessions Map + logs circulaires
-const sessions = new Map();
-const logs = [];
-
-function addLog(level, msg) {
-    const entry = { level, msg, time: new Date().toISOString() };
-    logs.push(entry);
-    if (logs.length > 200) logs.shift();
-    const icon = { error:'❌', warn:'⚠️', success:'✅', info:'ℹ️' }[level] || 'ℹ️';
-    console.log(`[${entry.time.slice(11,19)}] ${icon} ${msg}`);
-}
-
-// AutoSaveViewOnce
-async function autoSaveViewOnce(sock, msg, OWNER, ctx) {
-    if (!OWNER) return;
-    const ownerJid = OWNER + '@s.whatsapp.net';
-    let inner = msg.message?.viewOnceMessage?.message
-             || msg.message?.viewOnceMessageV2?.message
-             || msg.message?.viewOnceMessageV2Extension?.message;
-    if (!inner) {
-        const ct2 = getContentType(msg.message);
-        if (ct2 && /^(image|video|audio)Message$/.test(ct2) && msg.message[ct2]?.viewOnce === true) inner = msg.message;
-    }
-    if (!inner) return;
-    const type = getContentType(inner);
-    if (!type || !/^(image|video|audio)Message$/.test(type)) return;
-    const obj  = inner[type];
-    const kind = type.replace('Message','');
-    try {
-        const stream = await downloadContentFromMessage(obj, kind);
-        let buf = Buffer.from([]);
-        for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
-        const cap = `*Vue unique interceptée*\nDe: @${ctx.senderNumber}\n${obj?.caption?'Légende: '+obj.caption:''}`;
-        if (kind==='image') await sock.sendMessage(ownerJid, { image:buf, caption:cap }, { mentions:[ctx.senderJid] });
-        else if (kind==='video') await sock.sendMessage(ownerJid, { video:buf, caption:cap }, { mentions:[ctx.senderJid] });
-        else { await sock.sendMessage(ownerJid, { text:cap }); await sock.sendMessage(ownerJid, { audio:buf, mimetype:'audio/mp4', ptt:false }); }
-    } catch(e) { addLog('error', 'AutoVO: '+e.message); }
-}
-
-// Démarrer une session
-// phoneNumber optionnel → active le pairing code au lieu du QR
-async function startSession(sessionId, phoneNumber = null) {
-    const existing = sessions.get(sessionId);
-    if (existing?.connection === 'open') { addLog('warn',`Session ${sessionId} déjà active`); return; }
-
-    const authPath = path.join(SESSIONS_ROOT, sessionId);
-    fse.ensureDirSync(authPath); // ← crée le dossier AVANT useMultiFileAuthState
-
-    const state = sessions.get(sessionId) || {
-        id: sessionId, connection: 'connecting', qrCode: null, pairingCode: null,
-        connectedNumber: null, sock: null, pingInterval: null,
-        commandsCount: 0, messagesCount: 0, recentCommands: [],
-        lastPing: null, createdAt: new Date().toISOString(),
-        authPath, // ← on stocke le chemin courant dans le state
-    };
-    state.connection = 'connecting';
-    state.qrCode = null;
-    state.pairingCode = null;
-    state.authPath = authPath;
-    sessions.set(sessionId, state);
-    addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
-
-    const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
-
-    // ── FIX ENOENT : on s'assure que le dossier existe avant chaque écriture ──
-    // Après un renommage de session, authPath peut changer → on lit state.authPath
-    const saveCreds = async () => {
-        try { fse.ensureDirSync(state.authPath); } catch {}
-        return _saveCreds();
-    };
-
-    const { version } = await fetchLatestBaileysVersion();
-    const logger = pino({ level: 'silent' });
-
-    const sock = makeWASocket({
-        version, logger, printQRInTerminal: false,
-        auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
-        browser: ['Ubuntu','Chrome','20.0.0'],
-        syncFullHistory: false, markOnlineOnConnect: true,
-        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
-        retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
-    });
-
-    state.sock = sock;
-    sock.ev.on('creds.update', saveCreds);
-    // ── Sauvegarde BD + SESSION_STRING + Gist à chaque mise à jour des credentials ──
-    sock.ev.on('creds.update', () => {
-        try { saveSession(state.id, state.connectedNumber || state.id, state.authPath); } catch {}
-        // Mettre à jour la SESSION_STRING en mémoire
-        try {
-            const aPath = state.authPath;
-            const files = fs.readdirSync(aPath).filter(f => f.endsWith('.json'));
-            const sessionData = {};
-            files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
-            state.sessionString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-        } catch {}
-        // Push Gist (debounce 10s) — toutes les sessions actives
-        if (isGistConfigured()) schedulePush(SESSIONS_ROOT, sessions);
-    });
-
-    // ── Pairing code : demander le code après connexion WS
-    if (phoneNumber && !auth.creds.registered) {
-        setTimeout(async () => {
-            try {
-                const num = phoneNumber.replace(/\D/g, '');
-                const code = await sock.requestPairingCode(num);
-                state.pairingCode = code;
-                addLog('success', `[${sessionId}] Pairing code: ${code}`);
-            } catch (e) {
-                addLog('error', `[${sessionId}] Erreur pairing code: ${e.message}`);
-            }
-        }, 3000);
-    }
-
-    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-        if (qr && !phoneNumber) {
-            state.qrCode = qr;
-            state.connection = 'connecting';
-            qrcodeterminal.generate(qr, { small: true });
-            addLog('info', `[${sessionId}] QR prêt — scannez avec WhatsApp`);
-        }
-
-        if (connection === 'open') {
-            const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
-            state.connection = 'open';
-            state.qrCode = null;
-            state.pairingCode = null;
-            state.connectedNumber = num;
-
-            // Renommer la session avec le numéro réel
-            // FIX ENOENT (définitif) :
-            //   _saveCreds() a l'ancien authPath capturé dans sa closure → il faut
-            //   réinitialiser useMultiFileAuthState sur le nouveau chemin et rebrancher
-            //   l'event AVANT de supprimer l'ancien dossier.
-            if (sessionId !== num && !sessions.has(num)) {
-                sessions.set(num, state);
-                sessions.delete(sessionId);
-                state.id = num;
-                const newPath = path.join(SESSIONS_ROOT, num);
-                try {
-                    fse.ensureDirSync(newPath);
-                    if (!fs.existsSync(newPath) || authPath !== newPath) {
-                        fse.copySync(authPath, newPath, { overwrite: true });
-                    }
-                    state.authPath = newPath;
-
-                    // Rebrancher saveCreds sur le nouveau dossier
-                    // (l'ancienne closure pointe encore sur authPath = ancien chemin)
-                    sock.ev.off('creds.update', saveCreds);
-                    const { saveCreds: _newSaveCreds } = await useMultiFileAuthState(newPath);
-                    const newSaveCreds = async () => {
-                        try { fse.ensureDirSync(state.authPath); } catch {}
-                        return _newSaveCreds();
-                    };
-                    sock.ev.on('creds.update', newSaveCreds);
-
-                    // Supprimer l'ancien dossier seulement après avoir rebranché
-                    setTimeout(() => { try { if (authPath !== newPath) fse.removeSync(authPath); } catch {} }, 5000);
-                } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
-                addLog('success', `Session renommée [${sessionId}] → [${num}]`);
-            }
-
-            addLog('success', `[${state.id}] ✅ Connecté — Numéro: ${num} | Préfixe: ${PREFIX}`);
-
-            // SESSION_STRING — affichée complète pour copier dans Railway env vars
-            try {
-                const aPath = state.authPath;
-                const files = fs.readdirSync(aPath).filter(f => f.endsWith('.json'));
-                const sessionData = {};
-                files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
-                const sStr = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-                // Log complet — copier cette valeur dans Railway > Variables > SESSION_STRING
-                console.log(`\n========== SESSION_STRING [${state.id}] ==========\n${sStr}\n==================================================\n`);
-                addLog('info', `[${state.id}] SESSION_STRING loggée (voir console pour valeur complète)`);
-                state.sessionString = sStr; // stocké dans le state pour l'API
-            } catch {}
-
-            // ── PERSISTANCE BD — sauvegarde immédiate après connexion ──
-            try { saveSession(state.id, num, state.authPath); } catch(e) { addLog('warn', `[DB] saveSession: ${e.message}`); }
-
-            // ── GIST PUSH — sauvegarde immédiate après connexion ──
-            if (isGistConfigured()) schedulePush(SESSIONS_ROOT, sessions);
-
-            if (state.pingInterval) clearInterval(state.pingInterval);
-            // Ping toutes les 3 secondes pour maintenir la connexion active
-            state.pingInterval = setInterval(async () => {
-                try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
-            }, 3000);
-        }
-
-        if (connection === 'close') {
-            state.connection = 'close';
-            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-            const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            addLog('warn', `[${state.id}] Déconnecté (code: ${code})`);
-            if (code === DisconnectReason.loggedOut) {
-                addLog('warn', `[${state.id}] Session expirée. Supprimez sessions/${state.id}/ pour rescanner.`);
-            } else {
-                addLog('info', `[${state.id}] Reconnexion dans 3s...`);
-                setTimeout(() => startSession(state.id), 3000);
-            }
-        }
-    });
-
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // ── FIX DOUBLE RÉPONSE #1 : ignorer tout sauf les vrais nouveaux messages ──
-        // 'notify' = message reçu en temps réel
-        // 'append' = sync historique (au démarrage) → NE PAS traiter
-        if (type !== 'notify') return;
-
-        for (const msg of messages) {
-            if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
-
-            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message ──
-            // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
-            const msgId = msg.key.id;
-            if (!msgId || processedMsgIds.has(msgId)) continue;
-            processedMsgIds.add(msgId);
-
-            state.messagesCount++;
-            try {
-                const rawJid  = msg.key.remoteJid;
-                const fromMe  = msg.key.fromMe;
-                const isGroup = rawJid.endsWith('@g.us');
-                const isLid   = rawJid.endsWith('@lid');
-                const OWNER = (state.connectedNumber || '').replace(/\D/g, '');
-                const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
-
-                let senderJid, senderNumber;
-                if (isGroup) { senderJid=msg.key.participant||''; senderNumber=senderJid.split('@')[0].replace(/\D/g,''); }
-                else { senderNumber=fromMe?OWNER:rawJid.split('@')[0].replace(/\D/g,''); senderJid=senderNumber+'@s.whatsapp.net'; }
-
-                const isOwner = fromMe || senderNumber === OWNER;
-
-                const ct = getContentType(msg.message);
-                let body = '';
-                if (ct==='conversation') body=msg.message.conversation||'';
-                else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
-                else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
-                else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
-
-                const isViewOnce = !fromMe && (
-                    /^viewOnceMessage/.test(ct) || msg.message?.imageMessage?.viewOnce===true ||
-                    msg.message?.videoMessage?.viewOnce===true || msg.message?.audioMessage?.viewOnce===true
-                );
-                if (isViewOnce) autoSaveViewOnce(sock, msg, OWNER, { senderNumber, senderJid, isGroup, rawJid }).catch(()=>{});
-
-                const isCmd = body.startsWith(PREFIX);
-                if (fromMe && !isCmd) continue;
-                if (isGroup) trackGroupMsg(from, senderJid);
-
-                if (isCmd) {
-                    const cmd = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase()||'';
-                    state.commandsCount++;
-                    state.recentCommands.push({ cmd, user: senderNumber, time: new Date().toISOString() });
-                    if (state.recentCommands.length > 50) state.recentCommands.shift();
-                    addLog('info', `[${state.id}] CMD !${cmd} par ${senderNumber}`);
-                }
-
-                // ── Mode privé : bloquer les non-owners ──────────────────
-                const currentBotMode = getBotMode();
-                if (isCmd && !isOwner && currentBotMode === 'private') {
-                    const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
-                    if (!['public', 'botmode'].includes(cmdCheck)) {
-                        await sock.sendMessage(from, {
-                            text: `🔴 *Bot en mode privé*\nSeul l'administrateur peut utiliser le bot pour le moment.`,
-                        });
-                        continue;
-                    }
-                }
-
-                // ── Anti-mute : supprimer messages des mutés ─────────────
-                if (isGroup && global.mutedMembers?.has(`${from}__${senderJid}`) && !isOwner) {
-                    try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
-                    continue;
-                }
-
-                await handleCommand(sock, msg, {}, {
-                    body, from, isGroup, isOwner, senderNumber, sender: senderJid,
-                    noTagGroups: global.noTagGroups,
-                    botMode: currentBotMode,
-                    prefix: PREFIX,
-                    owner: OWNER,
-                });
-            } catch(err) { addLog('error', `[${state.id}] ${err.message}`); }
-        }
-    });
-}
-
-// ══════════════════════════════════════════════════════════════
-// SESSION_STRING — Restauration depuis variable d'environnement
-// Permet de survivre aux redéploiements sans volume persistant
-// Usage Railway : coller la SESSION_STRING dans les variables d'env
-// Format : SESSION_STRING=<base64> ou SESSION_STRING_<NUM>=<base64>
-// ══════════════════════════════════════════════════════════════
-function restoreFromEnvSessionString() {
-    // Cherche SESSION_STRING, SESSION_STRING_1, SESSION_STRING_2, ...
-    const vars = Object.entries(process.env)
-        .filter(([k]) => k === 'SESSION_STRING' || /^SESSION_STRING_\d+$/.test(k))
-        .sort(([a], [b]) => a.localeCompare(b));
-
-    if (vars.length === 0) return;
-
-    addLog('info', `[ENV] ${vars.length} SESSION_STRING trouvée(s) — restauration...`);
-
-    for (const [envKey, b64] of vars) {
-        try {
-            const sessionData = JSON.parse(Buffer.from(b64.trim(), 'base64').toString('utf-8'));
-            // Déduire l'ID depuis creds.json si possible
-            let sessionId = 'env_session';
-            try {
-                const creds = JSON.parse(sessionData['creds.json'] || '{}');
-                const num = creds?.me?.id?.split(':')[0] || creds?.me?.id;
-                if (num) sessionId = num;
-            } catch {}
-            // Si plusieurs SESSION_STRING, distinguer par suffixe
-            if (vars.length > 1) {
-                const suffix = envKey.replace('SESSION_STRING', '').replace('_', '');
-                if (suffix && sessionId === 'env_session') sessionId = `env_session_${suffix}`;
-            }
-
-            const authPath = path.join(SESSIONS_ROOT, sessionId);
-            // Ne pas écraser une session déjà présente sur le disque
-            if (fs.existsSync(path.join(authPath, 'creds.json'))) {
-                addLog('info', `[ENV] Session [${sessionId}] déjà sur disque — skip`);
-                continue;
-            }
-            fse.ensureDirSync(authPath);
-            for (const [filename, content] of Object.entries(sessionData)) {
-                fs.writeFileSync(path.join(authPath, filename), content, 'utf-8');
-            }
-            addLog('success', `[ENV] Session [${sessionId}] restaurée depuis ${envKey}`);
-        } catch (e) {
-            addLog('warn', `[ENV] Erreur restauration ${envKey}: ${e.message}`);
-        }
-    }
-}
-
-// ══════════════════════════════════════════════════════════════
-// WATCHDOG — Détecte les sessions zombies (connectées mais muettes)
-// Symptôme : state.connection === 'open' mais le socket ne répond plus
-// Solution : si le dernier ping échoue 3 fois de suite → force reconnexion
-// ══════════════════════════════════════════════════════════════
-const watchdogFailCounts = new Map(); // sessionId → nb échecs consécutifs
-const WATCHDOG_INTERVAL  = 30 * 1000; // vérification toutes les 30s
-const WATCHDOG_MAX_FAILS = 3;         // 3 échecs = ~90s sans réponse → reconnexion
-
-setInterval(async () => {
-    for (const [id, state] of sessions) {
-        if (state.connection !== 'open' || !state.sock) {
-            watchdogFailCounts.delete(id);
-            continue;
-        }
-        try {
-            // sendPresenceUpdate sert de heartbeat — lance une exception si le socket est mort
-            await state.sock.sendPresenceUpdate('available');
-            state.lastPing = new Date().toISOString();
-            watchdogFailCounts.set(id, 0); // succès → reset compteur
-        } catch (e) {
-            const fails = (watchdogFailCounts.get(id) || 0) + 1;
-            watchdogFailCounts.set(id, fails);
-            addLog('warn', `[Watchdog] [${id}] ping échoué (${fails}/${WATCHDOG_MAX_FAILS}): ${e.message}`);
-            if (fails >= WATCHDOG_MAX_FAILS) {
-                addLog('warn', `[Watchdog] [${id}] Session zombie détectée — reconnexion forcée`);
-                watchdogFailCounts.set(id, 0);
-                state.connection = 'close';
-                if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-                try { state.sock.end(); } catch {}
-                setTimeout(() => startSession(id), 2000);
-            }
-        }
-    }
-}, WATCHDOG_INTERVAL);
-
-// Initialiser la BD des sessions et charger les sessions existantes
-async function loadExistingSessions() {
-    // ── 0. Pull depuis GitHub Gist (priorité sur tout le reste) ──
-    if (isGistConfigured()) {
-        addLog('info', '[Gist] Récupération des sessions depuis GitHub Gist...');
-        const gistSessions = await pullSessionsFromGist();
-        if (gistSessions && Object.keys(gistSessions).length > 0) {
-            for (const [sessionId, files] of Object.entries(gistSessions)) {
-                const authPath = path.join(SESSIONS_ROOT, sessionId);
-                // Toujours écraser depuis le Gist — c'est la source de vérité
-                try {
-                    writeSessionFiles(authPath, files);
-                    addLog('success', `[Gist] Session [${sessionId}] restaurée`);
-                } catch (e) {
-                    addLog('warn', `[Gist] Erreur restauration [${sessionId}]: ${e.message}`);
-                }
-            }
-        } else if (gistSessions === null) {
-            addLog('warn', '[Gist] Impossible de contacter GitHub — on continue avec le disque local');
-        } else {
-            addLog('info', '[Gist] Aucune session dans le Gist — premier déploiement ?');
-        }
-    }
-
-    // ── 1. Restaurer depuis SESSION_STRING env (fallback si pas de Gist) ──
-    if (!isGistConfigured()) restoreFromEnvSessionString();
-
-    // ── Initialiser la base de données ──
-    initDB();
-
-    // ── Restaurer les sessions depuis la BD (persistence entre déploiements) ──
-    try {
-        const dbSessions = listSessions();
-        if (dbSessions.length > 0) {
-            addLog('info', `[DB] ${dbSessions.length} session(s) trouvée(s) en BD, restauration...`);
-            for (const dbSess of dbSessions) {
-                const authPath = path.join(SESSIONS_ROOT, dbSess.id);
-                // Restaurer les fichiers de session depuis la BD si le dossier est absent/vide
-                if (!fs.existsSync(path.join(authPath, 'creds.json'))) {
-                    const restored = restoreSession(dbSess.id, authPath);
-                    if (restored) addLog('success', `[DB] Session [${dbSess.id}] restaurée depuis la BD`);
-                    else { addLog('warn', `[DB] Échec restauration [${dbSess.id}]`); continue; }
-                }
-            }
-        }
-    } catch(e) { addLog('warn', `[DB] Erreur restauration: ${e.message}`); }
-
-    // ── Charger depuis le dossier sessions/ (y compris les sessions restaurées) ──
-    if (!fs.existsSync(SESSIONS_ROOT)) return;
-    const dirs = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-        fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-        fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-    );
-    if (dirs.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
-    else { addLog('info',`${dirs.length} session(s) prêtes: ${dirs.join(', ')}`); dirs.forEach(id => startSession(id)); }
-}
-
-// Helpers
-function sendJson(res, data, status=200) {
-    res.writeHead(status, { 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' });
-    res.end(JSON.stringify(data));
-}
-function readBody(req) {
-    return new Promise(r => { let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{r(JSON.parse(b));}catch{r({});} }); });
-}
-function getStatsData() {
-    try { return JSON.parse(fs.readFileSync(path.join(DATA_ROOT,'stats','stats.json'),'utf8')); } catch { return {}; }
-}
-
-// ════════════════════════════════════════════════════════════════════
-// SÉCURITÉ DASHBOARD — Protection maximale
-// ════════════════════════════════════════════════════════════════════
-import { randomBytes, timingSafeEqual, createHash } from 'crypto';
-
-const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD || 'changeme';
-const ALLOWED_ORIGIN = process.env.DASHBOARD_ORIGIN  || null;
-const MAX_BODY_BYTES = 512 * 1024;
-const RATE_WINDOW    = 60 * 1000;
-const RATE_MAX       = 80;
-const LOGIN_WINDOW   = 15 * 60 * 1000;
-const LOGIN_MAX      = 5;
-const LOCKOUT_TIME   = 30 * 60 * 1000;
-const SESSION_TTL    = 8 * 3600 * 1000;
-const DASH_SESSIONS_FILE = path.join(DATA_ROOT, '.dash_sessions.json');
-const IS_HTTPS = process.env.DASHBOARD_HTTPS === 'true';
-
-const PASS_HASH = createHash('sha256').update(DASH_PASSWORD).digest();
-
-const dashSessions = new Map();
-function loadDashSessions() {
-    try {
-        const raw = JSON.parse(fs.readFileSync(DASH_SESSIONS_FILE,'utf8'));
-        const now = Date.now();
-        Object.entries(raw).forEach(([t,s]) => { if (s.expires>now) dashSessions.set(t,s); });
-    } catch {}
-}
-function saveDashSessions() {
-    const obj = {};
-    dashSessions.forEach((v,k) => { obj[k]=v; });
-    try { fs.writeFileSync(DASH_SESSIONS_FILE, JSON.stringify(obj)); } catch {}
-}
-loadDashSessions();
-
-const rateLimiter  = new Map();
-const loginTracker = new Map();
-setInterval(() => {
-    const now = Date.now();
-    rateLimiter.forEach((v,k)  => { if (now>v.reset)      rateLimiter.delete(k); });
-    loginTracker.forEach((v,k) => { if (v.lockedUntil && now>v.lockedUntil) loginTracker.delete(k); });
-    dashSessions.forEach((v,k) => { if (now>v.expires)    dashSessions.delete(k); });
-}, 5 * 60 * 1000);
-
-function genToken() { return randomBytes(32).toString('hex'); }
-
-function checkPassword(input) {
-    try {
-        const h = createHash('sha256').update(input).digest();
-        return timingSafeEqual(PASS_HASH, h);
-    } catch { return false; }
-}
-
-function isRateLimited(ip) {
-    const now = Date.now();
-    const e = rateLimiter.get(ip);
-    if (!e || now>e.reset) { rateLimiter.set(ip,{count:1,reset:now+RATE_WINDOW}); return false; }
-    return ++e.count > RATE_MAX;
-}
-
-function checkLoginAttempt(ip) {
-    const now = Date.now();
-    const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:0 };
-    if (e.lockedUntil > now) return { blocked:true, lockoutMins:Math.ceil((e.lockedUntil-now)/60000) };
-    if (now - e.windowStart > LOGIN_WINDOW) { e.attempts=0; e.windowStart=now; }
-    e.attempts++;
-    if (e.attempts >= LOGIN_MAX) {
-        e.lockedUntil = now + LOCKOUT_TIME;
-        loginTracker.set(ip, e);
-        addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
-        return { blocked:true, lockoutMins:30 };
-    }
-    loginTracker.set(ip, e);
-    return { blocked:false, remaining: LOGIN_MAX - e.attempts };
-}
-function recordLoginSuccess(ip) { loginTracker.delete(ip); }
-
-function isAuthenticated(req) {
-    const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
-    if (!token || !/^[0-9a-f]{64}$/.test(token)) return false;
-    const s = dashSessions.get(token);
-    if (!s || Date.now()>s.expires) { dashSessions.delete(token); return false; }
-    return true;
-}
-
-function sanitizeId(raw) {
-    const id = decodeURIComponent(raw||'');
-    if (!/^[\w\-+]{1,50}$/.test(id)) return null;
-    const resolved = path.resolve(SESSIONS_ROOT, id);
-    if (!resolved.startsWith(path.resolve(SESSIONS_ROOT)+path.sep) &&
-        resolved !== path.resolve(SESSIONS_ROOT)) return null;
-    return id;
-}
-
-function readBodySafe(req) {
+import https from 'https';
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const GIST_ID      = process.env.GIST_ID      || '';
+const GIST_FILE    = 'sessions.json'; // nom du fichier dans le Gist
+
+// Délai debounce pour éviter de spammer l'API GitHub à chaque creds.update
+const PUSH_DEBOUNCE_MS = 10_000; // 10 secondes
+let   pushTimer        = null;
+let   pendingPush      = false;
+
+// ─────────────────────────────────────────────
+// Helpers HTTP (pas de dépendance axios ici)
+// ─────────────────────────────────────────────
+function gistRequest(method, body = null) {
     return new Promise((resolve, reject) => {
-        let b='', size=0;
-        req.on('data', c => { size+=c.length; if(size>MAX_BODY_BYTES){req.destroy();reject(new Error('Payload trop grand'));return;} b+=c; });
-        req.on('end', ()=>{ try{resolve(JSON.parse(b));}catch{resolve({});} });
+        const payload = body ? JSON.stringify(body) : null;
+        const options = {
+            hostname: 'api.github.com',
+            path:     `/gists/${GIST_ID}`,
+            method,
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'User-Agent':    'LaluxureBot/1.0',
+                'Accept':        'application/vnd.github.v3+json',
+                'Content-Type':  'application/json',
+                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+            },
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try   { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+                catch { resolve({ status: res.statusCode, body: data }); }
+            });
+        });
         req.on('error', reject);
+        if (payload) req.write(payload);
+        req.end();
     });
 }
 
-function maskSensitive(msg) {
-    return msg
-        .replace(/(SESSION_STRING)[^\s,}]*/gi, '$1=[MASQUÉ]')
-        .replace(/([A-Za-z0-9+/]{80,}={0,2})/g, m => m.slice(0,10)+'...[MASQUÉ]');
+// ─────────────────────────────────────────────
+// Vérifie que les variables sont configurées
+// ─────────────────────────────────────────────
+export function isGistConfigured() {
+    return !!(GITHUB_TOKEN && GIST_ID);
 }
 
-const SECURITY_HEADERS = {
-    'X-Content-Type-Options':  'nosniff',
-    'X-Frame-Options':         'DENY',
-    'X-XSS-Protection':        '1; mode=block',
-    'Referrer-Policy':         'strict-origin',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https://api.qrserver.com; font-src https://fonts.gstatic.com; connect-src 'self'",
-    ...(IS_HTTPS ? { 'Strict-Transport-Security': 'max-age=63072000; includeSubDomains' } : {}),
-};
-
-const SEC_HEADERS = SECURITY_HEADERS;
-
-function getSessionToken(req) {
-    return (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1] || null;
-}
-function recordFailedLogin(ip) {
-    checkLoginAttempt(ip);
-}
-function clearLoginAttempts(ip) {
-    loginTracker.delete(ip);
-}
-
-const _addLogOrig = addLog;
-global.addLog = function(level, msg) { _addLogOrig(level, maskSensitive(msg)); };
-
-http.createServer(async (req, res) => {
-    const ip       = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
-    const url      = new URL(req.url, `http://localhost:${PORT}`);
-    const pathname = url.pathname;
-    const method   = req.method;
-
-    if (isRateLimited(ip)) {
-        res.writeHead(429, { 'Content-Type':'application/json', 'Retry-After':'60' });
-        return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
-    }
-
-    const origin = req.headers['origin'] || '';
-    const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
-    const corsHeaders = {
-        'Access-Control-Allow-Origin':  corsOk ? (origin || '*') : 'null',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Allow-Credentials': 'true',
-    };
-    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
-
-    function sendJson(r, data, status=200) {
-        r.writeHead(status, { ...SECURITY_HEADERS, ...corsHeaders, 'Content-Type':'application/json' });
-        r.end(JSON.stringify(data));
-    }
-    function sendHtml(r, html, status=200) {
-        r.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'text/html; charset=utf-8' });
-        r.end(html);
-    }
-
-    // GET / — dashboard
-    if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
-        if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
-        const hp = path.join(DASH_DIR,'index.html');
-        if (fs.existsSync(hp)) { res.writeHead(200,{'Content-Type':'text/html; charset=utf-8',...SEC_HEADERS}); return res.end(fs.readFileSync(hp)); }
-        res.writeHead(302,{Location:'/login'}); return res.end();
-    }
-
-    // GET /login
-    if (pathname==='/login' && method==='GET') {
-        const errCode = url.searchParams.get('error');
-        const lockMin = url.searchParams.get('min') || '30';
-        const errMsg  = errCode === 'locked'
-            ? `Trop de tentatives. IP bloquée ${lockMin} minutes.`
-            : errCode ? 'Mot de passe incorrect.' : '';
-        const html = `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connexion — Bot Dashboard</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:#080b10;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.box{background:#0d1117;border:1px solid #21262d;border-radius:14px;padding:36px;width:340px;display:flex;flex-direction:column;gap:16px}
-.logo{font-size:1.1rem;font-weight:700;color:#f0f6fc;display:flex;align-items:center;gap:8px}
-.dot{width:9px;height:9px;border-radius:50%;background:#25d366;box-shadow:0 0 8px #25d366}
-p{font-size:.78rem;color:#484f58;font-family:monospace}
-input{background:#080b10;border:1px solid #21262d;border-radius:8px;padding:11px 14px;color:#c9d1d9;font-size:.9rem;width:100%;outline:none;transition:border-color .2s}
-input:focus{border-color:#25d366}
-button{background:#25d366;color:#000;font-weight:700;border:none;border-radius:8px;padding:12px;cursor:pointer;font-size:.9rem;transition:background .15s;width:100%}
-button:hover{background:#1fb858}
-.err{background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);color:#f85149;font-size:.78rem;font-family:monospace;padding:9px 12px;border-radius:6px;${errMsg?'':'display:none'}}
-</style></head><body><div class="box">
-<div class="logo"><div class="dot"></div>Bot Dashboard</div>
-<p>Accès protégé — mot de passe requis</p>
-<form method="POST" action="/login">
-<input type="password" name="password" placeholder="Mot de passe..." autofocus required autocomplete="current-password">
-<button type="submit">Connexion</button>
-</form>
-<div class="err">${errMsg}</div>
-</div></body></html>`;
-        return sendHtml(res, html);
-    }
-
-    // POST /login
-    if (pathname==='/login' && method==='POST') {
-        let b = '';
-        await new Promise(r => { req.on('data',c=>b+=c.slice(0,500)); req.on('end',r); });
-        const pwd = new URLSearchParams(b).get('password') || '';
-        if (pwd !== DASH_PASSWORD) {
-            recordFailedLogin(ip);
-            addLog('warn', `[Auth] Échec login depuis ${ip}`);
-            res.writeHead(302,{Location:'/login?error=1'}); return res.end();
+// ─────────────────────────────────────────────
+// PULL — Charge toutes les sessions depuis le Gist
+// Retourne un objet { sessionId: { fichier: contenu, ... }, ... }
+// ─────────────────────────────────────────────
+export async function pullSessionsFromGist() {
+    if (!isGistConfigured()) return null;
+    try {
+        const { status, body } = await gistRequest('GET');
+        if (status !== 200) {
+            console.error(`[Gist] ❌ Pull échoué (HTTP ${status})`);
+            return null;
         }
-        const oldToken = getSessionToken(req);
-        if (oldToken) dashSessions.delete(oldToken);
-        clearLoginAttempts(ip);
-        const token = genToken();
-        dashSessions.set(token, { ip, expires: Date.now()+SESSION_TTL });
-        addLog('success', `[Auth] Connexion dashboard depuis ${ip}`);
-        const cookieFlags = [`dash_token=${token}`,'HttpOnly','SameSite=Strict',`Max-Age=${Math.floor(SESSION_TTL/1000)}`,'Path=/',...(IS_HTTPS?['Secure']:[])].join('; ');
-        res.writeHead(302, { Location:'/', 'Set-Cookie': cookieFlags, ...SECURITY_HEADERS });
-        return res.end();
+        const raw = body?.files?.[GIST_FILE]?.content;
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        console.log(`[Gist] ✅ Pull réussi — ${Object.keys(parsed).length} session(s)`);
+        return parsed; // { "237XXXXX": { "creds.json": "...", ... }, ... }
+    } catch (e) {
+        console.error('[Gist] ❌ Erreur pull:', e.message);
+        return null;
     }
+}
 
-    // POST /logout
-    if (pathname==='/logout' && method==='POST') {
-        const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
-        if (token) { dashSessions.delete(token); saveDashSessions(); }
-        addLog('info', `[Auth] Déconnexion depuis ${ip}`);
-        res.writeHead(302, { Location:'/login', 'Set-Cookie':'dash_token=; HttpOnly; Max-Age=0; Path=/', ...SECURITY_HEADERS });
-        return res.end();
-    }
-
-    // GET /api/status — public
-    if (pathname==='/api/status') return sendJson(res,{ status:'online', sessions:sessions.size, uptime:Math.floor((Date.now()-startTime)/1000) });
-
-    // ── Routes protégées (auth requise) ────────────────────────────
-    if (!isAuthenticated(req)) return sendJson(res,{ error:'Non autorisé — connectez-vous sur /login' },401);
-
-    // GET /api/logs
-    if (pathname==='/api/logs' && method==='GET') {
-        const since = Math.max(0, parseInt(url.searchParams.get('since')||'0'));
-        const safeLogs = logs.slice(since).map(l => ({ ...l, msg: maskSensitive(l.msg) }));
-        return sendJson(res,{ logs: safeLogs, total:logs.length });
-    }
-
-    // GET /api/sessions
-    if (pathname==='/api/sessions' && method==='GET') {
-        const list = [...sessions.values()].map(s=>({
-            id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
-            qrCode:s.qrCode, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
-        }));
-        return sendJson(res,{ sessions:list });
-    }
-
-    // POST /api/sessions — nouvelle session (QR ou pairing code)
-    if (pathname==='/api/sessions' && method==='POST') {
-        if (sessions.size >= 10) return sendJson(res,{ error:'Maximum 10 sessions simultanées' },429);
-        let body = {};
-        try { body = await readBodySafe(req); } catch {}
-        const phone = (body.phone||'').replace(/\D/g,'');
-        const id = 'sess_'+Date.now();
-        await startSession(id, phone || null);
-        const msg = phone ? 'Session créée, pairing code en cours...' : 'Session créée, QR en cours...';
-        return sendJson(res,{ ok:true, sessionId:id, message:msg });
-    }
-
-    // GET /api/sessions/:id
-    const smatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
-    if (smatch && method==='GET') {
-        const sid = sanitizeId(smatch[1]);
-        if (!sid) return sendJson(res,{ error:'ID de session invalide' },400);
-        const s = sessions.get(sid);
-        if (!s) return sendJson(res,{ error:'Session introuvable' },404);
-        const statsData = getStatsData();
-        const totalCmds = Object.values(statsData).reduce((a,u)=>a+(u.total||0),0);
-        const topMap    = {};
-        Object.values(statsData).forEach(u => Object.entries(u.commands||{}).forEach(([c,n])=>{ topMap[c]=(topMap[c]||0)+n; }));
-        const topCmds   = Object.entries(topMap).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([cmd,count])=>({cmd,count}));
-        const users     = Object.entries(statsData).map(([n,d])=>({number:n,total:d.total,lastSeen:d.lastSeen,topCmd:Object.entries(d.commands||{}).sort((a,b)=>b[1]-a[1])[0]?.[0]})).sort((a,b)=>b.total-a.total).slice(0,50);
-        const uptime    = Math.floor((Date.now()-startTime)/1000);
-        return sendJson(res,{
-            ...s, sock:undefined, pingInterval:undefined,
-            recentCommands:s.recentCommands.slice(-20),
-            uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
-            totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
-            topCommands:topCmds, users, prefix:PREFIX,
-            memory:Math.round(process.memoryUsage().heapUsed/1024/1024), node:process.version,
-            sessionString: s.sessionString || null,
+// ─────────────────────────────────────────────
+// PUSH — Envoie toutes les sessions vers le Gist
+// sessionsData : { sessionId: { fichier: contenu }, ... }
+// ─────────────────────────────────────────────
+export async function pushSessionsToGist(sessionsData) {
+    if (!isGistConfigured()) return false;
+    try {
+        const content = JSON.stringify(sessionsData, null, 0); // compact
+        const { status } = await gistRequest('PATCH', {
+            files: { [GIST_FILE]: { content } },
         });
+        if (status !== 200) {
+            console.error(`[Gist] ❌ Push échoué (HTTP ${status})`);
+            return false;
+        }
+        console.log(`[Gist] ✅ Push réussi — ${Object.keys(sessionsData).length} session(s)`);
+        return true;
+    } catch (e) {
+        console.error('[Gist] ❌ Erreur push:', e.message);
+        return false;
+    }
+}
+
+// ─────────────────────────────────────────────
+// Lit les fichiers d'une session depuis le disque
+// Retourne { "creds.json": "...", "keys/xxx": "..." }
+// ─────────────────────────────────────────────
+export function readSessionFiles(authPath) {
+    const result = {};
+    if (!fs.existsSync(authPath)) return result;
+
+    // creds.json à la racine
+    const credsPath = path.join(authPath, 'creds.json');
+    if (fs.existsSync(credsPath)) {
+        result['creds.json'] = fs.readFileSync(credsPath, 'utf-8');
     }
 
-    // POST /api/sessions/:id/pair
-    const pairmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/pair$/);
-    if (pairmatch && method==='POST') {
-        const sid = sanitizeId(pairmatch[1]);
-        if (!sid) return sendJson(res,{error:'ID invalide'},400);
-        let body;
-        try { body = await readBodySafe(req); } catch { return sendJson(res,{error:'Payload trop grand'},413); }
-        const phone = (body.phone||'').replace(/\D/g,'');
-        if (!phone || phone.length < 7 || phone.length > 15) return sendJson(res,{error:'Numéro invalide'},400);
-        const s = sessions.get(sid);
-        if (!s) return sendJson(res,{error:'Session introuvable'},404);
-        if (s.connection === 'open') return sendJson(res,{error:'Déjà connecté'},400);
-        try {
-            if (!s.sock) {
-                await startSession(sid, phone);
-                return sendJson(res,{ok:true, message:'Session démarrée, code en cours...'});
+    // Fichiers dans keys/
+    const keysDir = path.join(authPath, 'keys');
+    if (fs.existsSync(keysDir)) {
+        for (const f of fs.readdirSync(keysDir)) {
+            const fp = path.join(keysDir, f);
+            if (fs.statSync(fp).isFile()) {
+                result[`keys/${f}`] = fs.readFileSync(fp, 'utf-8');
             }
-            const code = await s.sock.requestPairingCode(phone);
-            s.pairingCode = code;
-            addLog('success',`[${sid}] Pairing code: ${code}`);
-            return sendJson(res,{ok:true, code});
-        } catch(e) {
-            return sendJson(res,{error:e.message},500);
         }
     }
 
-    // POST /api/sessions/:id/restart
-    const rmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
-    if (rmatch && method==='POST') {
-        const sid = sanitizeId(rmatch[1]);
-        if (!sid) return sendJson(res,{error:'ID invalide'},400);
-        const s = sessions.get(sid);
-        if (!s) return sendJson(res,{error:'Session introuvable'},404);
-        addLog('info',`[${sid}] Redémarrage depuis le dashboard (IP: ${ip})`);
-        try { if(s.sock) await s.sock.end(); } catch {}
-        setTimeout(()=>startSession(sid),1500);
-        return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
+    // Autres .json à la racine (app-state-sync, etc.)
+    for (const f of fs.readdirSync(authPath)) {
+        if (f.endsWith('.json') && f !== 'creds.json') {
+            result[f] = fs.readFileSync(path.join(authPath, f), 'utf-8');
+        }
     }
 
-    // POST /api/sessions/:id/logout
-    const lmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/logout$/);
-    if (lmatch && method==='POST') {
-        const sid = sanitizeId(lmatch[1]);
-        if (!sid) return sendJson(res,{error:'ID invalide'},400);
-        const s = sessions.get(sid);
-        if (!s) return sendJson(res,{error:'Session introuvable'},404);
-        addLog('info',`[${sid}] Déconnexion depuis le dashboard (IP: ${ip})`);
-        try { if(s.sock) await s.sock.logout(); } catch {}
-        fse.removeSync(path.join(SESSIONS_ROOT,sid));
-        sessions.delete(sid);
-        try { deleteSession(sid); } catch {}
-        return sendJson(res,{ ok:true, message:'Session supprimée.' });
+    return result;
+}
+
+// ─────────────────────────────────────────────
+// Restaure les fichiers d'une session sur le disque
+// ─────────────────────────────────────────────
+export function writeSessionFiles(authPath, files) {
+    fse.ensureDirSync(authPath);
+    for (const [filename, content] of Object.entries(files)) {
+        const fullPath = path.join(authPath, filename);
+        fse.ensureDirSync(path.dirname(fullPath));
+        fs.writeFileSync(fullPath, content, 'utf-8');
     }
+}
 
-    // DELETE /api/sessions/:id
-    const dmatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
-    if (dmatch && method==='DELETE') {
-        const sid = sanitizeId(dmatch[1]);
-        if (!sid) return sendJson(res,{error:'ID invalide'},400);
-        const s = sessions.get(sid);
-        try { if(s?.sock) await s.sock.end(); } catch {}
-        fse.removeSync(path.join(SESSIONS_ROOT,sid));
-        sessions.delete(sid);
-        try { deleteSession(sid); } catch {}
-        addLog('info',`Session [${sid}] supprimée (IP: ${ip})`);
-        return sendJson(res,{ ok:true });
-    }
+// ─────────────────────────────────────────────
+// PUSH DEBOUNCE — appelé à chaque creds.update
+// Attend 10s d'inactivité avant de pusher pour grouper les appels
+// ─────────────────────────────────────────────
+export function schedulePush(sessionsRoot, activeSessions) {
+    pendingPush = true;
+    if (pushTimer) clearTimeout(pushTimer);
+    pushTimer = setTimeout(async () => {
+        if (!pendingPush) return;
+        pendingPush = false;
 
-    // POST /api/sessions/:id/send
-    const sendmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/send$/);
-    if (sendmatch && method==='POST') {
-        const sid  = sanitizeId(sendmatch[1]);
-        if (!sid) return sendJson(res,{error:'ID invalide'},400);
-        const s    = sessions.get(sid);
-        let body;
-        try { body = await readBodySafe(req); } catch { return sendJson(res,{error:'Payload trop grand'},413); }
-        if (!s||s.connection!=='open') return sendJson(res,{error:'Session non connectée'},503);
-        const toNum = (body.to||'').replace(/\D/g,'');
-        if (!toNum || toNum.length < 7 || toNum.length > 15) return sendJson(res,{error:'Numéro invalide (7-15 chiffres)'},400);
-        if (!body.text || typeof body.text !== 'string' || body.text.length > 4096) return sendJson(res,{error:'Message invalide (max 4096 chars)'},400);
-        try {
-            await s.sock.sendMessage(toNum+'@s.whatsapp.net',{ text:body.text });
-            addLog('success',`[${sid}] Message → ${toNum.slice(0,-4)}**** (IP: ${ip})`);
-            return sendJson(res,{ ok:true });
-        } catch(e) { return sendJson(res,{error:e.message},500); }
-    }
+        // Construire l'objet complet de toutes les sessions actives
+        const allSessions = {};
+        for (const [id, state] of activeSessions) {
+            if (state.connection !== 'open' || !state.authPath) continue;
+            const files = readSessionFiles(state.authPath);
+            if (Object.keys(files).length > 0) {
+                allSessions[id] = files;
+            }
+        }
 
-    sendJson(res,{ error:'Route inconnue' },404);
-
-}).listen(PORT, BIND_HOST, () => {
-    const railwayUrl = process.env.RAILWAY_PUBLIC_DOMAIN
-        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-        : null;
-
-    addLog('success', `Dashboard démarré sur le port ${PORT} (${BIND_HOST}) — mot de passe requis`);
-    if (railwayUrl) addLog('success', `URL publique Railway: ${railwayUrl}`);
-
-    if (DASH_PASSWORD === 'changeme') {
-        addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables Railway !');
-    }
-});
-
-loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+        if (Object.keys(allSessions).length === 0) return;
+        await pushSessionsToGist(allSessions);
+    }, PUSH_DEBOUNCE_MS);
+}
