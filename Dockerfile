@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
     python3 \
+    python3-dev \
+    build-essential \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
@@ -33,7 +35,10 @@ RUN npm install
 COPY . .
 
 # Créer les dossiers nécessaires
-RUN mkdir -p /tmp/bot-downloads /app/sessions /app/data
+RUN mkdir -p /tmp/bot-downloads /app/sessions /app/data /app/data/stats /app/data/notes /app/data/banned
+
+# Volume pour la persistance des sessions et de la BD
+VOLUME ["/app/sessions", "/app/data"]
 
 EXPOSE 3000
 

@@ -115,7 +115,7 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 <body>
 <div id="app">
   <header>
-    <div class="logo"><div class="logo-dot"></div>WhatsApp Bot</div>
+    <div class="logo"><div class="logo-dot"></div>Laluxure Bot</div>
     <div class="header-right">
       <div id="sync-dot"></div>
       <span id="last-update"></span>
@@ -176,6 +176,7 @@ let logIndex       = 0;
 let timerSession = null; // toutes les 3s
 let timerLog     = null; // toutes les 2s
 let timerSidebar = null; // toutes les 5s
+let timerPageRefresh = null; // rechargement page toutes les 15s
 
 // Verrous pour éviter les appels concurrents
 let fetchingSession = false;
@@ -192,6 +193,8 @@ function startPolling() {
   timerSidebar = setInterval(refreshSessions, 5000);
   timerSession = setInterval(tickSession,    3000);
   timerLog     = setInterval(tickLogs,       2000);
+  // Rechargement complet de la page toutes les 15 secondes
+  timerPageRefresh = setInterval(() => { location.reload(); }, 15000);
   refreshAll(true);
 }
 
@@ -199,6 +202,7 @@ function stopPolling() {
   clearInterval(timerSession);
   clearInterval(timerLog);
   clearInterval(timerSidebar);
+  clearInterval(timerPageRefresh);
 }
 
 document.addEventListener('visibilitychange', () => {

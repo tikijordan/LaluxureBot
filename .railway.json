@@ -1,0 +1,15 @@
+{
+  "build": {
+    "builder": "nixpacks"
+  },
+  "deploy": {
+    "startCommand": "npm start",
+    "restartPolicyType": "on_failure",
+    "restartPolicyMaxRetries": 5
+  },
+  "variables": {
+    "PORT": "3000",
+    "BIND_HOST": "0.0.0.0",
+    "NODE_ENV": "production"
+  }
+}
