@@ -37,9 +37,6 @@ COPY . .
 # Créer les dossiers nécessaires
 RUN mkdir -p /tmp/bot-downloads /app/sessions /app/data /app/data/stats /app/data/notes /app/data/banned
 
-# Volume pour la persistance des sessions et de la BD
-VOLUME ["/app/sessions", "/app/data"]
-
 EXPOSE 3000
 
 CMD ["node", "src/index.js"]
