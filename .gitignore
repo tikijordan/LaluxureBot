@@ -1,11 +1,11 @@
 # Dépendances
 node_modules/
-
+.vscode/
 # Session WhatsApp (JAMAIS push ça)
 sessions/
 bot-final.zip
 session.zip
-
+bot.zip
 # Variables sensibles
 .env
 env.txt
