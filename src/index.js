@@ -74,8 +74,7 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { initDB, saveSession, restoreSession, listSessions, deleteSession } from './utils/sessiondb.js';
-import { isGistConfigured, pullSessionsFromGist, writeSessionFiles, schedulePush } from './utils/gistsync.js';
+import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave } from './utils/mongostore.js';
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
@@ -163,9 +162,10 @@ async function startSession(sessionId, phoneNumber = null) {
 
     state.sock = sock;
     sock.ev.on('creds.update', saveCreds);
-    // ── Sauvegarde BD + SESSION_STRING + Gist à chaque mise à jour des credentials ──
+    // ── Sauvegarde MongoDB + SESSION_STRING à chaque mise à jour des credentials ──
     sock.ev.on('creds.update', () => {
-        try { saveSession(state.id, state.connectedNumber || state.id, state.authPath); } catch {}
+        // Sauvegarde MongoDB avec debounce 5s
+        scheduleSave(state.id, state.connectedNumber || state.id, state.authPath);
         // Mettre à jour la SESSION_STRING en mémoire
         try {
             const aPath = state.authPath;
@@ -174,8 +174,6 @@ async function startSession(sessionId, phoneNumber = null) {
             files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
             state.sessionString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
         } catch {}
-        // Push Gist (debounce 10s) — toutes les sessions actives
-        if (isGistConfigured()) schedulePush(SESSIONS_ROOT, sessions);
     });
 
     // ── Pairing code : demander le code après connexion WS
@@ -255,11 +253,8 @@ async function startSession(sessionId, phoneNumber = null) {
                 state.sessionString = sStr; // stocké dans le state pour l'API
             } catch {}
 
-            // ── PERSISTANCE BD — sauvegarde immédiate après connexion ──
-            try { saveSession(state.id, num, state.authPath); } catch(e) { addLog('warn', `[DB] saveSession: ${e.message}`); }
-
-            // ── GIST PUSH — sauvegarde immédiate après connexion ──
-            if (isGistConfigured()) schedulePush(SESSIONS_ROOT, sessions);
+            // ── MONGODB — sauvegarde immédiate après connexion ──
+            try { await saveSessionMongo(state.id, num, state.authPath); } catch(e) { addLog('warn', `[MongoDB] saveSession: ${e.message}`); }
 
             if (state.pingInterval) clearInterval(state.pingInterval);
             // Ping toutes les 30 secondes — maintient la connexion sans surcharger le socket
@@ -452,52 +447,20 @@ setInterval(async () => {
     }
 }, WATCHDOG_INTERVAL);
 
-// Initialiser la BD des sessions et charger les sessions existantes
+// Initialiser MongoDB et charger les sessions existantes
 async function loadExistingSessions() {
-    // ── 0. Pull depuis GitHub Gist (priorité sur tout le reste) ──
-    if (isGistConfigured()) {
-        addLog('info', '[Gist] Récupération des sessions depuis GitHub Gist...');
-        const gistSessions = await pullSessionsFromGist();
-        if (gistSessions && Object.keys(gistSessions).length > 0) {
-            for (const [sessionId, files] of Object.entries(gistSessions)) {
-                const authPath = path.join(SESSIONS_ROOT, sessionId);
-                // Toujours écraser depuis le Gist — c'est la source de vérité
-                try {
-                    writeSessionFiles(authPath, files);
-                    addLog('success', `[Gist] Session [${sessionId}] restaurée`);
-                } catch (e) {
-                    addLog('warn', `[Gist] Erreur restauration [${sessionId}]: ${e.message}`);
-                }
-            }
-        } else if (gistSessions === null) {
-            addLog('warn', '[Gist] Impossible de contacter GitHub — on continue avec le disque local');
-        } else {
-            addLog('info', '[Gist] Aucune session dans le Gist — premier déploiement ?');
-        }
+    // ── 0. Connexion MongoDB ────────────────────────────────────
+    const mongoOk = await connectMongo();
+    if (mongoOk) {
+        addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
+        const count = await restoreAllSessions(SESSIONS_ROOT);
+        if (count > 0) addLog('success', `[MongoDB] ${count} session(s) restaurée(s)`);
+        else addLog('info', '[MongoDB] Aucune session en base — premier déploiement ?');
+    } else {
+        // ── Fallback SESSION_STRING env si MongoDB indisponible ──
+        addLog('warn', '[MongoDB] Indisponible — fallback SESSION_STRING');
+        restoreFromEnvSessionString();
     }
-
-    // ── 1. Restaurer depuis SESSION_STRING env (fallback si pas de Gist) ──
-    if (!isGistConfigured()) restoreFromEnvSessionString();
-
-    // ── Initialiser la base de données ──
-    initDB();
-
-    // ── Restaurer les sessions depuis la BD (persistence entre déploiements) ──
-    try {
-        const dbSessions = listSessions();
-        if (dbSessions.length > 0) {
-            addLog('info', `[DB] ${dbSessions.length} session(s) trouvée(s) en BD, restauration...`);
-            for (const dbSess of dbSessions) {
-                const authPath = path.join(SESSIONS_ROOT, dbSess.id);
-                // Restaurer les fichiers de session depuis la BD si le dossier est absent/vide
-                if (!fs.existsSync(path.join(authPath, 'creds.json'))) {
-                    const restored = restoreSession(dbSess.id, authPath);
-                    if (restored) addLog('success', `[DB] Session [${dbSess.id}] restaurée depuis la BD`);
-                    else { addLog('warn', `[DB] Échec restauration [${dbSess.id}]`); continue; }
-                }
-            }
-        }
-    } catch(e) { addLog('warn', `[DB] Erreur restauration: ${e.message}`); }
 
     // ── Charger depuis le dossier sessions/ (y compris les sessions restaurées) ──
     if (!fs.existsSync(SESSIONS_ROOT)) return;
@@ -861,7 +824,7 @@ button:hover{background:#1fb858}
         try { if(s.sock) await s.sock.logout(); } catch {}
         fse.removeSync(path.join(SESSIONS_ROOT,sid));
         sessions.delete(sid);
-        try { deleteSession(sid); } catch {}
+        deleteSessionMongo(sid).catch(() => {});
         return sendJson(res,{ ok:true, message:'Session supprimée.' });
     }
 
@@ -874,7 +837,7 @@ button:hover{background:#1fb858}
         try { if(s?.sock) await s.sock.end(); } catch {}
         fse.removeSync(path.join(SESSIONS_ROOT,sid));
         sessions.delete(sid);
-        try { deleteSession(sid); } catch {}
+        deleteSessionMongo(sid).catch(() => {});
         addLog('info',`Session [${sid}] supprimée (IP: ${ip})`);
         return sendJson(res,{ ok:true });
     }

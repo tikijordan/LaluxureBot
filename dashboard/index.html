@@ -2,232 +2,367 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Laluxure Bot — Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@300;500;700;900&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>LaluxureBot — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#080b10;--s1:#0d1117;--s2:#161b24;--border:#21262d;--green:#25d366;--green2:#128c7e;--red:#f85149;--yellow:#e3b341;--blue:#58a6ff;--muted:#484f58;--text:#c9d1d9;--bright:#f0f6fc;--mono:'JetBrains Mono',monospace;--sans:'Outfit',sans-serif}
-*{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;overflow:hidden}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);display:flex;flex-direction:column}
-#app{display:flex;flex-direction:column;height:100%}
-header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0;gap:12px;flex-wrap:wrap}
-.logo{font-size:1.1rem;font-weight:900;color:var(--bright);letter-spacing:-0.5px;display:flex;align-items:center;gap:8px}
-.logo-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 2s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-.header-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.main-layout{display:flex;flex:1;overflow:hidden}
-.sidebar{width:240px;background:var(--s1);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
-.content{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px}
-.sidebar-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.sidebar-head span{font-size:.72rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1px}
-#sessions-list{flex:1;overflow-y:auto;padding:8px}
-.sess-item{padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid transparent;margin-bottom:4px;transition:all .15s;position:relative}
-.sess-item:hover{background:var(--s2);border-color:var(--border)}
-.sess-item.active{background:var(--s2);border-color:var(--green)}
-.sess-item.active::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:60%;background:var(--green);border-radius:0 2px 2px 0}
-.sess-id{font-family:var(--mono);font-size:.78rem;color:var(--bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sess-status{display:flex;align-items:center;gap:5px;margin-top:3px}
-.sdot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.sdot.open{background:var(--green);box-shadow:0 0 5px var(--green)}
-.sdot.connecting{background:var(--yellow);animation:blink 1s infinite}
-.sdot.close{background:var(--muted)}
-.sess-label{font-size:.7rem;font-family:var(--mono);color:var(--muted)}
-.sess-empty{padding:20px;text-align:center;color:var(--muted);font-size:.8rem;font-family:var(--mono)}
-button{font-family:var(--sans);font-weight:500;cursor:pointer;border:none;border-radius:6px;padding:7px 14px;font-size:.82rem;transition:all .15s;display:inline-flex;align-items:center;gap:5px}
-.btn-green{background:var(--green);color:#000;font-weight:700}.btn-green:hover{background:#1fb858;transform:translateY(-1px)}
-.btn-red{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}.btn-red:hover{background:rgba(248,81,73,.25)}
-.btn-ghost{background:var(--s2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{border-color:var(--blue);color:var(--blue)}
-.btn-yellow{background:rgba(227,179,65,.15);color:var(--yellow);border:1px solid rgba(227,179,65,.3)}.btn-yellow:hover{background:rgba(227,179,65,.25)}
-button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
-.card{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:14px;transition:border-color .2s}.card:hover{border-color:var(--green)}
-.card .lbl{font-size:.62rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px}
-.card .val{font-size:1.65rem;font-weight:900;color:var(--bright);line-height:1}
-.card .sub{font-size:.68rem;color:var(--muted);margin-top:4px;font-family:var(--mono)}
-.card.hi{border-color:rgba(37,211,102,.3)}.card.hi .val{color:var(--green)}
-.sec-title{font-size:.62rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:2px;margin-bottom:10px}
-.panel{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:800px){.grid2{grid-template-columns:1fr}}
-.qr-zone{min-height:180px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px}
-.qr-zone img{width:160px;height:160px;border-radius:8px;image-rendering:pixelated}
-.qr-placeholder{width:160px;height:160px;border:1px dashed var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:.75rem;text-align:center;padding:12px}
-.qr-hint{font-family:var(--mono);font-size:.72rem;color:var(--muted);text-align:center}
-.pairing{font-family:var(--mono);font-size:1.7rem;font-weight:700;letter-spacing:5px;color:var(--green);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.2);padding:12px 18px;border-radius:8px}
-.irow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
-.irow:last-child{border-bottom:none}
-.ikey{font-family:var(--mono);font-size:.72rem;color:var(--muted)}
-.ival{font-family:var(--mono);font-size:.8rem;color:var(--bright)}
-.feed{max-height:240px;overflow-y:auto}
-.feed::-webkit-scrollbar{width:3px}.feed::-webkit-scrollbar-thumb{background:var(--border)}
-.feed-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(33,38,45,.5)}
-.feed-row:last-child{border-bottom:none}
-.feed-cmd{background:rgba(37,211,102,.1);color:var(--green);font-family:var(--mono);font-size:.7rem;padding:2px 6px;border-radius:4px;white-space:nowrap}
-.feed-user{font-family:var(--mono);font-size:.72rem;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.feed-time{font-family:var(--mono);font-size:.66rem;color:var(--muted);white-space:nowrap}
-.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.bar-name{font-family:var(--mono);font-size:.72rem;width:85px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bar-track{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
-.bar-fill{height:100%;background:linear-gradient(90deg,var(--green2),var(--green));border-radius:3px;transition:width .5s ease}
-.bar-num{font-family:var(--mono);font-size:.68rem;color:var(--muted);width:30px;text-align:right}
-.tbl{width:100%;border-collapse:collapse;font-size:.75rem}
-.tbl th{text-align:left;padding:6px 10px;font-family:var(--mono);font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border)}
-.tbl td{padding:8px 10px;border-bottom:1px solid rgba(33,38,45,.4);font-family:var(--mono)}
-.tbl tr:hover td{background:rgba(255,255,255,.02)}
-.tbl-wrap{overflow-x:auto;max-height:260px;overflow-y:auto}
-.terminal{background:#050508;border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.term-head{padding:8px 14px;background:var(--s2);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.term-dots{display:flex;gap:5px}
-.td2{width:10px;height:10px;border-radius:50%}
-.term-body{height:260px;overflow-y:auto;padding:10px 14px;font-family:var(--mono);font-size:.73rem;line-height:1.65}
-.term-body::-webkit-scrollbar{width:3px}.term-body::-webkit-scrollbar-thumb{background:var(--border)}
-.log-line{display:flex;gap:8px;margin-bottom:1px}
-.log-time{color:var(--muted);white-space:nowrap;flex-shrink:0}
-.log-msg.info{color:var(--text)}.log-msg.success{color:var(--green)}.log-msg.warn{color:var(--yellow)}.log-msg.error{color:var(--red)}
-.send-form{display:flex;flex-direction:column;gap:10px}
-.send-form input,.send-form textarea{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:.82rem;outline:none;width:100%;resize:none;transition:border-color .2s}
-.send-form input:focus,.send-form textarea:focus{border-color:var(--green)}
-.send-result{display:none;padding:7px 10px;border-radius:6px;font-family:var(--mono);font-size:.75rem}
-.send-result.ok{background:rgba(37,211,102,.1);color:var(--green)}.send-result.err{background:rgba(248,81,73,.1);color:var(--red)}
-.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:12px}
-.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:7px 12px;font-family:var(--sans);font-size:.8rem;font-weight:500;margin-bottom:-1px;border-radius:0;cursor:pointer}
-.tab.active{color:var(--green);border-bottom-color:var(--green)}
-.tab-p{display:none}.tab-p.active{display:block}
-.no-session{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;color:var(--muted);text-align:center}
-.no-session h2{color:var(--text);font-size:1.2rem;font-weight:700}
-.no-session p{font-family:var(--mono);font-size:.78rem;max-width:300px;line-height:1.6}
-#toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:8px;font-family:var(--mono);font-size:.78rem;background:var(--s2);border:1px solid var(--border);transform:translateY(60px);opacity:0;transition:all .25s;z-index:999;pointer-events:none}
-#toast.show{transform:none;opacity:1}
-#toast.ok{border-color:var(--green);color:var(--green)}
-#toast.err{border-color:var(--red);color:var(--red)}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.68rem;font-family:var(--mono)}
-.badge.online{background:rgba(37,211,102,.15);color:var(--green)}
-.badge.offline{background:rgba(72,79,88,.3);color:var(--muted)}
-.badge.connecting{background:rgba(227,179,65,.15);color:var(--yellow)}
-/* Indicateur refresh */
-#sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);opacity:0;transition:opacity .2s;flex-shrink:0}
-#sync-dot.pulse{animation:syncpulse .5s ease}
-@keyframes syncpulse{0%{opacity:1}100%{opacity:0}}
-#last-update{font-family:var(--mono);font-size:.65rem;color:var(--muted)}
-@media(max-width:600px){.sidebar{display:none}}
+:root {
+  --bg:      #07090f;
+  --s1:      #0e1118;
+  --s2:      #161c27;
+  --border:  #1e2535;
+  --green:   #25d366;
+  --green2:  #0f8c4a;
+  --red:     #f85149;
+  --yellow:  #e3b341;
+  --blue:    #58a6ff;
+  --muted:   #4b5568;
+  --text:    #b0bec5;
+  --bright:  #ecf0f1;
+  --mono:    'JetBrains Mono', monospace;
+  --sans:    'Space Grotesk', sans-serif;
+  --sidebar: 220px;
+  --header:  52px;
+  --nav-h:   56px; /* mobile bottom nav */
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+/* ══ LAYOUT ══════════════════════════════════════════ */
+#app { display: flex; flex-direction: column; height: 100%; }
+
+header {
+  height: var(--header);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; gap: 10px;
+  background: var(--s1); border-bottom: 1px solid var(--border);
+  flex-shrink: 0; z-index: 10;
+}
+.logo { font-size: 1rem; font-weight: 900; color: var(--bright); display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.logo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: blink 2s infinite; flex-shrink: 0; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+.hdr-right { display: flex; align-items: center; gap: 8px; }
+#hdr-status { font-family: var(--mono); font-size: .68rem; padding: 3px 10px; border-radius: 20px; white-space: nowrap; }
+.badge-on  { background: rgba(37,211,102,.15); color: var(--green); border: 1px solid rgba(37,211,102,.3); }
+.badge-off { background: rgba(75,85,104,.2);   color: var(--muted); border: 1px solid var(--border); }
+.badge-con { background: rgba(227,179,65,.15);  color: var(--yellow); border: 1px solid rgba(227,179,65,.3); }
+
+.body-wrap { display: flex; flex: 1; overflow: hidden; }
+
+/* ══ SIDEBAR ═════════════════════════════════════════ */
+.sidebar {
+  width: var(--sidebar); flex-shrink: 0;
+  background: var(--s1); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: transform .25s ease;
+}
+.sidebar-head { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.sidebar-label { font-size: .62rem; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 1.5px; }
+.sidebar-btns { display: flex; gap: 4px; }
+#sessions-list { flex: 1; overflow-y: auto; padding: 6px; }
+.sess-item {
+  padding: 9px 10px; border-radius: 7px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 3px; transition: all .15s;
+  position: relative;
+}
+.sess-item:hover { background: var(--s2); border-color: var(--border); }
+.sess-item.active { background: var(--s2); border-color: var(--green); }
+.sess-item.active::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:3px; height:55%; background:var(--green); border-radius:0 2px 2px 0; }
+.sess-id { font-family: var(--mono); font-size: .76rem; color: var(--bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-row { display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.sdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.sdot.open { background: var(--green); box-shadow: 0 0 4px var(--green); }
+.sdot.connecting { background: var(--yellow); animation: blink 1s infinite; }
+.sdot.close { background: var(--muted); }
+.sess-lbl { font-size: .68rem; font-family: var(--mono); color: var(--muted); }
+.sess-empty { padding: 20px; text-align: center; color: var(--muted); font-size: .78rem; font-family: var(--mono); line-height: 1.6; }
+
+/* ══ MAIN CONTENT ════════════════════════════════════ */
+.content { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.content::-webkit-scrollbar { width: 4px; }
+.content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ══ BUTTONS ══════════════════════════════════════════ */
+button { font-family: var(--sans); font-weight: 600; cursor: pointer; border: none; border-radius: 7px; padding: 7px 13px; font-size: .8rem; transition: all .15s; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.btn-green { background: var(--green); color: #000; }
+.btn-green:hover { background: #1fbd58; transform: translateY(-1px); }
+.btn-red { background: rgba(248,81,73,.12); color: var(--red); border: 1px solid rgba(248,81,73,.25); }
+.btn-red:hover { background: rgba(248,81,73,.22); }
+.btn-ghost { background: var(--s2); color: var(--text); border: 1px solid var(--border); }
+.btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
+.btn-yellow { background: rgba(227,179,65,.12); color: var(--yellow); border: 1px solid rgba(227,179,65,.25); }
+.btn-yellow:hover { background: rgba(227,179,65,.22); }
+.btn-sm { padding: 4px 9px; font-size: .7rem; }
+button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; }
+
+/* ══ CARDS ════════════════════════════════════════════ */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+.card { background: var(--s1); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.card:hover { border-color: rgba(37,211,102,.35); }
+.card .lbl { font-size: .58rem; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 5px; }
+.card .val { font-size: 1.5rem; font-weight: 900; color: var(--bright); line-height: 1; }
+.card .sub { font-size: .63rem; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+.card.hi .val { color: var(--green); }
+
+/* ══ PANELS / GRID ════════════════════════════════════ */
+.panel { background: var(--s1); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.sec-title { font-size: .6rem; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 10px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* ══ QR ZONE ══════════════════════════════════════════ */
+.qr-zone { min-height: 170px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; }
+.qr-zone img { width: 150px; height: 150px; border-radius: 8px; image-rendering: pixelated; }
+.qr-placeholder { width: 150px; height: 150px; border: 1px dashed var(--border); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-family: var(--mono); font-size: .72rem; text-align: center; padding: 12px; }
+.qr-hint { font-family: var(--mono); font-size: .7rem; color: var(--muted); text-align: center; }
+.pairing { font-family: var(--mono); font-size: 1.6rem; font-weight: 700; letter-spacing: 5px; color: var(--green); background: rgba(37,211,102,.07); border: 1px solid rgba(37,211,102,.2); padding: 10px 16px; border-radius: 8px; }
+
+/* ══ INFO ROWS ════════════════════════════════════════ */
+.irow { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.irow:last-child { border-bottom: none; }
+.ikey { font-family: var(--mono); font-size: .7rem; color: var(--muted); }
+.ival { font-family: var(--mono); font-size: .76rem; color: var(--bright); }
+
+/* ══ TABS ═════════════════════════════════════════════ */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 10px; overflow-x: auto; }
+.tabs::-webkit-scrollbar { height: 0; }
+.tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted); padding: 6px 11px; font-family: var(--sans); font-size: .78rem; font-weight: 600; margin-bottom: -1px; border-radius: 0; cursor: pointer; flex-shrink: 0; }
+.tab.active { color: var(--green); border-bottom-color: var(--green); }
+.tab-p { display: none; } .tab-p.active { display: block; }
+
+/* ══ FEED ══════════════════════════════════════════════ */
+.feed { max-height: 220px; overflow-y: auto; }
+.feed-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(30,37,53,.6); }
+.feed-row:last-child { border-bottom: none; }
+.feed-cmd { background: rgba(37,211,102,.1); color: var(--green); font-family: var(--mono); font-size: .68rem; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.feed-user { font-family: var(--mono); font-size: .69rem; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-time { font-family: var(--mono); font-size: .64rem; color: var(--muted); white-space: nowrap; }
+
+/* ══ BAR CHART ════════════════════════════════════════ */
+.bar-row { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+.bar-name { font-family: var(--mono); font-size: .7rem; width: 75px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.bar-track { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.bar-fill { height: 100%; background: linear-gradient(90deg, var(--green2), var(--green)); border-radius: 2px; transition: width .5s ease; }
+.bar-num { font-family: var(--mono); font-size: .66rem; color: var(--muted); width: 28px; text-align: right; }
+
+/* ══ TABLE ════════════════════════════════════════════ */
+.tbl-wrap { overflow-x: auto; max-height: 240px; overflow-y: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: .72rem; }
+.tbl th { text-align: left; padding: 5px 8px; font-family: var(--mono); font-size: .6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl td { padding: 7px 8px; border-bottom: 1px solid rgba(30,37,53,.5); font-family: var(--mono); }
+.tbl tr:hover td { background: rgba(255,255,255,.02); }
+
+/* ══ TERMINAL ══════════════════════════════════════════ */
+.terminal { background: #050608; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.term-head { padding: 7px 12px; background: var(--s2); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.term-dots { display: flex; gap: 5px; }
+.tdot { width: 10px; height: 10px; border-radius: 50%; }
+.term-body { height: 220px; overflow-y: auto; padding: 8px 12px; font-family: var(--mono); font-size: .7rem; line-height: 1.65; }
+.term-body::-webkit-scrollbar { width: 3px; }
+.term-body::-webkit-scrollbar-thumb { background: var(--border); }
+.log-line { display: flex; gap: 8px; margin-bottom: 1px; }
+.log-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+.log-msg.info { color: var(--text); } .log-msg.success { color: var(--green); } .log-msg.warn { color: var(--yellow); } .log-msg.error { color: var(--red); }
+
+/* ══ SEND FORM ════════════════════════════════════════ */
+.send-form { display: flex; flex-direction: column; gap: 8px; }
+.fi { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 8px 11px; color: var(--text); font-family: var(--mono); font-size: .8rem; outline: none; width: 100%; resize: none; transition: border-color .2s; }
+.fi:focus { border-color: var(--green); }
+.send-result { display: none; padding: 6px 10px; border-radius: 6px; font-family: var(--mono); font-size: .72rem; }
+.send-result.ok { background: rgba(37,211,102,.1); color: var(--green); }
+.send-result.err { background: rgba(248,81,73,.1); color: var(--red); }
+
+/* ══ NO SESSION ═══════════════════════════════════════ */
+.no-session { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; color: var(--muted); text-align: center; padding: 24px; }
+.no-session h2 { color: var(--text); font-size: 1.1rem; font-weight: 700; }
+.no-session p { font-family: var(--mono); font-size: .76rem; max-width: 280px; line-height: 1.6; }
+
+/* ══ TOAST ════════════════════════════════════════════ */
+#toast { position: fixed; bottom: calc(var(--nav-h) + 10px); right: 14px; padding: 9px 14px; border-radius: 8px; font-family: var(--mono); font-size: .76rem; background: var(--s2); border: 1px solid var(--border); transform: translateY(50px); opacity: 0; transition: all .25s; z-index: 999; pointer-events: none; max-width: calc(100vw - 28px); }
+#toast.show { transform: none; opacity: 1; }
+#toast.ok { border-color: var(--green); color: var(--green); }
+#toast.err { border-color: var(--red); color: var(--red); }
+
+/* ══ SYNC DOT ════════════════════════════════════════ */
+#sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); opacity: 0; transition: opacity .2s; flex-shrink: 0; }
+#sync-dot.pulse { animation: syncpulse .5s ease; }
+@keyframes syncpulse { 0%{opacity:1} 100%{opacity:0} }
+#last-update { font-family: var(--mono); font-size: .62rem; color: var(--muted); white-space: nowrap; }
+
+/* ══ MODAL ════════════════════════════════════════════ */
+.modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 100; align-items: center; justify-content: center; padding: 16px; }
+.modal-bg.open { display: flex; }
+.modal { background: var(--s1); border: 1px solid var(--border); border-radius: 14px; padding: 22px; width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 12px; }
+.modal-title { font-weight: 700; font-size: .95rem; color: var(--bright); }
+.modal-desc { font-family: var(--mono); font-size: .72rem; color: var(--muted); line-height: 1.55; }
+
+/* ══ MOBILE BOTTOM NAV ════════════════════════════════ */
+.bottom-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  height: var(--nav-h);
+  background: var(--s1); border-top: 1px solid var(--border);
+  z-index: 20; align-items: stretch;
+}
+.bnav-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; background: none; border: none; border-radius: 0; padding: 0;
+  color: var(--muted); font-size: .58rem; font-family: var(--sans); font-weight: 600;
+  cursor: pointer; transition: color .15s;
+}
+.bnav-btn.active { color: var(--green); }
+.bnav-ico { font-size: 1.1rem; line-height: 1; }
+.mobile-drawer {
+  position: fixed; inset: 0; background: var(--s1); z-index: 50;
+  display: flex; flex-direction: column; transform: translateX(-100%);
+  transition: transform .25s ease;
+}
+.mobile-drawer.open { transform: translateX(0); }
+.drawer-head { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+
+/* ══ RESPONSIVE BREAKPOINTS ═══════════════════════════ */
+@media (max-width: 768px) {
+  .sidebar { display: none !important; }
+  .bottom-nav { display: flex; }
+  .content { padding: 10px; padding-bottom: calc(var(--nav-h) + 14px); }
+  .grid2 { grid-template-columns: 1fr; }
+  #toast { bottom: calc(var(--nav-h) + 10px); }
+  .cards { grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); gap: 8px; }
+  .card .val { font-size: 1.3rem; }
+  header { padding: 0 12px; }
+  .logo { font-size: .9rem; }
+  #hdr-status { display: none; }
+  #last-update { display: none; }
+}
+@media (max-width: 480px) {
+  .cards { grid-template-columns: repeat(3, 1fr); }
+  .card { padding: 9px; }
+}
+@media (min-width: 769px) {
+  .bottom-nav { display: none !important; }
+  .mobile-drawer { display: none !important; }
+}
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <div class="logo"><div class="logo-dot"></div>Laluxure Bot</div>
-    <div class="header-right">
+    <div class="logo"><div class="logo-dot"></div>LaluxureBot</div>
+    <div class="hdr-right">
       <div id="sync-dot"></div>
       <span id="last-update"></span>
-      <span id="hdr-status" class="badge offline">Aucune session</span>
-      <button class="btn-ghost" onclick="refreshAll(true)">↻</button>
-      <button class="btn-ghost" style="color:#f85149" onclick="doLogout()">⏏ Déconnexion</button>
+      <span id="hdr-status" class="badge-off">—</span>
+      <button class="btn-ghost btn-sm" onclick="refreshAll(true)" title="Rafraîchir">↻</button>
+      <button class="btn-ghost btn-sm" style="color:var(--red)" onclick="doLogout()" title="Déconnexion">⏏</button>
     </div>
   </header>
-  <div class="main-layout">
+
+  <div class="body-wrap">
+    <!-- SIDEBAR desktop -->
     <div class="sidebar">
       <div class="sidebar-head">
-        <span>Sessions</span>
-        <div style="display:flex;gap:4px">
-          <button class="btn-green" style="padding:4px 8px;font-size:.7rem" onclick="newSession()" id="btn-new" title="Nouvelle session QR">QR</button>
-          <button class="btn-ghost" style="padding:4px 8px;font-size:.7rem" onclick="showPairModal()" title="Connexion par code">📱</button>
+        <span class="sidebar-label">Sessions</span>
+        <div class="sidebar-btns">
+          <button class="btn-green btn-sm" onclick="newSession()" id="btn-new" title="Nouvelle session QR">QR</button>
+          <button class="btn-ghost btn-sm" onclick="showPairModal()" title="Code pairing">📱</button>
         </div>
       </div>
       <div id="sessions-list"><div class="sess-empty">Chargement...</div></div>
     </div>
+
+    <!-- MAIN CONTENT -->
     <div class="content" id="main-content">
       <div class="no-session">
-        <div style="font-size:3rem">📱</div>
+        <div style="font-size:2.8rem">📱</div>
         <h2>Aucune session</h2>
-        <p>Créez une nouvelle session ou sélectionnez-en une pour commencer.</p>
-        <button class="btn-green" onclick="newSession()">+ Créer une session</button>
+        <p>Créez ou sélectionnez une session pour commencer.</p>
+        <button class="btn-green" onclick="newSession()">+ Nouvelle session</button>
       </div>
     </div>
   </div>
 </div>
-<div id="toast"></div>
 
-<!-- Modal Pairing Code -->
-<div id="pair-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center">
-  <div style="background:var(--s1);border:1px solid var(--border);border-radius:14px;padding:28px;width:320px;display:flex;flex-direction:column;gap:14px">
-    <div style="font-weight:700;font-size:1rem;color:var(--bright)">📱 Connexion par code</div>
-    <div style="font-family:var(--mono);font-size:.75rem;color:var(--muted);line-height:1.5">
-      Entrez votre numéro WhatsApp avec l'indicatif pays (ex: 237612345678).<br>
-      Ouvrez WhatsApp → <strong>Appareils liés</strong> → <strong>Lier un appareil</strong> → <strong>Lier avec numéro</strong>.
+<!-- MOBILE BOTTOM NAV -->
+<nav class="bottom-nav">
+  <button class="bnav-btn active" id="bnav-dash" onclick="mobileTab('dash')"><span class="bnav-ico">📊</span>Dashboard</button>
+  <button class="bnav-btn" id="bnav-sessions" onclick="mobileTab('sessions')"><span class="bnav-ico">📱</span>Sessions</button>
+  <button class="bnav-btn" id="bnav-logs" onclick="mobileTab('logs')"><span class="bnav-ico">🖥️</span>Logs</button>
+  <button class="bnav-btn" id="bnav-send" onclick="mobileTab('send')"><span class="bnav-ico">💬</span>Envoyer</button>
+</nav>
+
+<!-- MOBILE DRAWER (sessions list) -->
+<div class="mobile-drawer" id="mobile-drawer">
+  <div class="drawer-head">
+    <span style="font-weight:700;color:var(--bright)">Sessions</span>
+    <div style="display:flex;gap:6px">
+      <button class="btn-green btn-sm" onclick="newSession()" id="btn-new-m">QR</button>
+      <button class="btn-ghost btn-sm" onclick="showPairModal()">📱</button>
+      <button class="btn-ghost btn-sm" onclick="closeDrawer()">✕</button>
     </div>
-    <input type="tel" id="pair-phone" placeholder="Ex: 237612345678" style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:.85rem;outline:none;width:100%" oninput="this.style.borderColor='var(--green)'">
+  </div>
+  <div id="sessions-list-m" style="flex:1;overflow-y:auto;padding:8px"></div>
+</div>
+
+<!-- MODAL Pairing -->
+<div class="modal-bg" id="pair-modal">
+  <div class="modal">
+    <div class="modal-title">📱 Connexion par code</div>
+    <div class="modal-desc">Entrez votre numéro avec l'indicatif pays (ex: 237612345678).<br>WhatsApp → Appareils liés → Lier avec numéro.</div>
+    <input type="tel" id="pair-phone" class="fi" placeholder="Ex: 237612345678">
     <div style="display:flex;gap:8px">
       <button class="btn-green" style="flex:1" onclick="startPairing()">Obtenir le code</button>
       <button class="btn-ghost" onclick="closePairModal()">Annuler</button>
     </div>
-    <div id="pair-result" style="display:none;font-family:var(--mono);font-size:.8rem;padding:8px 12px;border-radius:6px"></div>
+    <div id="pair-result" style="display:none;font-family:var(--mono);font-size:.78rem;padding:8px 12px;border-radius:7px"></div>
   </div>
 </div>
 
+<div id="toast"></div>
+
 <script>
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // STATE
-// ══════════════════════════════════════════════════════════════
-let currentSession = null;
-let allSessions    = [];
-let logIndex       = 0;
-
-// Intervalles
-let timerSession = null; // toutes les 3s
-let timerLog     = null; // toutes les 2s
-let timerSidebar = null; // toutes les 5s
-let timerPageRefresh = null; // rechargement page toutes les 15s
-
-// Verrous pour éviter les appels concurrents
-let fetchingSession = false;
-let fetchingLogs    = false;
-
-// Snapshot des dernières données → comparaison avant re-render
+// ═══════════════════════════════════════════════════════════
+let currentSession  = null;
+let allSessions     = [];
+let logIndex        = 0;
 let lastSessionData = null;
+let mobileSection   = 'dash';
 
-// ══════════════════════════════════════════════════════════════
-// POLLING — pause quand l'onglet n'est pas visible (Page Visibility API)
-// ══════════════════════════════════════════════════════════════
+let timerSession = null, timerLog = null, timerSidebar = null, timerPageRefresh = null;
+let fetchingSession = false, fetchingLogs = false;
+
+// ═══════════════════════════════════════════════════════════
+// POLLING
+// ═══════════════════════════════════════════════════════════
 function startPolling() {
   stopPolling();
-  timerSidebar = setInterval(refreshSessions, 5000);
-  timerSession = setInterval(tickSession,    3000);
-  timerLog     = setInterval(tickLogs,       2000);
-  // Rechargement complet de la page toutes les 15 secondes
-  timerPageRefresh = setInterval(() => { location.reload(); }, 15000);
+  timerSidebar     = setInterval(refreshSessions, 5000);
+  timerSession     = setInterval(tickSession, 3000);
+  timerLog         = setInterval(tickLogs, 2000);
+  timerPageRefresh = setInterval(() => location.reload(), 15000);
   refreshAll(true);
 }
-
 function stopPolling() {
-  clearInterval(timerSession);
-  clearInterval(timerLog);
-  clearInterval(timerSidebar);
-  clearInterval(timerPageRefresh);
+  clearInterval(timerSession); clearInterval(timerLog);
+  clearInterval(timerSidebar); clearInterval(timerPageRefresh);
 }
+document.addEventListener('visibilitychange', () => document.hidden ? stopPolling() : startPolling());
 
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopPolling();
-  else { startPolling(); }
-});
-
-// ══════════════════════════════════════════════════════════════
-// TICK FONCTIONS
-// ══════════════════════════════════════════════════════════════
 async function tickSession() {
   if (fetchingSession || !currentSession) return;
   fetchingSession = true;
   try { await refreshSession(currentSession); } finally { fetchingSession = false; }
 }
-
 async function tickLogs() {
   if (fetchingLogs) return;
   fetchingLogs = true;
   try { await pollLogs(); } finally { fetchingLogs = false; }
 }
 
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // REFRESH
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 async function refreshAll(force = false) {
   await refreshSessions();
   if (currentSession) {
@@ -241,10 +376,10 @@ async function refreshSessions() {
     const r = await api('/api/sessions');
     allSessions = r.sessions || [];
     renderSidebar();
-    const on = allSessions.filter(s => s.connection === 'open').length;
+    const on  = allSessions.filter(s => s.connection === 'open').length;
     const hdr = document.getElementById('hdr-status');
-    hdr.textContent = on > 0 ? `${on} connectée(s)` : allSessions.length > 0 ? 'En attente...' : 'Aucune session';
-    hdr.className   = 'badge ' + (on > 0 ? 'online' : allSessions.length > 0 ? 'connecting' : 'offline');
+    hdr.textContent = on > 0 ? `${on} connectée(s)` : allSessions.length ? 'En attente' : 'Aucune';
+    hdr.className   = on > 0 ? 'badge-on' : allSessions.length ? 'badge-con' : 'badge-off';
   } catch {}
 }
 
@@ -257,98 +392,73 @@ async function refreshSession(id, force = false) {
   } catch {}
 }
 
-// ══════════════════════════════════════════════════════════════
-// MISE À JOUR PARTIELLE — ne reconstruit que ce qui change
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// PATCH PARTIEL
+// ═══════════════════════════════════════════════════════════
 function patchMain(s, force = false) {
-  const mc = document.getElementById('main-content');
-
-  // Premier rendu ou changement de session → construction complète
   if (!lastSessionData || lastSessionData.id !== s.id || force) {
-    lastSessionData = s;
-    buildMain(s);
-    return;
+    lastSessionData = s; buildMain(s); return;
   }
-
-  const prev = lastSessionData;
-  lastSessionData = s;
-
-  // ── Cartes stats (chiffres seulement) ──────────────────────
-  patchText('stat-cmds',    (s.totalCommands  || 0).toLocaleString());
-  patchText('stat-users',   (s.totalUsers     || 0).toLocaleString());
-  patchText('stat-msgs',    (s.messagesCount  || 0).toLocaleString());
-  patchText('stat-uptime',  s.uptimeHuman || '—');
-  patchText('stat-mem',     (s.memory || '—') + ' MB');
-
-  // ── QR / état connexion ────────────────────────────────────
+  const prev = lastSessionData; lastSessionData = s;
+  patchText('stat-cmds',   (s.totalCommands || 0).toLocaleString());
+  patchText('stat-users',  (s.totalUsers    || 0).toLocaleString());
+  patchText('stat-msgs',   (s.messagesCount || 0).toLocaleString());
+  patchText('stat-uptime', s.uptimeHuman || '—');
+  patchText('stat-mem',    (s.memory || '—') + ' MB');
   if (prev.connection !== s.connection || prev.qrCode !== s.qrCode || prev.pairingCode !== s.pairingCode) {
     const qz = document.getElementById('qr-zone');
     if (qz) qz.innerHTML = renderQR(s);
   }
-
-  // ── Statut infos ────────────────────────────────────────────
   patchText('info-status', statusLabel(s.connection));
   patchText('info-number', s.connectedNumber || '—');
   patchText('info-ping',   s.lastPing ? new Date(s.lastPing).toLocaleTimeString('fr') : '—');
-
-  // ── Feed activité ────────────────────────────────────────────
-  const prevLen = prev.recentCommands?.length || 0;
-  const currLen = s.recentCommands?.length    || 0;
-  if (prevLen !== currLen || JSON.stringify(prev.recentCommands?.slice(-1)) !== JSON.stringify(s.recentCommands?.slice(-1))) {
-    const feed = document.getElementById('feed');
-    if (feed) feed.innerHTML = renderFeed(s.recentCommands || []);
+  if (JSON.stringify(prev.recentCommands?.slice(-3)) !== JSON.stringify(s.recentCommands?.slice(-3))) {
+    const f = document.getElementById('feed'); if (f) f.innerHTML = renderFeed(s.recentCommands || []);
   }
-
-  // ── Top commandes ────────────────────────────────────────────
   if (JSON.stringify(prev.topCommands) !== JSON.stringify(s.topCommands)) {
-    const tc = document.getElementById('top-cmds');
-    if (tc) tc.innerHTML = renderTopCmds(s.topCommands || []);
+    const t = document.getElementById('top-cmds'); if (t) t.innerHTML = renderTopCmds(s.topCommands || []);
   }
-
-  // ── Tableau utilisateurs ─────────────────────────────────────
   if (JSON.stringify(prev.users) !== JSON.stringify(s.users)) {
-    const ub = document.getElementById('users-tbody');
-    if (ub) ub.innerHTML = renderUsers(s.users || []);
+    const u = document.getElementById('users-tbody'); if (u) u.innerHTML = renderUsers(s.users || []);
   }
 }
-
-// Helpers patch texte sans innerHTML global
 function patchText(id, val) {
   const el = document.getElementById(id);
   if (el && el.textContent !== String(val)) el.textContent = val;
 }
 
-// Construction complète du DOM de la session (une seule fois ou si force)
+// ═══════════════════════════════════════════════════════════
+// BUILD MAIN
+// ═══════════════════════════════════════════════════════════
 function buildMain(s) {
   const mc = document.getElementById('main-content');
   const existingTerm = mc.querySelector('.terminal');
-
   mc.innerHTML = `
     <div>
-      <div class="sec-title" id="sec-title">${esc(s.connectedNumber || s.id)}</div>
+      <div class="sec-title">${esc(s.connectedNumber || s.id)}</div>
       <div class="cards">
         <div class="card hi"><div class="lbl">Commandes</div><div class="val" id="stat-cmds">${(s.totalCommands||0).toLocaleString()}</div><div class="sub">total</div></div>
         <div class="card"><div class="lbl">Utilisateurs</div><div class="val" id="stat-users">${(s.totalUsers||0).toLocaleString()}</div><div class="sub">uniques</div></div>
         <div class="card"><div class="lbl">Messages</div><div class="val" id="stat-msgs">${(s.messagesCount||0).toLocaleString()}</div><div class="sub">session</div></div>
-        <div class="card"><div class="lbl">Uptime</div><div class="val" id="stat-uptime" style="font-size:1rem;padding-top:8px">${s.uptimeHuman||'—'}</div><div class="sub" id="stat-mem">${s.memory||'—'} MB</div></div>
-        <div class="card"><div class="lbl">Préfixe</div><div class="val" style="font-size:2.4rem">${esc(s.prefix||'!')}</div><div class="sub">Node ${esc(s.node||'')}</div></div>
+        <div class="card"><div class="lbl">Uptime</div><div class="val" id="stat-uptime" style="font-size:.9rem;padding-top:4px">${s.uptimeHuman||'—'}</div><div class="sub" id="stat-mem">${s.memory||'—'} MB</div></div>
+        <div class="card"><div class="lbl">Préfixe</div><div class="val" style="font-size:2rem">${esc(s.prefix||'!')}</div><div class="sub">${esc(s.node||'')}</div></div>
       </div>
     </div>
     <div class="grid2">
-      <div class="panel">
+      <div class="panel" id="panel-conn">
         <div class="sec-title">Connexion</div>
         <div class="qr-zone" id="qr-zone">${renderQR(s)}</div>
-        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-          <button class="btn-yellow" onclick="restart('${esc(s.id)}')">↺ Relancer</button>
-          <button class="btn-red" onclick="logout('${esc(s.id)}')">⏏ Déconnecter</button>
+        <div style="display:flex;gap:7px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn-yellow btn-sm" onclick="restart('${esc(s.id)}')">↺ Relancer</button>
+          <button class="btn-red btn-sm" onclick="logout('${esc(s.id)}')">⏏ Déconnecter</button>
         </div>
-        <div style="margin-top:12px">
+        <div style="margin-top:10px">
           <div class="irow"><span class="ikey">Statut</span><span class="ival" id="info-status">${statusLabel(s.connection)}</span></div>
           <div class="irow"><span class="ikey">Numéro</span><span class="ival" id="info-number">${esc(s.connectedNumber||'—')}</span></div>
           <div class="irow"><span class="ikey">Dernier ping</span><span class="ival" id="info-ping">${s.lastPing?new Date(s.lastPing).toLocaleTimeString('fr'):'—'}</span></div>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" id="panel-tabs">
         <div class="tabs">
           <button class="tab active" onclick="tab(this,'tp-act')">Activité</button>
           <button class="tab" onclick="tab(this,'tp-top')">Top cmds</button>
@@ -359,10 +469,10 @@ function buildMain(s) {
         <div class="tab-p" id="tp-top"><div id="top-cmds">${renderTopCmds(s.topCommands||[])}</div></div>
         <div class="tab-p" id="tp-users"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Numéro</th><th>Cmds</th><th>Top</th><th>Vu</th></tr></thead><tbody id="users-tbody">${renderUsers(s.users||[])}</tbody></table></div></div>
         <div class="tab-p" id="tp-send">
-          <div class="send-form">
-            <input type="text" id="send-to" placeholder="Numéro (ex: 237612345678)">
-            <textarea id="send-text" rows="3" placeholder="Message..."></textarea>
-            <button class="btn-green" onclick="sendMsg('${esc(s.id)}')">📤 Envoyer</button>
+          <div class="send-form" id="send-form-main">
+            <input type="text" id="send-to" class="fi" placeholder="Numéro (237612345678)">
+            <textarea id="send-text" class="fi" rows="3" placeholder="Message..."></textarea>
+            <button class="btn-green btn-sm" onclick="sendMsg('${esc(s.id)}')">📤 Envoyer</button>
             <div class="send-result" id="send-result"></div>
           </div>
         </div>
@@ -371,139 +481,167 @@ function buildMain(s) {
     <div id="term-container"></div>`;
 
   const tc = document.getElementById('term-container');
-  if (existingTerm) {
-    tc.appendChild(existingTerm);
-  } else {
-    tc.innerHTML = `<div class="terminal"><div class="term-head"><div class="term-dots"><div class="td2" style="background:#f85149"></div><div class="td2" style="background:#e3b341"></div><div class="td2" style="background:#25d366"></div></div><span style="font-family:var(--mono);font-size:.7rem;color:var(--muted)">Logs — Temps réel</span><button class="btn-ghost" style="padding:3px 8px;font-size:.68rem" onclick="clearTerm()">Vider</button></div><div class="term-body" id="terminal-body"></div></div>`;
+  if (existingTerm) { tc.appendChild(existingTerm); }
+  else {
+    tc.innerHTML = `<div class="terminal"><div class="term-head"><div class="term-dots"><div class="tdot" style="background:#f85149"></div><div class="tdot" style="background:#e3b341"></div><div class="tdot" style="background:#25d366"></div></div><span style="font-family:var(--mono);font-size:.68rem;color:var(--muted)">Logs</span><button class="btn-ghost btn-sm" onclick="clearTerm()">Vider</button></div><div class="term-body" id="terminal-body"></div></div>`;
+  }
+  // Appliquer la vue mobile si nécessaire
+  if (window.innerWidth <= 768) applyMobileSection(mobileSection);
+}
+
+// ═══════════════════════════════════════════════════════════
+// MOBILE NAVIGATION
+// ═══════════════════════════════════════════════════════════
+function mobileTab(section) {
+  mobileSection = section;
+  // Mettre à jour boutons nav
+  ['dash','sessions','logs','send'].forEach(s => {
+    const b = document.getElementById('bnav-'+s);
+    if (b) b.classList.toggle('active', s === section);
+  });
+  if (section === 'sessions') { openDrawer(); return; }
+  closeDrawer();
+  applyMobileSection(section);
+}
+
+function applyMobileSection(section) {
+  if (window.innerWidth > 768) return;
+  const conn  = document.getElementById('panel-conn');
+  const tabs  = document.getElementById('panel-tabs');
+  const term  = document.getElementById('term-container');
+  const cards = document.querySelector('.cards')?.parentElement;
+
+  // tout cacher, puis afficher la section
+  [conn, tabs, term, cards].forEach(el => { if (el) el.style.display = 'none'; });
+
+  if (section === 'dash') {
+    if (cards) cards.style.display = '';
+    if (conn)  conn.style.display  = '';
+  } else if (section === 'logs') {
+    if (term) term.style.display = '';
+    logIndex = 0; pollLogs();
+  } else if (section === 'send') {
+    // Afficher le panel tabs avec l'onglet Envoyer actif
+    if (tabs) {
+      tabs.style.display = '';
+      tabs.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tabs.querySelectorAll('.tab-p').forEach(p => p.classList.remove('active'));
+      const sendTab = [...tabs.querySelectorAll('.tab')].find(t => t.textContent.includes('Envoyer'));
+      if (sendTab) { sendTab.classList.add('active'); tab(sendTab, 'tp-send'); }
+    }
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// INDICATEURS VISUELS
-// ══════════════════════════════════════════════════════════════
-function flashSync() {
-  const dot = document.getElementById('sync-dot');
-  if (!dot) return;
-  dot.style.opacity = '1';
-  setTimeout(() => { dot.style.opacity = '0'; }, 400);
+function openDrawer() {
+  document.getElementById('mobile-drawer').classList.add('open');
+  // Synchroniser la liste
+  const ml = document.getElementById('sessions-list-m');
+  ml.innerHTML = document.getElementById('sessions-list').innerHTML;
+  ml.querySelectorAll('.sess-item').forEach(el => {
+    el.onclick = () => { selectSession(el.dataset.id || el.getAttribute('onclick')?.match(/'([^']+)'/)?.[1]); closeDrawer(); mobileTab('dash'); };
+  });
 }
+function closeDrawer() { document.getElementById('mobile-drawer').classList.remove('open'); }
 
-function updateLastUpdate() {
-  const el = document.getElementById('last-update');
-  if (el) el.textContent = 'Màj ' + new Date().toLocaleTimeString('fr', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-}
-
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // LOGS
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 async function pollLogs() {
   try {
     const r = await api(`/api/logs?since=${logIndex}`);
-    if (r.logs && r.logs.length > 0) { appendLogs(r.logs); logIndex = r.total; }
+    if (r.logs?.length) { appendLogs(r.logs); logIndex = r.total; }
   } catch {}
 }
-
-function appendLogs(newLogs) {
-  const tb = document.getElementById('terminal-body');
-  if (!tb) return;
+function appendLogs(logs) {
+  const tb = document.getElementById('terminal-body'); if (!tb) return;
   const atBottom = tb.scrollHeight - tb.clientHeight - tb.scrollTop < 30;
   const frag = document.createDocumentFragment();
-  newLogs.forEach(l => {
-    const d = document.createElement('div');
-    d.className = 'log-line';
+  logs.forEach(l => {
+    const d = document.createElement('div'); d.className = 'log-line';
     d.innerHTML = `<span class="log-time">${l.time.slice(11,19)}</span><span class="log-msg ${l.level}">${esc(l.msg)}</span>`;
     frag.appendChild(d);
   });
   tb.appendChild(frag);
-  // Limiter à 500 lignes max
   while (tb.children.length > 500) tb.removeChild(tb.firstChild);
   if (atBottom) tb.scrollTop = tb.scrollHeight;
 }
+function clearTerm() { const t = document.getElementById('terminal-body'); if (t) t.innerHTML = ''; }
 
-function clearTerm() {
-  const t = document.getElementById('terminal-body');
-  if (t) t.innerHTML = '';
-}
-
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // RENDER HELPERS
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 function renderQR(s) {
   if (s.connection === 'open')
-    return `<div style="text-align:center"><div style="font-size:2.5rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:8px;font-size:.85rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.72rem;margin-top:4px">${esc(s.connectedNumber||'')}</div></div>`;
+    return `<div style="text-align:center"><div style="font-size:2.2rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:6px;font-size:.82rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.7rem;margin-top:3px">${esc(s.connectedNumber||'')}</div></div>`;
   if (s.qrCode) {
-    const u = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050508&color=25d366&qzone=2';
+    const u = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050608&color=25d366&qzone=2';
     return `<img src="${u}" alt="QR"><div class="qr-hint">Scannez avec WhatsApp</div>`;
   }
   if (s.pairingCode)
-    return `<div class="pairing">${esc(s.pairingCode)}</div><div class="qr-hint" style="margin-top:8px">WhatsApp → Appareils → Lier avec numéro</div>`;
+    return `<div class="pairing">${esc(s.pairingCode)}</div><div class="qr-hint" style="margin-top:6px">WhatsApp → Lier avec numéro</div>`;
   return `<div class="qr-placeholder">En attente...<br>Cliquez Relancer.</div>`;
 }
-
 function statusLabel(c) {
   return c==='open'?'✅ Connecté':c==='connecting'?'⏳ Connexion...':'❌ Déconnecté';
 }
-
 function renderFeed(cmds) {
-  if (!cmds.length) return '<div style="padding:16px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.75rem">Aucune activité</div>';
+  if (!cmds.length) return '<div style="padding:14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.72rem">Aucune activité</div>';
   return [...cmds].reverse().map(c =>
     `<div class="feed-row"><span class="feed-cmd">!${esc(c.cmd)}</span><span class="feed-user">${esc(c.user)}</span><span class="feed-time">${new Date(c.time).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'})}</span></div>`
   ).join('');
 }
-
 function renderTopCmds(cmds) {
-  if (!cmds.length) return '<div style="color:var(--muted);font-family:var(--mono);font-size:.75rem;padding:8px 0">Aucune donnée</div>';
+  if (!cmds.length) return '<div style="color:var(--muted);font-family:var(--mono);font-size:.72rem;padding:8px 0">Aucune donnée</div>';
   const max = cmds[0]?.count || 1;
   return cmds.map(c =>
     `<div class="bar-row"><span class="bar-name">!${esc(c.cmd)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.round(c.count/max*100)}%"></div></div><span class="bar-num">${c.count}</span></div>`
   ).join('');
 }
-
 function renderUsers(users) {
-  if (!users.length) return '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">Aucun utilisateur</td></tr>';
+  if (!users.length) return '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px">Aucun utilisateur</td></tr>';
   return users.map((u, i) =>
     `<tr><td style="color:var(--muted)">${i+1}</td><td>${esc(u.number)}</td><td><strong>${u.total}</strong></td><td>${u.topCmd?'!'+esc(u.topCmd):'—'}</td><td>${u.lastSeen?new Date(u.lastSeen).toLocaleDateString('fr'):'—'}</td></tr>`
   ).join('');
 }
-
 function renderSidebar() {
-  const el = document.getElementById('sessions-list');
-  if (allSessions.length === 0) { el.innerHTML = '<div class="sess-empty">Aucune session.<br>Cliquez + Nouvelle.</div>'; return; }
-  el.innerHTML = allSessions.map(s =>
-    `<div class="sess-item${currentSession===s.id?' active':''}" onclick="selectSession('${esc(s.id)}')">
-      <div class="sess-id">${esc(s.connectedNumber||s.id)}</div>
-      <div class="sess-status"><div class="sdot ${s.connection}"></div>
-      <span class="sess-label">${s.connection==='open'?'Connecté':s.connection==='connecting'?'Connexion...':'Déconnecté'}</span></div>
-    </div>`
-  ).join('');
+  const renderList = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!allSessions.length) { el.innerHTML = '<div class="sess-empty">Aucune session.<br>Créez-en une.</div>'; return; }
+    el.innerHTML = allSessions.map(s =>
+      `<div class="sess-item${currentSession===s.id?' active':''}" onclick="selectSession('${esc(s.id)}');closeDrawer();mobileTab('dash')" data-id="${esc(s.id)}">
+        <div class="sess-id">${esc(s.connectedNumber||s.id)}</div>
+        <div class="sess-row"><div class="sdot ${s.connection}"></div>
+        <span class="sess-lbl">${s.connection==='open'?'Connecté':s.connection==='connecting'?'Connexion...':'Déconnecté'}</span></div>
+      </div>`
+    ).join('');
+  };
+  renderList('sessions-list');
+  renderList('sessions-list-m');
 }
 
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // ACTIONS
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 function selectSession(id) {
-  currentSession = id;
-  lastSessionData = null; // force reconstruction complète au prochain tick
+  currentSession = id; lastSessionData = null;
   renderSidebar();
   fetchingSession = true;
-  refreshSession(id, true).finally(() => { fetchingSession = false; });
+  refreshSession(id, true).finally(() => fetchingSession = false);
 }
-
 async function newSession() {
-  const btn = document.getElementById('btn-new');
-  btn.disabled = true; btn.textContent = '...';
+  const btns = ['btn-new','btn-new-m'].map(i => document.getElementById(i)).filter(Boolean);
+  btns.forEach(b => { b.disabled = true; b.textContent = '...'; });
   const r = await api('/api/sessions', 'POST');
-  btn.disabled = false; btn.textContent = 'QR';
-  if (r.ok) { toast('Session créée, QR en cours...', 'ok'); await refreshSessions(); selectSession(r.sessionId); }
-  else toast('Erreur', 'err');
+  btns.forEach(b => { b.disabled = false; b.textContent = 'QR'; });
+  if (r.ok) { toast('Session créée !', 'ok'); await refreshSessions(); selectSession(r.sessionId); }
+  else toast('Erreur création', 'err');
 }
-
 async function restart(id) {
   const r = await api(`/api/sessions/${encodeURIComponent(id)}/restart`, 'POST');
   toast(r.message || 'Reconnexion...', 'ok');
   setTimeout(() => refreshSession(id, true), 3000);
 }
-
 async function logout(id) {
   if (!confirm('Déconnecter et supprimer cette session ?')) return;
   const r = await api(`/api/sessions/${encodeURIComponent(id)}/logout`, 'POST');
@@ -512,19 +650,17 @@ async function logout(id) {
   document.getElementById('main-content').innerHTML = '<div class="no-session"><div style="font-size:2.5rem">📱</div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
   refreshSessions();
 }
-
 async function sendMsg(id) {
   const to   = document.getElementById('send-to')?.value?.trim();
   const text = document.getElementById('send-text')?.value?.trim();
   const res  = document.getElementById('send-result');
-  if (!to || !text) { res.textContent = '⚠️ Requis'; res.className = 'send-result err'; res.style.display = 'block'; return; }
+  if (!to || !text) { res.textContent = '⚠️ Champs requis'; res.className = 'send-result err'; res.style.display = 'block'; return; }
   const r = await api(`/api/sessions/${encodeURIComponent(id)}/send`, 'POST', {to, text});
   if (r.ok) { res.textContent = '✅ Envoyé !'; res.className = 'send-result ok'; document.getElementById('send-text').value = ''; }
   else { res.textContent = '❌ ' + (r.error || 'Erreur'); res.className = 'send-result err'; }
   res.style.display = 'block';
   setTimeout(() => res.style.display = 'none', 3000);
 }
-
 function tab(btn, paneId) {
   btn.closest('.panel').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   btn.closest('.panel').querySelectorAll('.tab-p').forEach(p => p.classList.remove('active'));
@@ -532,83 +668,77 @@ function tab(btn, paneId) {
   document.getElementById(paneId)?.classList.add('active');
 }
 
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// VISUAL INDICATORS
+// ═══════════════════════════════════════════════════════════
+function flashSync() {
+  const d = document.getElementById('sync-dot'); if (!d) return;
+  d.style.opacity = '1'; setTimeout(() => d.style.opacity = '0', 400);
+}
+function updateLastUpdate() {
+  const el = document.getElementById('last-update');
+  if (el) el.textContent = new Date().toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+// ═══════════════════════════════════════════════════════════
 // UTILS
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 async function api(path, method = 'GET', body = null) {
   const o = {method, headers:{'Content-Type':'application/json'}};
   if (body) o.body = JSON.stringify(body);
-  const r = await fetch(path, o);
-  return r.json();
+  const r = await fetch(path, o); return r.json();
 }
-
 function toast(msg, type = 'ok') {
   const el = document.getElementById('toast');
   el.textContent = msg; el.className = 'show ' + type;
   setTimeout(() => el.className = '', 3000);
 }
-
 function esc(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+async function doLogout() { await fetch('/logout',{method:'POST'}); location.href='/login'; }
 
-async function doLogout() { await fetch('/logout', {method:'POST'}); location.href = '/login'; }
-
-// ── Modal pairing ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// PAIR MODAL
+// ═══════════════════════════════════════════════════════════
 function showPairModal() {
-  document.getElementById('pair-modal').style.display = 'flex';
+  document.getElementById('pair-modal').classList.add('open');
   document.getElementById('pair-phone').value = '';
   document.getElementById('pair-result').style.display = 'none';
   setTimeout(() => document.getElementById('pair-phone').focus(), 100);
 }
-function closePairModal() {
-  document.getElementById('pair-modal').style.display = 'none';
-}
+function closePairModal() { document.getElementById('pair-modal').classList.remove('open'); }
+document.getElementById('pair-modal').addEventListener('click', e => { if(e.target===e.currentTarget) closePairModal(); });
 
 async function startPairing() {
   const phone = document.getElementById('pair-phone').value.trim().replace(/\D/g,'');
   const res   = document.getElementById('pair-result');
   if (!phone || phone.length < 7) {
-    res.textContent = '⚠️ Numéro invalide';
-    res.style.cssText = 'display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
-    return;
+    res.textContent='⚠️ Numéro invalide'; res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return;
   }
-  res.textContent = '⏳ Création de la session...';
-  res.style.cssText = 'display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
-
-  const r = await api('/api/sessions', 'POST', {phone});
-  if (!r.ok) {
-    res.textContent = '❌ ' + (r.error || 'Erreur');
-    res.style.cssText = 'display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.8rem';
-    return;
-  }
+  res.textContent='⏳ Création session...'; res.style.cssText='display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem';
+  const r = await api('/api/sessions','POST',{phone});
+  if (!r.ok) { res.textContent='❌ '+(r.error||'Erreur'); res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return; }
   const sid = r.sessionId;
-  res.textContent = '⏳ Code en cours... (10s)';
-  await refreshSessions();
-  selectSession(sid);
-
-  let attempts = 0;
+  res.textContent='⏳ Code en cours... (10s)';
+  await refreshSessions(); selectSession(sid);
+  let att = 0;
   const poll = setInterval(async () => {
-    attempts++;
-    const s = await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(() => null);
-    if (!s) return;
+    att++;
+    const s = await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(()=>null); if (!s) return;
     if (s.pairingCode) {
-      res.innerHTML = `✅ Votre code: <strong style="font-size:1.3rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.72rem;color:var(--muted)">Valable ~60s — WhatsApp → Lier avec numéro</span>`;
-      res.style.cssText = 'display:block;background:rgba(37,211,102,.08);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.8rem;line-height:1.6';
+      res.innerHTML=`✅ Code: <strong style="font-size:1.2rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.68rem;color:var(--muted)">Valable ~60s</span>`;
+      res.style.cssText='display:block;background:rgba(37,211,102,.07);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.78rem;line-height:1.6';
       clearInterval(poll);
     }
-    if (s.connection === 'open') { clearInterval(poll); closePairModal(); toast('✅ Connecté !', 'ok'); }
-    if (attempts > 15) clearInterval(poll);
+    if (s.connection==='open') { clearInterval(poll); closePairModal(); toast('✅ Connecté !','ok'); }
+    if (att > 15) clearInterval(poll);
   }, 2000);
 }
 
-document.getElementById('pair-modal').addEventListener('click', function(e) {
-  if (e.target === this) closePairModal();
-});
-
-// ══════════════════════════════════════════════════════════════
-// DÉMARRAGE
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════════════════════
 startPolling();
 </script>
 </body>

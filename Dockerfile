@@ -1,14 +1,12 @@
 FROM node:20-slim
 
-# Installer ffmpeg, wget, ca-certificates et python3
+# Dépendances système
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     wget \
     ca-certificates \
     python3 \
-    python3-dev \
     python3-pip \
-    build-essential \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
