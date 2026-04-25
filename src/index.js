@@ -205,11 +205,7 @@ async function startSession(sessionId, phoneNumber = null) {
             state.pairingCode = null;
             state.connectedNumber = num;
 
-            // Renommer la session avec le numéro réel
-            // FIX ENOENT (définitif) :
-            //   _saveCreds() a l'ancien authPath capturé dans sa closure → il faut
-            //   réinitialiser useMultiFileAuthState sur le nouveau chemin et rebrancher
-            //   l'event AVANT de supprimer l'ancien dossier.
+            // Renommer la session avec le numéro réel si différent
             if (sessionId !== num && !sessions.has(num)) {
                 sessions.set(num, state);
                 sessions.delete(sessionId);
@@ -217,25 +213,22 @@ async function startSession(sessionId, phoneNumber = null) {
                 const newPath = path.join(SESSIONS_ROOT, num);
                 try {
                     fse.ensureDirSync(newPath);
-                    if (!fs.existsSync(newPath) || authPath !== newPath) {
-                        fse.copySync(authPath, newPath, { overwrite: true });
-                    }
+                    if (authPath !== newPath) fse.copySync(authPath, newPath, { overwrite: true });
                     state.authPath = newPath;
-
-                    // Rebrancher saveCreds sur le nouveau dossier
-                    // (l'ancienne closure pointe encore sur authPath = ancien chemin)
-                    sock.ev.off('creds.update', saveCreds);
-                    const { saveCreds: _newSaveCreds } = await useMultiFileAuthState(newPath);
-                    const newSaveCreds = async () => {
-                        try { fse.ensureDirSync(state.authPath); } catch {}
-                        return _newSaveCreds();
-                    };
-                    sock.ev.on('creds.update', newSaveCreds);
-
-                    // Supprimer l'ancien dossier seulement après avoir rebranché
-                    setTimeout(() => { try { if (authPath !== newPath) fse.removeSync(authPath); } catch {} }, 5000);
                 } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
+
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
+
+                // ── Relancer proprement pour rebrancher tous les handlers ──
+                // Le messages.upsert actuel est lié à l'ancien sessionId/socket.
+                // On ferme et on repart proprement sur le bon numéro.
+                addLog('info', `[${num}] Redémarrage automatique des handlers...`);
+                try { sock.end(); } catch {}
+                setTimeout(() => {
+                    try { if (authPath !== newPath) fse.removeSync(authPath); } catch {}
+                    startSession(num);
+                }, 1500);
+                return; // stop — ce socket est mort, le nouveau prendra le relais
             }
 
             addLog('success', `[${state.id}] ✅ Connecté — Numéro: ${num} | Préfixe: ${PREFIX}`);

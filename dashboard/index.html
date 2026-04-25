@@ -337,10 +337,9 @@ let fetchingSession = false, fetchingLogs = false;
 // ═══════════════════════════════════════════════════════════
 function startPolling() {
   stopPolling();
-  timerSidebar     = setInterval(refreshSessions, 5000);
-  timerSession     = setInterval(tickSession, 3000);
-  timerLog         = setInterval(tickLogs, 2000);
-  timerPageRefresh = setInterval(() => location.reload(), 15000);
+  timerSidebar = setInterval(refreshSessions, 5000);
+  timerSession = setInterval(tickSession, 3000);
+  timerLog     = setInterval(tickLogs, 2000);
   refreshAll(true);
 }
 function stopPolling() {
@@ -396,6 +395,18 @@ async function refreshSession(id, force = false) {
 // PATCH PARTIEL
 // ═══════════════════════════════════════════════════════════
 function patchMain(s, force = false) {
+  // ── Protection scan QR ────────────────────────────────────
+  // Si un QR ou pairing code est affiché ET que la session n'est pas encore open,
+  // on ne reconstruit pas le DOM pour ne pas couper le scan en cours.
+  // On met juste à jour le QR si il a changé.
+  if (lastSessionData && s.connection !== 'open' && (s.qrCode || s.pairingCode)) {
+    if (s.qrCode !== lastSessionData.qrCode || s.pairingCode !== lastSessionData.pairingCode) {
+      lastSessionData = s;
+      const qz = document.getElementById('qr-zone');
+      if (qz) qz.innerHTML = renderQR(s);
+    }
+    return; // ne pas reconstruire le reste
+  }
   if (!lastSessionData || lastSessionData.id !== s.id || force) {
     lastSessionData = s; buildMain(s); return;
   }
