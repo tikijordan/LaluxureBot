@@ -635,10 +635,12 @@ function renderSidebar() {
 // ACTIONS
 // ═══════════════════════════════════════════════════════════
 function selectSession(id) {
-  currentSession = id; lastSessionData = null;
+  currentSession = id;
+  lastSessionData = null; // reset pour forcer buildMain
+  fetchingSession = false; // reset le verrou
   renderSidebar();
-  fetchingSession = true;
-  refreshSession(id, true).finally(() => fetchingSession = false);
+  // Force rebuild complet
+  refreshSession(id, true).finally(() => { fetchingSession = false; });
 }
 async function newSession() {
   const btns = ['btn-new','btn-new-m'].map(i => document.getElementById(i)).filter(Boolean);

@@ -204,6 +204,7 @@ async function startSession(sessionId, phoneNumber = null) {
             state.qrCode = null;
             state.pairingCode = null;
             state.connectedNumber = num;
+            state.lastActivity = Date.now(); // initialiser pour le watchdog
 
             // Renommer la session avec le numéro réel si différent
             if (sessionId !== num && !sessions.has(num)) {
@@ -278,6 +279,9 @@ async function startSession(sessionId, phoneNumber = null) {
 
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
+
+            // ── Mise à jour activité (anti-zombie watchdog) ──
+            state.lastActivity = Date.now();
 
             // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message ──
             // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
@@ -406,36 +410,43 @@ function restoreFromEnvSessionString() {
 
 // ══════════════════════════════════════════════════════════════
 // WATCHDOG — Détecte les sessions zombies (connectées mais muettes)
-// Symptôme : state.connection === 'open' mais le socket ne répond plus
-// Solution : si le dernier ping échoue 3 fois de suite → force reconnexion
+// Stratégie : suivre le timestamp du dernier message REÇU
+// Si aucun message depuis ZOMBIE_TIMEOUT → reconnexion forcée
+// (sendPresenceUpdate ne détecte pas les sockets morts en silence)
 // ══════════════════════════════════════════════════════════════
-const watchdogFailCounts = new Map(); // sessionId → nb échecs consécutifs
-const WATCHDOG_INTERVAL  = 30 * 1000; // vérification toutes les 30s
-const WATCHDOG_MAX_FAILS = 3;         // 3 échecs = ~90s sans réponse → reconnexion
+const WATCHDOG_INTERVAL = 60 * 1000;  // check toutes les 60s
+const ZOMBIE_TIMEOUT    = 10 * 60 * 1000; // 10 min sans activité → zombie
 
 setInterval(async () => {
+    const now = Date.now();
     for (const [id, state] of sessions) {
-        if (state.connection !== 'open' || !state.sock) {
-            watchdogFailCounts.delete(id);
+        if (state.connection !== 'open' || !state.sock) continue;
+
+        // Initialiser lastActivity si absent
+        if (!state.lastActivity) state.lastActivity = now;
+
+        const idle = now - state.lastActivity;
+
+        // ── Test 1 : inactivité trop longue ──────────────────────
+        if (idle > ZOMBIE_TIMEOUT) {
+            addLog('warn', `[Watchdog] [${id}] Inactif depuis ${Math.round(idle/60000)}min — reconnexion forcée`);
+            state.connection = 'close';
+            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            try { state.sock.end(); } catch {}
+            setTimeout(() => startSession(id), 2000);
             continue;
         }
+
+        // ── Test 2 : ping léger pour garder le socket vivant ─────
         try {
-            // sendPresenceUpdate sert de heartbeat — lance une exception si le socket est mort
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
-            watchdogFailCounts.set(id, 0); // succès → reset compteur
         } catch (e) {
-            const fails = (watchdogFailCounts.get(id) || 0) + 1;
-            watchdogFailCounts.set(id, fails);
-            addLog('warn', `[Watchdog] [${id}] ping échoué (${fails}/${WATCHDOG_MAX_FAILS}): ${e.message}`);
-            if (fails >= WATCHDOG_MAX_FAILS) {
-                addLog('warn', `[Watchdog] [${id}] Session zombie détectée — reconnexion forcée`);
-                watchdogFailCounts.set(id, 0);
-                state.connection = 'close';
-                if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-                try { state.sock.end(); } catch {}
-                setTimeout(() => startSession(id), 2000);
-            }
+            addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
+            state.connection = 'close';
+            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            try { state.sock.end(); } catch {}
+            setTimeout(() => startSession(id), 2000);
         }
     }
 }, WATCHDOG_INTERVAL);

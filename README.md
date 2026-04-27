@@ -9,6 +9,7 @@ Bot WhatsApp complet développé avec `@whiskeysockets/baileys` (Node.js ES Modu
 - **Node.js** v20+ 
 - Compte WhatsApp actif
 - Connexion Internet
+- compte mongodb Atlas
 
 ---
 
@@ -80,11 +81,9 @@ Scanner le QR code qui apparaît dans le terminal avec WhatsApp.
 | Commande | Description |
 |---|---|
 | `play [titre]` | Rechercher & télécharger musique |
-| `ytmp3 [lien]` | YouTube → MP3 |
 | `video [titre/lien]` | Télécharger vidéo YouTube |
 | `dl [lien]` | Télécharger depuis n'importe quel site |
-| `tiktok [lien]` | TikTok sans filigrane |
-| `ig [lien]` | Instagram Reels/Photos |
+
 
 ### 🤖 IA
 | Commande | Description |

@@ -14,12 +14,9 @@ import fs   from 'fs';
 import fse  from 'fs-extra';
 import path from 'path';
 import { MongoClient } from 'mongodb';
-import dotenv from 'dotenv';
-dotenv.config(); // charger .env avant de lire MONGODB_URI
 
-const MONGODB_URI = process.env.MONGODB_URI || '';
-const DB_NAME     = 'laluxurebot';
-const COLLECTION  = 'sessions';
+const DB_NAME    = 'laluxurebot';
+const COLLECTION = 'sessions';
 
 let client     = null;
 let collection = null;
@@ -27,6 +24,8 @@ let connected  = false;
 
 export async function connectMongo() {
     if (connected) return true;
+    // Lire MONGODB_URI ici (après dotenv.config() de index.js)
+    const MONGODB_URI = process.env.MONGODB_URI || '';
     if (!MONGODB_URI) {
         console.warn('[MongoDB] MONGODB_URI non défini — persistance désactivée');
         return false;
