@@ -131,7 +131,9 @@ export async function restoreAllSessions(sessionsRoot) {
         for (const doc of docs) {
             const authPath = path.join(sessionsRoot, doc._id);
             try {
-                // Toujours écraser depuis MongoDB — source de vérité
+                // Toujours écraser depuis MongoDB — vider le dossier local avant de restaurer pour éviter les conflits de clés
+                fse.removeSync(authPath);
+                fse.ensureDirSync(authPath);
                 writeSessionFiles(authPath, doc.files);
                 console.log(`[MongoDB] ✅ Session [${doc._id}] (${doc.number}) restaurée`);
                 count++;
@@ -183,5 +185,5 @@ export function scheduleSave(sessionId, number, authPath) {
     pushTimers.set(sessionId, setTimeout(async () => {
         pushTimers.delete(sessionId);
         await saveSessionMongo(sessionId, number, authPath);
-    }, 5000)); // attendre 5s d'inactivité avant de sauvegarder
+    }, 2000)); // attendre 2s d'inactivité avant de sauvegarder
 }

@@ -120,23 +120,29 @@ async function autoSaveViewOnce(sock, msg, OWNER, ctx) {
 // phoneNumber optionnel → active le pairing code au lieu du QR
 async function startSession(sessionId, phoneNumber = null) {
     const existing = sessions.get(sessionId);
-    if (existing?.connection === 'open') { addLog('warn',`Session ${sessionId} déjà active`); return; }
+    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
+        addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
+        return; 
+    }
 
     const authPath = path.join(SESSIONS_ROOT, sessionId);
     fse.ensureDirSync(authPath); // ← crée le dossier AVANT useMultiFileAuthState
 
-    const state = sessions.get(sessionId) || {
-        id: sessionId, connection: 'connecting', qrCode: null, pairingCode: null,
-        connectedNumber: null, sock: null, pingInterval: null,
-        commandsCount: 0, messagesCount: 0, recentCommands: [],
-        lastPing: null, createdAt: new Date().toISOString(),
-        authPath, // ← on stocke le chemin courant dans le state
-    };
+    let state = sessions.get(sessionId);
+    if (!state) {
+        state = {
+            id: sessionId, connection: 'connecting', qrCode: null, pairingCode: null,
+            connectedNumber: null, sock: null, pingInterval: null,
+            commandsCount: 0, messagesCount: 0, recentCommands: [],
+            lastPing: null, createdAt: new Date().toISOString(),
+            authPath, // ← on stocke le chemin courant dans le state
+        };
+        sessions.set(sessionId, state);
+    }
     state.connection = 'connecting';
     state.qrCode = null;
     state.pairingCode = null;
     state.authPath = authPath;
-    sessions.set(sessionId, state);
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
 
     const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
@@ -161,11 +167,16 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     state.sock = sock;
-    sock.ev.on('creds.update', saveCreds);
-    // ── Sauvegarde MongoDB + SESSION_STRING à chaque mise à jour des credentials ──
-    sock.ev.on('creds.update', () => {
-        // Sauvegarde MongoDB avec debounce 5s
+    // ── Sauvegarde sur disque d'abord, PUIS MongoDB + SESSION_STRING ──
+    sock.ev.on('creds.update', async () => {
+        await saveCreds(); // Attendre que l'écriture sur le disque local soit terminée
+        
+        // ── Sauvegarde synchrone/immédiate forcée ──
+        saveSessionMongo(state.id, state.connectedNumber || state.id, state.authPath).catch(() => {});
+
+        // Sauvegarde MongoDB avec debounce
         scheduleSave(state.id, state.connectedNumber || state.id, state.authPath);
+        
         // Mettre à jour la SESSION_STRING en mémoire
         try {
             const aPath = state.authPath;
@@ -204,7 +215,8 @@ async function startSession(sessionId, phoneNumber = null) {
             state.qrCode = null;
             state.pairingCode = null;
             state.connectedNumber = num;
-            state.lastActivity = Date.now(); // initialiser pour le watchdog
+            state.lastActivity    = Date.now();
+            state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
 
             // Renommer la session avec le numéro réel si différent
             if (sessionId !== num && !sessions.has(num)) {
@@ -409,44 +421,51 @@ function restoreFromEnvSessionString() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// WATCHDOG — Détecte les sessions zombies (connectées mais muettes)
-// Stratégie : suivre le timestamp du dernier message REÇU
-// Si aucun message depuis ZOMBIE_TIMEOUT → reconnexion forcée
-// (sendPresenceUpdate ne détecte pas les sockets morts en silence)
+// WATCHDOG — Reconnexion forcée périodique + détection zombie
 // ══════════════════════════════════════════════════════════════
-const WATCHDOG_INTERVAL = 60 * 1000;  // check toutes les 60s
-const ZOMBIE_TIMEOUT    = 10 * 60 * 1000; // 10 min sans activité → zombie
+const WATCHDOG_INTERVAL        = 60   * 1000;       // check toutes les 60s
+const ZOMBIE_TIMEOUT           = 15   * 60  * 1000; // 15 min sans message → zombie
+const FORCE_RECONNECT_INTERVAL = 4    * 3600 * 1000; // reconnexion forcée toutes les 4h
 
 setInterval(async () => {
     const now = Date.now();
     for (const [id, state] of sessions) {
         if (state.connection !== 'open' || !state.sock) continue;
 
-        // Initialiser lastActivity si absent
-        if (!state.lastActivity) state.lastActivity = now;
+        if (!state.lastActivity)    state.lastActivity    = now;
+        if (!state.lastConnectedAt) state.lastConnectedAt = now;
 
-        const idle = now - state.lastActivity;
+        const idle   = now - state.lastActivity;
+        const uptime = now - state.lastConnectedAt;
+        let reason   = null;
 
-        // ── Test 1 : inactivité trop longue ──────────────────────
-        if (idle > ZOMBIE_TIMEOUT) {
-            addLog('warn', `[Watchdog] [${id}] Inactif depuis ${Math.round(idle/60000)}min — reconnexion forcée`);
-            state.connection = 'close';
+        if (idle > ZOMBIE_TIMEOUT)
+            reason = `inactif depuis ${Math.round(idle/60000)}min`;
+        if (uptime > FORCE_RECONNECT_INTERVAL)
+            reason = `reconnexion périodique (${Math.round(uptime/3600000)}h uptime)`;
+
+        if (reason) {
+            addLog('warn', `[Watchdog] [${id}] Reconnexion — ${reason}`);
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            state.connection = 'close'; // set to close so it can restart
+            try { state.sock.ws.close(); } catch {}
             try { state.sock.end(); } catch {}
-            setTimeout(() => startSession(id), 2000);
+            // Secours si l'événement 'close' n'est pas émis par Baileys
+            setTimeout(() => { if (sessions.get(id)?.connection === 'close') startSession(id); }, 5000);
             continue;
         }
 
-        // ── Test 2 : ping léger pour garder le socket vivant ─────
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
         } catch (e) {
             addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
-            state.connection = 'close';
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            state.connection = 'close';
+            try { state.sock.ws.close(); } catch {}
             try { state.sock.end(); } catch {}
-            setTimeout(() => startSession(id), 2000);
+            // Secours si l'événement 'close' n'est pas émis
+            setTimeout(() => { if (sessions.get(id)?.connection === 'close') startSession(id); }, 5000);
         }
     }
 }, WATCHDOG_INTERVAL);
