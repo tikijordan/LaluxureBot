@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-pip \
+    build-essential \
+    python3-dev \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
@@ -18,9 +20,10 @@ RUN yt-dlp -U || true
 
 # Configurer yt-dlp :
 #  - player_client : ios + android + web_creator (bypass détection bot YouTube)
+#  - js-runtime : node (pour les vidéos obfusquées)
 #  - no-check-certificates : évite les erreurs SSL
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--no-check-certificates\n--socket-timeout 30\n" \
+    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--js-runtime node\n--no-check-certificates\n--socket-timeout 30\n" \
     > /root/.config/yt-dlp/config
 
 WORKDIR /app

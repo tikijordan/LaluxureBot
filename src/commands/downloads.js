@@ -25,16 +25,6 @@ function cleanup(filePath) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
 
-// Vérifie si curl_cffi est disponible (pour TikTok impersonate)
-let hasCurlCffi = false;
-try {
-    const { stdout } = await execPromise('python3 -c "import curl_cffi; print(\'ok\')"').catch(() => ({ stdout: '' }));
-    hasCurlCffi = stdout.trim() === 'ok';
-} catch {}
-
-// Vérifie si node peut être utilisé comme runtime JS pour yt-dlp
-const nodeRuntime = process.execPath; // chemin absolu de node en cours
-
 /**
  * Exécute yt-dlp avec des options adaptées par plateforme
  */
@@ -51,13 +41,11 @@ async function runYtdlp(url, isAudio, filePath) {
         `-o "${filePath}"`,
     ];
 
-    // ── Runtime JS — node est présent dans l'image, on l'indique à yt-dlp ──
-    args.push(`--js-runtimes "node:${nodeRuntime}"`);
-
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
         // Clients mobiles : contournent la vérification bot sans cookies
-        args.push('--extractor-args "youtube:player_client=ios,android"');
+        args.push('--js-runtime node');  // Utiliser Node.js comme runtime JS pour les vidéos
+        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
         args.push('--age-limit 99');
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
@@ -65,11 +53,15 @@ async function runYtdlp(url, isAudio, filePath) {
     }
 
     // ── TikTok ─────────────────────────────────────────────────
-    if (isTiktok && hasCurlCffi) {
-        // curl_cffi disponible → impersonation Chrome
-        args.push('--impersonate "chrome-124"');
+    // N'utilise PAS l'impersonation car curl_cffi n'est pas disponible dans la plupart des environnements
+    // yt-dlp peut télécharger sans impersonation mais peut être plus lent/bloqué
+    // Pour meilleur support, utilise des cookies (voir YT_COOKIES_FILE)
+    if (isTiktok) {
+        // Cookies TikTok si disponibles
+        if (fs.existsSync(path.join(process.cwd(), 'cookies.txt'))) {
+            args.push(`--cookies "${path.join(process.cwd(), 'cookies.txt')}"`);
+        }
     }
-    // Si curl_cffi absent, yt-dlp tente quand même sans impersonation
 
     if (isAudio) {
         args.push('-x', '--audio-format mp3', '--audio-quality 0');

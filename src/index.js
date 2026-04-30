@@ -24,6 +24,32 @@ import qrcodeterminal from 'qrcode-terminal';
 
 dotenv.config();
 
+// ══════════════════════════════════════════════════════════════
+// GLOBAL ERROR HANDLERS — Évite que le process crash sur les 
+// exceptions non catchées de Baileys (Connection Closed, etc)
+// ══════════════════════════════════════════════════════════════
+process.on('uncaughtException', (err) => {
+    console.error('❌ [Process] Uncaught Exception:', err.message);
+    if (err.message.includes('Connection Closed') || err.message.includes('Precondition Required')) {
+        console.error('   → Baileys connection error (expected during reconnect)');
+        // Don't crash, let watchdog handle reconnection
+    } else {
+        console.error('   → Stack:', err.stack);
+    }
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error('❌ [Process] Unhandled Rejection:', err?.message || err);
+    // Ne pas re-throw : laisser Baileys continuer
+    // C'est intentionnel car les rejections viennent souvent de Baileys
+});
+
+process.on('warning', (w) => {
+    if (!w.message.includes('ExperimentalWarning')) {
+        console.warn('⚠️  [Process] Warning:', w.message);
+    }
+});
+
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const SESSIONS_ROOT = path.join(__dirname, '../sessions');
 const DATA_ROOT     = path.join(__dirname, '../data');
@@ -132,7 +158,7 @@ async function startSession(sessionId, phoneNumber = null) {
     if (!state) {
         state = {
             id: sessionId, connection: 'connecting', qrCode: null, pairingCode: null,
-            connectedNumber: null, sock: null, pingInterval: null,
+            connectedNumber: null, sock: null, pingInterval: null, healthCheckInterval: null,
             commandsCount: 0, messagesCount: 0, recentCommands: [],
             lastPing: null, createdAt: new Date().toISOString(),
             authPath, // ← on stocke le chemin courant dans le state
@@ -167,8 +193,26 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     state.sock = sock;
+
+    // ── SAFE EVENT WRAPPER — capture les erreurs non catchées dans les handlers ──
+    function wrapHandler(name, handler) {
+        return async (...args) => {
+            try {
+                return await handler(...args);
+            } catch (err) {
+                if (err.message.includes('Connection Closed') || err.message.includes('Precondition Required')) {
+                    // Erreur réseau courante, log silencieux
+                    console.error(`[${name}] Connection error (expected):`, err.message);
+                } else {
+                    console.error(`[${name}] Unhandled error:`, err.message);
+                    console.error(err.stack);
+                }
+            }
+        };
+    }
+
     // ── Sauvegarde sur disque d'abord, PUIS MongoDB + SESSION_STRING ──
-    sock.ev.on('creds.update', async () => {
+    sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
         await saveCreds(); // Attendre que l'écriture sur le disque local soit terminée
         
         // ── Sauvegarde synchrone/immédiate forcée ──
@@ -185,7 +229,7 @@ async function startSession(sessionId, phoneNumber = null) {
             files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
             state.sessionString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
         } catch {}
-    });
+    }));
 
     // ── Pairing code : demander le code après connexion WS
     if (phoneNumber && !auth.creds.registered) {
@@ -267,11 +311,33 @@ async function startSession(sessionId, phoneNumber = null) {
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
             }, 30_000);
+
+            // ── HEALTH CHECK TOUTES LES 5 MIN — force reconnexion si inactif longtemps ──
+            if (state.healthCheckInterval) clearInterval(state.healthCheckInterval);
+            state.healthCheckInterval = setInterval(async () => {
+                const now = Date.now();
+                const timeSinceLastActivity = now - (state.lastActivity || now);
+                const MAX_INACTIVITY = 5 * 60 * 1000; // 5 minutes sans activité = morte
+
+                // Si pas d'activité depuis 5 min ET socket semble passif, force un refresh
+                if (timeSinceLastActivity > MAX_INACTIVITY && sock.ws && sock.ws.readyState !== 1) {
+                    addLog('warn', `[${state.id}] Health check FAILED — socket mort après ${Math.round(timeSinceLastActivity/1000)}s inactivité`);
+                    state.connection = 'close';
+                    try { sock.ws.close(); } catch {}
+                    try { sock.end(); } catch {}
+                    // Reconnecter dans 3s
+                    setTimeout(() => startSession(state.id), 3000);
+                } else if (timeSinceLastActivity <= MAX_INACTIVITY) {
+                    // Socket vivant, petit log de santé
+                    // console.log(`[Health] [${state.id}] OK — inactif depuis ${Math.round(timeSinceLastActivity/1000)}s`);
+                }
+            }, 5 * 60 * 1000); // check toutes les 5 minutes
         }
 
         if (connection === 'close') {
             state.connection = 'close';
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
             addLog('warn', `[${state.id}] Déconnecté (code: ${code})`);
             if (code === DisconnectReason.loggedOut) {
@@ -283,7 +349,7 @@ async function startSession(sessionId, phoneNumber = null) {
         }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
         // ── FIX DOUBLE RÉPONSE #1 : ignorer tout sauf les vrais nouveaux messages ──
         // 'notify' = message reçu en temps réel
         // 'append' = sync historique (au démarrage) → NE PAS traiter
@@ -368,7 +434,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 });
             } catch(err) { addLog('error', `[${state.id}] ${err.message}`); }
         }
-    });
+    }));
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -472,27 +538,54 @@ setInterval(async () => {
 
 // Initialiser MongoDB et charger les sessions existantes
 async function loadExistingSessions() {
+    let sessionsToStart = [];
+
     // ── 0. Connexion MongoDB ────────────────────────────────────
     const mongoOk = await connectMongo();
     if (mongoOk) {
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
-        if (count > 0) addLog('success', `[MongoDB] ${count} session(s) restaurée(s)`);
-        else addLog('info', '[MongoDB] Aucune session en base — premier déploiement ?');
+        if (count > 0) {
+            addLog('success', `[MongoDB] ${count} session(s) restaurée(s)`);
+            // Récupérer les sessions qui viennent d'être restaurées
+            if (fs.existsSync(SESSIONS_ROOT)) {
+                sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
+                    fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
+                    fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
+                );
+            }
+            // ✅ MongoDB a réussi → on n'en scanne PLUS le dossier local
+            // sinon on re-démarre les mêmes sessions 2x
+        } else {
+            addLog('info', '[MongoDB] Aucune session en base — premier déploiement ?');
+            // Fallback: charger depuis le dossier sessions/ si MongoDB est vide
+            if (fs.existsSync(SESSIONS_ROOT)) {
+                sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
+                    fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
+                    fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
+                );
+            }
+        }
     } else {
         // ── Fallback SESSION_STRING env si MongoDB indisponible ──
         addLog('warn', '[MongoDB] Indisponible — fallback SESSION_STRING');
         restoreFromEnvSessionString();
+        
+        // Charger depuis le dossier sessions/ si MongoDB échoue
+        if (fs.existsSync(SESSIONS_ROOT)) {
+            sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
+                fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
+                fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
+            );
+        }
     }
 
-    // ── Charger depuis le dossier sessions/ (y compris les sessions restaurées) ──
-    if (!fs.existsSync(SESSIONS_ROOT)) return;
-    const dirs = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-        fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-        fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-    );
-    if (dirs.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
-    else { addLog('info',`${dirs.length} session(s) prêtes: ${dirs.join(', ')}`); dirs.forEach(id => startSession(id)); }
+    // ── Démarrer les sessions ──
+    if (sessionsToStart.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
+    else { 
+        addLog('info',`${sessionsToStart.length} session(s) prêtes: ${sessionsToStart.join(', ')}`);
+        sessionsToStart.forEach(id => startSession(id));
+    }
 }
 
 // Helpers
@@ -787,7 +880,7 @@ button:hover{background:#1fb858}
         const users     = Object.entries(statsData).map(([n,d])=>({number:n,total:d.total,lastSeen:d.lastSeen,topCmd:Object.entries(d.commands||{}).sort((a,b)=>b[1]-a[1])[0]?.[0]})).sort((a,b)=>b.total-a.total).slice(0,50);
         const uptime    = Math.floor((Date.now()-startTime)/1000);
         return sendJson(res,{
-            ...s, sock:undefined, pingInterval:undefined,
+            ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
             recentCommands:s.recentCommands.slice(-20),
             uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
             totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,

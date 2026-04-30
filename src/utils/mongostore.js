@@ -128,7 +128,38 @@ export async function restoreAllSessions(sessionsRoot) {
             return 0;
         }
         console.log(`[MongoDB] ${docs.length} session(s) trouvée(s) — restauration...`);
+        
+        // 🧹 Nettoie les doublons (mêmes credentials)
+        const sessionsByNumber = {};
         for (const doc of docs) {
+            const number = doc.number || 'unknown';
+            if (!sessionsByNumber[number]) {
+                sessionsByNumber[number] = [];
+            }
+            sessionsByNumber[number].push(doc._id);
+        }
+        
+        // Supprime les doublons (garde le premier, enlève les autres)
+        for (const [number, ids] of Object.entries(sessionsByNumber)) {
+            if (ids.length > 1) {
+                console.log(`[MongoDB] ⚠️  ${ids.length} sessions avec le même numéro [${number}] — nettoyage...`);
+                for (const dupId of ids.slice(1)) {
+                    try {
+                        await collection.deleteOne({ _id: dupId });
+                        console.log(`[MongoDB] 🗑️  Session dupliquée [${dupId}] supprimée`);
+                    } catch (e) {
+                        console.error(`[MongoDB] ❌ Suppression doublon [${dupId}]:`, e.message);
+                    }
+                }
+            }
+        }
+        
+        // Restaure uniquement les sessions non-supprimées
+        for (const doc of docs) {
+            // Vérifier si le doc n'a pas été supprimé par le nettoyage
+            const stillExists = await collection.findOne({ _id: doc._id });
+            if (!stillExists) continue;
+            
             const authPath = path.join(sessionsRoot, doc._id);
             try {
                 // Toujours écraser depuis MongoDB — vider le dossier local avant de restaurer pour éviter les conflits de clés
