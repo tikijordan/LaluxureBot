@@ -137,7 +137,16 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         let isUserOwner = false;
         
         if (isGroup) {
-            // Vérifier si l'utilisateur est le owner en comparant les numéros
+            // Utiliser metadata pour vérifier si l'utilisateur est le owner
+            const metadata = await sock.groupMetadata(from).catch(() => null);
+            if (metadata) {
+                // Vérifier si c'est le owner en comparant le numéro du sender
+                isUserOwner = metadata.participants.find(
+                    p => p.id === sender && p.id.split('@')[0] === OWNER
+                );
+            }
+        } else {
+            // En DM, vérifier directement le numéro
             isUserOwner = senderNumber === OWNER;
         }
         
