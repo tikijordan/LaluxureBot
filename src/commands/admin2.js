@@ -33,7 +33,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 if (!global.botMessages) global.botMessages = new Map();
 
 function checkGroup(sock, from, isGroup) {
-  if (!isGroup) { sock.sendMessage(from, { text: '❌ Uniquement dans les groupes.' }); return false; }
+  if (!isGroup) { sock.sendMessage(from, { text: ' Uniquement dans les groupes.' }); return false; }
   return true;
 }
 function getMentionedJid(msg, args) {
@@ -58,11 +58,11 @@ export default {
         const meta = await sock.groupMetadata(from);
         const nonAdmins = meta.participants.filter(p => !p.admin).map(p => p.id);
         if (nonAdmins.length === 0) {
-          await sock.sendMessage(from, { text: '✅ Tous les membres sont déjà admins.' });
+          await sock.sendMessage(from, { text: ' Tous les membres sont déjà admins.' });
           return;
         }
         await sock.sendMessage(from, {
-          text: `⚠️ *Expulsion en cours...*\n🔢 ${nonAdmins.length} membre(s) vont être expulsés.\n\n_Cela peut prendre quelques secondes._`,
+          text: ` *Expulsion en cours...*\n ${nonAdmins.length} membre(s) vont être expulsés.\n\n_Cela peut prendre quelques secondes._`,
         });
         let count = 0;
         for (const jid of nonAdmins) {
@@ -72,9 +72,9 @@ export default {
             await new Promise(r => setTimeout(r, 500)); // éviter le rate limit
           } catch {}
         }
-        await sock.sendMessage(from, { text: `✅ *Expulsion terminée !*\n👥 ${count}/${nonAdmins.length} membres expulsés.` });
+        await sock.sendMessage(from, { text: ` *Expulsion terminée !*\n ${count}/${nonAdmins.length} membres expulsés.` });
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Erreur: ${err.message}` });
+        await sock.sendMessage(from, { text: ` Erreur: ${err.message}` });
       }
     },
   },
@@ -86,7 +86,7 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !ban @membre [raison]' });
+        await sock.sendMessage(from, { text: ' Usage: !ban @membre [raison]' });
         return;
       }
       const number = target.split('@')[0];
@@ -96,7 +96,7 @@ export default {
         await sock.groupParticipantsUpdate(from, [target], 'remove');
       } catch {}
       await sock.sendMessage(from, {
-        text: `🚫 *${number}* a été *banni* du groupe.\n📋 Raison: ${reason}\n\n_Il sera re-expulsé automatiquement s'il tente de rejoindre._`,
+        text: ` *${number}* a été *banni* du groupe.\n Raison: ${reason}\n\n_Il sera re-expulsé automatiquement s'il tente de rejoindre._`,
         mentions: [target],
       });
     },
@@ -108,12 +108,12 @@ export default {
     execute: async ({ sock, from, isGroup, args }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       if (!args[0]) {
-        await sock.sendMessage(from, { text: '❌ Usage: !unbangroup [numéro]' });
+        await sock.sendMessage(from, { text: ' Usage: !unbangroup [numéro]' });
         return;
       }
       const number = args[0].replace(/[^0-9]/g, '');
       unbanUser(from, number);
-      await sock.sendMessage(from, { text: `✅ *${number}* a été débanni. Il peut rejoindre le groupe.` });
+      await sock.sendMessage(from, { text: ` *${number}* a été débanni. Il peut rejoindre le groupe.` });
     },
   },
 
@@ -125,12 +125,12 @@ export default {
       const list = getBanList(from);
       const entries = Object.entries(list);
       if (entries.length === 0) {
-        await sock.sendMessage(from, { text: '✅ Aucun membre banni dans ce groupe.' });
+        await sock.sendMessage(from, { text: ' Aucun membre banni dans ce groupe.' });
         return;
       }
-      let text = `🚫 *Liste des bannis (${entries.length})*\n\n`;
+      let text = ` *Liste des bannis (${entries.length})*\n\n`;
       entries.forEach(([num, data]) => {
-        text += `• ${num}\n  📋 ${data.reason}\n  📅 ${new Date(data.date).toLocaleDateString('fr-FR')}\n\n`;
+        text += `• ${num}\n   ${data.reason}\n   ${new Date(data.date).toLocaleDateString('fr-FR')}\n\n`;
       });
       text += `_!unbangroup [numéro] pour débannir_`;
       await sock.sendMessage(from, { text });
@@ -148,10 +148,10 @@ export default {
         const admins = members.filter(m => m.admin);
         const normal = members.filter(m => !m.admin);
 
-        let text = `👥 *Membres de "${meta.subject}" (${members.length})*\n\n`;
-        text += `👑 *Admins (${admins.length}):*\n`;
+        let text = ` *Membres de "${meta.subject}" (${members.length})*\n\n`;
+        text += ` *Admins (${admins.length}):*\n`;
         admins.forEach((m, i) => { text += `${i + 1}. ${m.id.split('@')[0]}\n`; });
-        text += `\n👤 *Membres (${normal.length}):*\n`;
+        text += `\n *Membres (${normal.length}):*\n`;
         normal.forEach((m, i) => { text += `${i + 1}. ${m.id.split('@')[0]}\n`; });
 
         // Sauvegarder dans un fichier
@@ -161,7 +161,7 @@ export default {
 
         await sock.sendMessage(from, { text });
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Erreur: ${err.message}` });
+        await sock.sendMessage(from, { text: ` Erreur: ${err.message}` });
       }
     },
   },
@@ -179,10 +179,10 @@ export default {
         const code = await sock.groupInviteCode(from);
         const link = `https://chat.whatsapp.com/${code}`;
         await sock.sendMessage(from, {
-          text: `🔗 *Lien d'invitation du groupe*\n\n${link}\n\n_⚠️ Partage ce lien avec précaution.\nUtilise !revoke pour révoquer l'ancien lien._`,
+          text: ` *Lien d'invitation du groupe*\n\n${link}\n\n_ Partage ce lien avec précaution.\nUtilise !revoke pour révoquer l'ancien lien._`,
         });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible d\'obtenir le lien (bot doit être admin).' });
+        await sock.sendMessage(from, { text: ' Impossible d\'obtenir le lien (bot doit être admin).' });
       }
     },
   },
@@ -197,10 +197,10 @@ export default {
         const newCode = await sock.groupInviteCode(from);
         const newLink = `https://chat.whatsapp.com/${newCode}`;
         await sock.sendMessage(from, {
-          text: `✅ *Lien révoqué avec succès !*\n\n🔗 Nouveau lien:\n${newLink}\n\n_L'ancien lien ne fonctionne plus._`,
+          text: ` *Lien révoqué avec succès !*\n\n🔗 Nouveau lien:\n${newLink}\n\n_L'ancien lien ne fonctionne plus._`,
         });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de révoquer le lien.' });
+        await sock.sendMessage(from, { text: ' Impossible de révoquer le lien.' });
       }
     },
   },
@@ -211,7 +211,7 @@ export default {
     execute: async ({ sock, from, isGroup }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       try {
-        await sock.sendMessage(from, { text: '💾 Sauvegarde en cours...' });
+        await sock.sendMessage(from, { text: ' Sauvegarde en cours...' });
         const meta = await sock.groupMetadata(from);
         const backup = {
           date: new Date().toISOString(),
@@ -229,18 +229,18 @@ export default {
         const filepath = path.join(__dirname, '../../data/', filename);
         fs.writeFileSync(filepath, JSON.stringify(backup, null, 2));
 
-        let summary = `✅ *Backup du groupe sauvegardé !*\n\n`;
-        summary += `📌 *Nom:* ${backup.name}\n`;
-        summary += `👥 *Membres:* ${backup.totalMembers}\n`;
-        summary += `👑 *Admins:* ${backup.admins.length}\n`;
-        summary += `📅 *Date backup:* ${new Date().toLocaleDateString('fr-FR')}\n\n`;
+        let summary = ` *Backup du groupe sauvegardé !*\n\n`;
+        summary += ` *Nom:* ${backup.name}\n`;
+        summary += ` *Membres:* ${backup.totalMembers}\n`;
+        summary += ` *Admins:* ${backup.admins.length}\n`;
+        summary += ` *Date backup:* ${new Date().toLocaleDateString('fr-FR')}\n\n`;
         summary += `*Numéros des membres:*\n`;
         backup.members.forEach(m => {
-          summary += `• ${m.number}${m.isAdmin ? ' 👑' : ''}\n`;
+          summary += `• ${m.number}${m.isAdmin ? ' ' : ''}\n`;
         });
         await sock.sendMessage(from, { text: summary });
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Erreur backup: ${err.message}` });
+        await sock.sendMessage(from, { text: ` Erreur backup: ${err.message}` });
       }
     },
   },
@@ -261,26 +261,26 @@ export default {
         const words = getFilters(from);
         if (words.length === 0) {
           await sock.sendMessage(from, {
-            text: `🔤 *Filtre de mots*\n\nAucun mot interdit configuré.\n\n*Commandes:*\n• !filter add [mot] → Ajouter\n• !filter del [mot] → Supprimer\n• !filter list → Voir la liste\n• !filter clear → Tout effacer`,
+            text: ` *Filtre de mots*\n\nAucun mot interdit configuré.\n\n*Commandes:*\n• !filter add [mot] → Ajouter\n• !filter del [mot] → Supprimer\n• !filter list → Voir la liste\n• !filter clear → Tout effacer`,
           });
         } else {
           await sock.sendMessage(from, {
-            text: `🔤 *Mots interdits (${words.length}):*\n\n${words.map(w => `• ${w}`).join('\n')}\n\n_!filter del [mot] pour supprimer_`,
+            text: ` *Mots interdits (${words.length}):*\n\n${words.map(w => `• ${w}`).join('\n')}\n\n_!filter del [mot] pour supprimer_`,
           });
         }
         return;
       }
       if (action === 'add' && word) {
         addFilter(from, word);
-        await sock.sendMessage(from, { text: `✅ Mot *"${word}"* ajouté aux mots interdits.` });
+        await sock.sendMessage(from, { text: ` Mot *"${word}"* ajouté aux mots interdits.` });
       } else if (action === 'del' && word) {
         removeFilter(from, word);
-        await sock.sendMessage(from, { text: `✅ Mot *"${word}"* supprimé des mots interdits.` });
+        await sock.sendMessage(from, { text: ` Mot *"${word}"* supprimé des mots interdits.` });
       } else if (action === 'clear') {
         clearFilters(from);
-        await sock.sendMessage(from, { text: '✅ Liste des mots interdits effacée.' });
+        await sock.sendMessage(from, { text: ' Liste des mots interdits effacée.' });
       } else {
-        await sock.sendMessage(from, { text: '❌ Usage: !filter add/del/list/clear [mot]' });
+        await sock.sendMessage(from, { text: ' Usage: !filter add/del/list/clear [mot]' });
       }
     },
   },
@@ -294,7 +294,7 @@ export default {
 
       if (action === 'off') {
         disableSlowmode(from);
-        await sock.sendMessage(from, { text: '✅ *Slow mode désactivé.* Les membres peuvent écrire librement.' });
+        await sock.sendMessage(from, { text: ' *Slow mode désactivé.* Les membres peuvent écrire librement.' });
         return;
       }
 
@@ -302,14 +302,14 @@ export default {
       if (isNaN(seconds) || seconds < 1) {
         const current = getSlowmode(from);
         await sock.sendMessage(from, {
-          text: `🐢 *Slow Mode*\n\nStatut actuel: ${current ? `✅ Activé (${current}s)` : '❌ Désactivé'}\n\n• !slowmode [secondes] → Activer\n• !slowmode off → Désactiver\n\nExemple: !slowmode 30 → 1 message toutes les 30s`,
+          text: ` *Slow Mode*\n\nStatut actuel: ${current ? ` Activé (${current}s)` : ' Désactivé'}\n\n• !slowmode [secondes] → Activer\n• !slowmode off → Désactiver\n\nExemple: !slowmode 30 → 1 message toutes les 30s`,
         });
         return;
       }
 
       setSlowmode(from, seconds);
       await sock.sendMessage(from, {
-        text: `🐢 *Slow Mode activé !*\n\n⏱️ Délai: *${seconds} seconde(s)* entre chaque message\n\n_Les admins ne sont pas affectés._\n_!slowmode off pour désactiver._`,
+        text: ` *Slow Mode activé !*\n\n⏱ Délai: *${seconds} seconde(s)* entre chaque message\n\n_Les admins ne sont pas affectés._\n_!slowmode off pour désactiver._`,
       });
     },
   },
@@ -324,11 +324,11 @@ export default {
       const toDelete = messages.slice(-Math.min(count, 20));
 
       if (toDelete.length === 0) {
-        await sock.sendMessage(from, { text: '✅ Aucun message récent du bot à supprimer.' });
+        await sock.sendMessage(from, { text: ' Aucun message récent du bot à supprimer.' });
         return;
       }
 
-      await sock.sendMessage(from, { text: `🗑️ Suppression de ${toDelete.length} message(s)...` });
+      await sock.sendMessage(from, { text: ` Suppression de ${toDelete.length} message(s)...` });
       let deleted = 0;
       for (const key of toDelete) {
         try {

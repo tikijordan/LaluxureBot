@@ -7,23 +7,23 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-pip \
-    build-essential \
     python3-dev \
+    build-essential \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
 # Installer curl_cffi (nécessaire pour TikTok impersonation) et yt-dlp via pip
 RUN pip3 install --break-system-packages curl_cffi yt-dlp
 
-# S'assurer que yt-dlp est à jour
-RUN yt-dlp -U || true
+# S'assurer que yt-dlp est à jour (optionnel, ne pas échouer si pas de connexion)
+RUN yt-dlp -U || echo "yt-dlp update skipped"
 
 # Configurer yt-dlp :
 #  - player_client : ios + android + web_creator (bypass détection bot YouTube)
-#  - js-runtime : node (pour les vidéos obfusquées)
+#  - js-runtimes : node (runtime JS pour les extracteurs)
 #  - no-check-certificates : évite les erreurs SSL
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--js-runtime node\n--no-check-certificates\n--socket-timeout 30\n" \
+    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--js-runtimes node\n--no-check-certificates\n--socket-timeout 30\n" \
     > /root/.config/yt-dlp/config
 
 WORKDIR /app
@@ -31,6 +31,12 @@ WORKDIR /app
 # Copier et installer les dépendances Node
 COPY package*.json ./
 RUN npm install
+
+# Nettoyer les outils de build après installation
+RUN apt-get update && \
+    apt-get purge -y python3-dev build-essential && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copier le reste du projet
 COPY . .

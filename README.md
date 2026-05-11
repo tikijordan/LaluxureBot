@@ -39,7 +39,6 @@ Scanner le QR code qui apparaît dans le terminal avec WhatsApp.
 | Variable | Description | Obligatoire |
 |---|---|---|
 | `PREFIX` | Préfixe des commandes (défaut: `!`) | Non |
-| `OWNER_NUMBER` | Ton numéro (ex: 22890000000) | **Oui** |
 | `BOT_NAME` | Nom affiché du bot | Non |
 | `WEATHER_API_KEY` | [OpenWeatherMap](https://openweathermap.org/api) | Pour `!meteo` |
 | `NEWS_API_KEY` | [NewsAPI.org](https://newsapi.org) | Pour `!news` |

@@ -10,6 +10,7 @@ import fse from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import os from 'os';
 import makeWASocket, {
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
@@ -40,8 +41,6 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (err) => {
     console.error('❌ [Process] Unhandled Rejection:', err?.message || err);
-    // Ne pas re-throw : laisser Baileys continuer
-    // C'est intentionnel car les rejections viennent souvent de Baileys
 });
 
 process.on('warning', (w) => {
@@ -51,7 +50,8 @@ process.on('warning', (w) => {
 });
 
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
-const SESSIONS_ROOT = path.join(__dirname, '../sessions');
+// SESSIONS_ROOT utilise /tmp pour ne rien persister sur le disque — tout va sur MongoDB
+const SESSIONS_ROOT = path.join(os.tmpdir(), 'wa-bot-sessions');
 const DATA_ROOT     = path.join(__dirname, '../data');
 const DASH_DIR      = path.join(__dirname, '../dashboard');
 const PREFIX        = process.env.PREFIX || '!';
@@ -67,6 +67,36 @@ fse.ensureDirSync(DATA_ROOT);
 if (!global.noTagGroups)  global.noTagGroups  = new Set();
 if (!global.mutedMembers) global.mutedMembers  = new Set();
 if (!global.botMessages)  global.botMessages   = new Map();
+
+// ══════════════════════════════════════════════════════════════
+// NETTOYAGE TEMP SESSIONS — Tout va sur MongoDB, rien ne persiste
+// ══════════════════════════════════════════════════════════════
+function cleanupTempSessions() {
+    try {
+        if (fs.existsSync(SESSIONS_ROOT)) {
+            fse.removeSync(SESSIONS_ROOT);
+            console.log('[Cleanup] 🗑️ Dossier TEMP des sessions supprimé');
+        }
+    } catch (e) {
+        console.warn('[Cleanup] ⚠️  Erreur suppression TEMP:', e.message);
+    }
+}
+
+// Nettoyer le TEMP au démarrage (ne garder que ce qui est en MongoDB)
+cleanupTempSessions();
+
+// Et aussi à l'arrêt gracieux
+process.on('SIGTERM', () => {
+    console.log('[Process] 🛑 SIGTERM reçu — arrêt gracieux...');
+    cleanupTempSessions();
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('[Process] 🛑 SIGINT reçu — arrêt gracieux...');
+    cleanupTempSessions();
+    process.exit(0);
+});
 
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
@@ -288,7 +318,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 return; // stop — ce socket est mort, le nouveau prendra le relais
             }
 
-            addLog('success', `[${state.id}] ✅ Connecté — Numéro: ${num} | Préfixe: ${PREFIX}`);
+            addLog('success', `[${state.id}]  Connecté — Numéro: ${num} | Préfixe: ${PREFIX}`);
 
             // SESSION_STRING — affichée complète pour copier dans Railway env vars
             try {
@@ -329,9 +359,12 @@ async function startSession(sessionId, phoneNumber = null) {
                     setTimeout(() => startSession(state.id), 3000);
                 } else if (timeSinceLastActivity <= MAX_INACTIVITY) {
                     // Socket vivant, petit log de santé
-                    // console.log(`[Health] [${state.id}] OK — inactif depuis ${Math.round(timeSinceLastActivity/1000)}s`);
+                     console.log(`[Health] [${state.id}] OK — inactif depuis ${Math.round(timeSinceLastActivity/1000)}s`);
                 }
             }, 5 * 60 * 1000); // check toutes les 5 minutes
+            setInterval(()=> {
+                sock.sendPresenceUpdate('available')
+            }, 1000*60*10)
         }
 
         if (connection === 'close') {
@@ -834,7 +867,30 @@ button:hover{background:#1fb858}
     // GET /api/status — public
     if (pathname==='/api/status') return sendJson(res,{ status:'online', sessions:sessions.size, uptime:Math.floor((Date.now()-startTime)/1000) });
 
-    // ── Routes protégées (auth requise) ────────────────────────────
+    // ──────────────────────────────────────────────────────────
+    // Routes PUBLIQUES (sans authentification)
+    // ──────────────────────────────────────────────────────────
+
+    // GET /api/health — Endpoint pour cron jobs (UptimeRobot, easycron, etc.)
+    if (pathname==='/api/health' && method==='GET') {
+        const sessionsList = [...sessions.values()].map(s => ({
+            id: s.id,
+            status: s.connection,
+            messagesCount: s.messagesCount,
+            lastActivity: s.lastActivity
+        }));
+        
+        return sendJson(res, {
+            status: 'ok',
+            uptime: Math.round((Date.now() - startTime) / 1000),
+            sessions: sessionsList.length,
+            timestamp: new Date().toISOString()
+        });
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Routes protégées (auth requise)
+    // ──────────────────────────────────────────────────────────
     if (!isAuthenticated(req)) return sendJson(res,{ error:'Non autorisé — connectez-vous sur /login' },401);
 
     // GET /api/logs

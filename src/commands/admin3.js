@@ -171,7 +171,7 @@ export default {
     execute: async ({ sock, from, isGroup, text }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       if (!text) {
-        await sock.sendMessage(from, { text: '❌ Usage: !broadcast [message]\n\n_Envoie le message en privé à chaque membre._' });
+        await sock.sendMessage(from, { text: ' Usage: !broadcast [message]\n\n_Envoie le message en privé à chaque membre._' });
         return;
       }
 
@@ -179,7 +179,7 @@ export default {
         const meta = await sock.groupMetadata(from);
         const members = meta.participants;
         await sock.sendMessage(from, {
-          text: `📢 *Broadcast en cours...*\n👥 ${members.length} membre(s) à contacter.\n\n_Cela peut prendre quelques minutes._`,
+          text: ` *Broadcast en cours...*\n ${members.length} membre(s) à contacter.\n\n_Cela peut prendre quelques minutes._`,
         });
 
         let sent = 0, failed = 0;
@@ -187,7 +187,7 @@ export default {
           if (member.id === sock.user?.id) continue;
           try {
             await sock.sendMessage(member.id, {
-              text: `📢 *Message du groupe "${meta.subject}":*\n\n${text}`,
+              text: ` *Message du groupe "${meta.subject}":*\n\n${text}`,
             });
             sent++;
             await new Promise(r => setTimeout(r, 1000)); // 1s entre chaque message
@@ -195,10 +195,10 @@ export default {
         }
 
         await sock.sendMessage(from, {
-          text: `✅ *Broadcast terminé !*\n✔️ Envoyés: ${sent}\n❌ Échecs: ${failed}`,
+          text: ` *Broadcast terminé !*\n Envoyés: ${sent}\n Échecs: ${failed}`,
         });
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Erreur: ${err.message}` });
+        await sock.sendMessage(from, { text: ` Erreur: ${err.message}` });
       }
     },
   },
@@ -214,7 +214,7 @@ export default {
 
       if (parts.length < 3) {
         await sock.sendMessage(from, {
-          text: `📊 *Usage:* !poll [Question] | [Option1] | [Option2] | ...\n\nExemple:\n!poll Quelle est votre couleur préférée? | Rouge | Bleu | Vert | Jaune`,
+          text: ` *Usage:* !poll [Question] | [Option1] | [Option2] | ...\n\nExemple:\n!poll Quelle est votre couleur préférée? | Rouge | Bleu | Vert | Jaune`,
         });
         return;
       }
@@ -223,7 +223,7 @@ export default {
       const options = parts.slice(1).slice(0, 12); // max 12 options
       const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔢','🔣'];
 
-      let pollText = `📊 *SONDAGE*\n\n❓ *${question}*\n\n`;
+      let pollText = ` *SONDAGE*\n\n *${question}*\n\n`;
       options.forEach((opt, i) => { pollText += `${emojis[i]} ${opt}\n`; });
       pollText += `\n_Réponds avec le numéro de ton choix (1, 2, 3...)_\n_Sondage créé par @${sender.split('@')[0]}_`;
 
@@ -249,7 +249,7 @@ export default {
           }).sort((a, b) => b.count - a.count);
 
           sock.sendMessage(from, {
-            text: `📊 *Sondage terminé (24h)*\n\n❓ ${question}\n\n${results.map((r, i) => `${emojis[i]} ${r.opt}: *${r.count} vote(s)*`).join('\n')}\n\n🏆 Gagnant: *${results[0].opt}*`,
+            text: ` *Sondage terminé (24h)*\n\n ${question}\n\n${results.map((r, i) => `${emojis[i]} ${r.opt}: *${r.count} vote(s)*`).join('\n')}\n\n Gagnant: *${results[0].opt}*`,
           }).catch(() => {});
           activePolls.delete(from);
         }
@@ -264,7 +264,7 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const poll = activePolls.get(from);
       if (!poll) {
-        await sock.sendMessage(from, { text: '❌ Aucun sondage en cours.\nUtilise !poll pour en créer un.' });
+        await sock.sendMessage(from, { text: ' Aucun sondage en cours.\nUtilise !poll pour en créer un.' });
         return;
       }
       const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
@@ -276,7 +276,7 @@ export default {
         return `${emojis[i]} ${opt}\n   ${bar} ${count} vote(s) (${pct}%)`;
       });
       await sock.sendMessage(from, {
-        text: `📊 *Résultats en direct*\n\n❓ *${poll.question}*\n\n${results.join('\n\n')}\n\n👥 Total: ${totalVotes} vote(s)\n_!closepoll pour fermer_`,
+        text: ` *Résultats en direct*\n\n *${poll.question}*\n\n${results.join('\n\n')}\n\n Total: ${totalVotes} vote(s)\n_!closepoll pour fermer_`,
       });
     },
   },
@@ -287,7 +287,7 @@ export default {
     execute: async ({ sock, from, isGroup }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       const poll = activePolls.get(from);
-      if (!poll) { await sock.sendMessage(from, { text: '❌ Aucun sondage en cours.' }); return; }
+      if (!poll) { await sock.sendMessage(from, { text: ' Aucun sondage en cours.' }); return; }
       const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
       const totalVotes = Object.keys(poll.votes).length;
       const results = poll.options.map((opt, i) => {
@@ -300,7 +300,7 @@ export default {
         return cb - ca;
       });
       await sock.sendMessage(from, {
-        text: `📊 *Sondage fermé !*\n\n❓ *${poll.question}*\n\n${results.join('\n')}\n\n👥 Total: ${totalVotes} vote(s)`,
+        text: ` *Sondage fermé !*\n\n❓ *${poll.question}*\n\n${results.join('\n')}\n\n Total: ${totalVotes} vote(s)`,
       });
       activePolls.delete(from);
     },
@@ -316,7 +316,7 @@ export default {
       if (!args[0] || !text) {
         const pending = getPendingSchedules(from);
         await sock.sendMessage(from, {
-          text: `⏰ *Messages Programmés*\n\n*Usage:*\n• !schedule 30min [msg] → Dans 30 minutes\n• !schedule 2h [msg] → Dans 2 heures\n• !schedule 14:30 [msg] → À 14h30\n\n*En attente (${pending.length}):*\n${pending.map((s, i) => `${i + 1}. "${s.message.slice(0, 30)}..." → ${new Date(s.fireAt).toLocaleString('fr-FR')}`).join('\n') || 'Aucun'}\n\n• !schedule cancel [n°] → Annuler`,
+          text: ` *Messages Programmés*\n\n*Usage:*\n• !schedule 30min [msg] → Dans 30 minutes\n• !schedule 2h [msg] → Dans 2 heures\n• !schedule 14:30 [msg] → À 14h30\n\n*En attente (${pending.length}):*\n${pending.map((s, i) => `${i + 1}. "${s.message.slice(0, 30)}..." → ${new Date(s.fireAt).toLocaleString('fr-FR')}`).join('\n') || 'Aucun'}\n\n• !schedule cancel [n°] → Annuler`,
         });
         return;
       }
@@ -325,11 +325,11 @@ export default {
         const idx = parseInt(args[1]) - 1;
         const pending = getPendingSchedules(from);
         if (isNaN(idx) || idx < 0 || idx >= pending.length) {
-          await sock.sendMessage(from, { text: '❌ Numéro invalide. Utilise !schedule pour voir la liste.' });
+          await sock.sendMessage(from, { text: ' Numéro invalide. Utilise !schedule pour voir la liste.' });
           return;
         }
         cancelSchedule(pending[idx].id);
-        await sock.sendMessage(from, { text: `✅ Message programmé n°${idx + 1} annulé.` });
+        await sock.sendMessage(from, { text: ` Message programmé n°${idx + 1} annulé.` });
         return;
       }
 
@@ -348,12 +348,12 @@ export default {
         if (target <= new Date()) target.setDate(target.getDate() + 1);
         delayMs = target - new Date();
       } else {
-        await sock.sendMessage(from, { text: '❌ Format invalide.\nExemples: !schedule 30min [msg] | !schedule 2h [msg] | !schedule 14:30 [msg]' });
+        await sock.sendMessage(from, { text: ' Format invalide.\nExemples: !schedule 30min [msg] | !schedule 2h [msg] | !schedule 14:30 [msg]' });
         return;
       }
 
       if (delayMs <= 0) {
-        await sock.sendMessage(from, { text: '❌ L\'heure est dans le passé.' });
+        await sock.sendMessage(from, { text: ' L\'heure est dans le passé.' });
         return;
       }
 
@@ -361,7 +361,7 @@ export default {
       const fireTime = new Date(entry.fireAt).toLocaleString('fr-FR');
 
       await sock.sendMessage(from, {
-        text: `✅ *Message programmé !*\n\n📝 "${message}"\n⏰ Envoi le: *${fireTime}*\n\n_!schedule pour voir tous les messages programmés_`,
+        text: ` *Message programmé !*\n\n "${message}"\n Envoi le: *${fireTime}*\n\n_!schedule pour voir tous les messages programmés_`,
       });
     },
   },
@@ -377,7 +377,7 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !report @membre [raison]' });
+        await sock.sendMessage(from, { text: ' Usage: !report @membre [raison]' });
         return;
       }
       const reason = args.slice(1).join(' ') || 'Comportement inapproprié';
@@ -389,7 +389,7 @@ export default {
       reports.get(from).push({ sender: senderNum, target: targetNum, reason, date: new Date().toISOString() });
 
       await sock.sendMessage(from, {
-        text: `✅ *Signalement envoyé aux admins.*\n\n👤 Membre signalé: @${targetNum}\n📋 Raison: ${reason}\n\n_Merci, les admins examineront ce signalement._`,
+        text: ` *Signalement envoyé aux admins.*\n\n Membre signalé: @${targetNum}\n Raison: ${reason}\n\n_Merci, les admins examineront ce signalement._`,
         mentions: [target],
       });
 
@@ -399,7 +399,7 @@ export default {
         const admins = meta.participants.filter(p => p.admin);
         for (const admin of admins) {
           await sock.sendMessage(admin.id, {
-            text: `🚨 *Nouveau Signalement dans "${meta.subject}"*\n\n👤 Signalé par: ${senderNum}\n🎯 Membre signalé: ${targetNum}\n📋 Raison: ${reason}\n📅 ${new Date().toLocaleString('fr-FR')}\n\nActions: !warn @${targetNum} | !kick @${targetNum} | !ban @${targetNum}`,
+            text: ` *Nouveau Signalement dans "${meta.subject}"*\n\n👤 Signalé par: ${senderNum}\n Membre signalé: ${targetNum}\n Raison: ${reason}\n ${new Date().toLocaleString('fr-FR')}\n\nActions: !warn @${targetNum} | !kick @${targetNum} | !ban @${targetNum}`,
           }).catch(() => {});
         }
       } catch {}
@@ -413,12 +413,12 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const list = reports.get(from) || [];
       if (list.length === 0) {
-        await sock.sendMessage(from, { text: '✅ Aucun signalement en attente.' });
+        await sock.sendMessage(from, { text: ' Aucun signalement en attente.' });
         return;
       }
-      let text = `🚨 *Signalements (${list.length})*\n\n`;
+      let text = ` *Signalements (${list.length})*\n\n`;
       list.slice(-10).forEach((r, i) => {
-        text += `${i + 1}. *${r.target}* signalé par ${r.sender}\n   📋 ${r.reason}\n   📅 ${new Date(r.date).toLocaleDateString('fr-FR')}\n\n`;
+        text += `${i + 1}. *${r.target}* signalé par ${r.sender}\n    ${r.reason}\n    ${new Date(r.date).toLocaleDateString('fr-FR')}\n\n`;
       });
       text += `_!clearreports pour effacer_`;
       await sock.sendMessage(from, { text });
@@ -431,7 +431,7 @@ export default {
     execute: async ({ sock, from, isGroup }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       reports.delete(from);
-      await sock.sendMessage(from, { text: '✅ Tous les signalements ont été effacés.' });
+      await sock.sendMessage(from, { text: ' Tous les signalements ont été effacés.' });
     },
   },
 
@@ -441,18 +441,18 @@ export default {
     execute: async ({ sock, msg, from, isGroup, args }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
-      if (!target) { await sock.sendMessage(from, { text: '❌ Usage: !history @membre' }); return; }
+      if (!target) { await sock.sendMessage(from, { text: ' Usage: !history @membre' }); return; }
       const number = target.split('@')[0];
       const hist = getHistory(from, number);
       if (hist.length === 0) {
-        await sock.sendMessage(from, { text: `✅ @${number} n'a aucun historique de sanctions.`, mentions: [target] });
+        await sock.sendMessage(from, { text: ` @${number} n'a aucun historique de sanctions.`, mentions: [target] });
         return;
       }
-      const actionEmoji = { warn:'⚠️', kick:'👢', ban:'🚫', mute:'🔇', tempkick:'⏱️', promote:'⬆️', demote:'⬇️' };
-      let text = `📋 *Historique de @${number} (${hist.length} action(s))*\n\n`;
+      const actionEmoji = { warn:'', kick:'', ban:'', mute:'', tempkick:'', promote:'', demote:'' };
+      let text = ` *Historique de @${number} (${hist.length} action(s))*\n\n`;
       hist.slice(-15).forEach((h, i) => {
-        const emoji = actionEmoji[h.action] || '📌';
-        text += `${i + 1}. ${emoji} *${h.action.toUpperCase()}*\n   📝 ${h.reason || '-'}\n   📅 ${new Date(h.date).toLocaleDateString('fr-FR')}\n\n`;
+        const emoji = actionEmoji[h.action] || '';
+        text += `${i + 1}. ${emoji} *${h.action.toUpperCase()}*\n    ${h.reason || '-'}\n    ${new Date(h.date).toLocaleDateString('fr-FR')}\n\n`;
       });
       text += `_!clearhistory @membre pour effacer_`;
       await sock.sendMessage(from, { text, mentions: [target] });
@@ -465,9 +465,9 @@ export default {
     execute: async ({ sock, msg, from, isGroup, args }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
-      if (!target) { await sock.sendMessage(from, { text: '❌ Usage: !clearhistory @membre' }); return; }
+      if (!target) { await sock.sendMessage(from, { text: ' Usage: !clearhistory @membre' }); return; }
       clearHistory(from, target.split('@')[0]);
-      await sock.sendMessage(from, { text: `✅ Historique de @${target.split('@')[0]} effacé.`, mentions: [target] });
+      await sock.sendMessage(from, { text: ` Historique de @${target.split('@')[0]} effacé.`, mentions: [target] });
     },
   },
 
@@ -479,7 +479,7 @@ export default {
       const count = Math.min(parseInt(args[0]) || 5, 50);
       const msgs = global.botMessages?.get(from) || [];
 
-      await sock.sendMessage(from, { text: `🗑️ Suppression de ${count} message(s) en cours...` });
+      await sock.sendMessage(from, { text: ` Suppression de ${count} message(s) en cours...` });
 
       let deleted = 0;
       // Supprimer les messages du bot d'abord (les seuls qu'on peut supprimer)
@@ -494,7 +494,7 @@ export default {
 
       // Vider le cache
       global.botMessages.set(from, msgs.slice(0, -count));
-      await sock.sendMessage(from, { text: `✅ *${deleted} message(s) supprimé(s).*\n\n_Note: WhatsApp ne permet de supprimer que les messages du bot._` });
+      await sock.sendMessage(from, { text: ` *${deleted} message(s) supprimé(s).*\n\n_Note: WhatsApp ne permet de supprimer que les messages du bot._` });
     },
   },
 
@@ -510,7 +510,7 @@ export default {
       if (!action) {
         const enabled = global.antifakeGroups.has(from);
         await sock.sendMessage(from, {
-          text: `🔍 *Anti-Fake*\n\nStatut: ${enabled ? '✅ Activé' : '❌ Désactivé'}\n\n• !antifake on → Activer\n• !antifake off → Désactiver\n\n_Bloque les numéros avec des formats suspects (trop courts, préfixes inconnus, etc.)_`,
+          text: `🔍 *Anti-Fake*\n\nStatut: ${enabled ? ' Activé' : ' Désactivé'}\n\n• !antifake on → Activer\n• !antifake off → Désactiver\n\n_Bloque les numéros avec des formats suspects (trop courts, préfixes inconnus, etc.)_`,
         });
         return;
       }
@@ -518,11 +518,11 @@ export default {
       if (action === 'on') {
         global.antifakeGroups.add(from);
         await sock.sendMessage(from, {
-          text: `🔍 *Anti-Fake activé !*\n\nLes nouveaux membres avec des numéros suspects seront automatiquement expulsés.\n\n_Formats acceptés: +22X, +33, +1, +44, etc._`,
+          text: ` *Anti-Fake activé !*\n\nLes nouveaux membres avec des numéros suspects seront automatiquement expulsés.\n\n_Formats acceptés: +22X, +33, +1, +44, etc._`,
         });
       } else if (action === 'off') {
         global.antifakeGroups.delete(from);
-        await sock.sendMessage(from, { text: '✅ Anti-Fake désactivé.' });
+        await sock.sendMessage(from, { text: ' Anti-Fake désactivé.' });
       }
     },
   },

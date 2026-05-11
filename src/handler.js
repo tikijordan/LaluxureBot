@@ -113,7 +113,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     // ── Anti-spam ──────────────────────────────────────────────
     if (!isOwner) {
         if (isSpam(senderNumber)) {
-            return await sock.sendMessage(from, { text: '⚠️ Calme-toi ! Trop de messages.' });
+            return await sock.sendMessage(from, { text: ' Calme-toi ! Trop de messages.' });
         }
         trackMessage(senderNumber);
     }
@@ -138,12 +138,12 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         if (isGroup) {
             const metadata = await sock.groupMetadata(from).catch(() => null);
             if (metadata) {
-                isUserAdmin = !!metadata.participants.find(
+                isUserAdmin = !meta.participants.find(
                     p => p.id === sender && (p.admin || p.isSuperAdmin)
                 );
             }
         }
-        if (!isUserAdmin) {
+        if (!isUserAdmin && ! isOwner) {
             return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
         }
     }

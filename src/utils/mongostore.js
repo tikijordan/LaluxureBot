@@ -1,19 +1,22 @@
 /**
  * @file        mongostore.js
- * @description Persistance des sessions WhatsApp via MongoDB Atlas
- *              Remplace sessiondb.js (SQLite) et gistsync.js (GitHub Gist)
+ * @description Persistance des sessions WhatsApp via MongoDB Atlas UNIQUEMENT
+ *              Pas de fichiers sur disque, tout est en base de données
  *
  * Variable d'environnement requise :
  *   MONGODB_URI = mongodb+srv://user:pass@cluster.mongodb.net/laluxurebot
  *
  * Collection : sessions
  * Document   : { _id: sessionId, number: string, files: { "creds.json": "...", "keys/xxx": "..." }, updatedAt: Date }
+ * 
+ * MEMORY CACHE: Les sessions sont chargées en mémoire au démarrage pour éviter les requêtes BD à chaque accès
  */
 
 import fs   from 'fs';
 import fse  from 'fs-extra';
 import path from 'path';
 import { MongoClient } from 'mongodb';
+import os from 'os';
 
 const DB_NAME    = 'laluxurebot';
 const COLLECTION = 'sessions';
@@ -21,6 +24,8 @@ const COLLECTION = 'sessions';
 let client     = null;
 let collection = null;
 let connected  = false;
+let memCache   = new Map(); // Chaque sessionId → { number, files, updatedAt }
+const TEMP_DIR = path.join(os.tmpdir(), 'wa-bot-sessions');
 
 export async function connectMongo() {
     if (connected) return true;
@@ -32,8 +37,9 @@ export async function connectMongo() {
     }
     try {
         client = new MongoClient(MONGODB_URI, {
-            serverSelectionTimeoutMS: 8000,
-            connectTimeoutMS:        8000,
+            serverSelectionTimeoutMS: 15000,  // 15s pour la sélection du serveur
+            connectTimeoutMS:        15000,   // 15s pour la connexion
+            socketTimeoutMS:         15000,   // 15s pour les opérations socket
         });
         await client.connect();
         const db = client.db(DB_NAME);
@@ -42,15 +48,54 @@ export async function connectMongo() {
         await collection.createIndex({ updatedAt: 1 });
         connected = true;
         console.log('[MongoDB] ✅ Connecté à Atlas');
+        
+        // Pré-charger toutes les sessions en mémoire au démarrage (avec timeout)
+        const preloadPromise = preloadSessionsToMemory();
+        // Attendre max 10s, sinon continuer sans pré-charge
+        Promise.race([
+            preloadPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Preload timeout')), 10000))
+        ]).catch(e => {
+            console.warn('[MongoDB] ⚠️  Preload sessions timeout/erreur (continuant sans cache):', e.message);
+        });
+        
         return true;
     } catch (e) {
         console.error('[MongoDB] ❌ Connexion échouée:', e.message);
+        connected = false;
         return false;
     }
 }
 
 // ─────────────────────────────────────────────
-// Lit les fichiers d'une session depuis le disque
+// Pré-charger toutes les sessions en cache mémoire
+// ─────────────────────────────────────────────
+async function preloadSessionsToMemory() {
+    if (!connected || !collection) {
+        console.warn('[MongoDB] ⚠️  Pas connecté pour preload');
+        return;
+    }
+    try {
+        console.log('[MongoDB] 📥 Chargement des sessions en cache...');
+        const docs = await collection.find({}).toArray();
+        memCache.clear();
+        for (const doc of docs) {
+            memCache.set(doc._id, {
+                number: doc.number,
+                files: doc.files,
+                updatedAt: doc.updatedAt
+            });
+        }
+        console.log(`[MongoDB] 📌 ${docs.length} session(s) chargée(s) en cache mémoire`);
+    } catch (e) {
+        console.error('[MongoDB] ❌ Erreur preloadSessions:', e.message);
+        // Continuer même si le preload échoue
+    }
+}
+
+// ─────────────────────────────────────────────
+// Lit les fichiers d'une session depuis le disque TEMPORAIRE
+// (Ne lit que ce qui est en /tmp, pas de persistance sur /app)
 // ─────────────────────────────────────────────
 function readSessionFiles(authPath) {
     const result = {};
@@ -94,7 +139,7 @@ export function writeSessionFiles(authPath, files) {
 }
 
 // ─────────────────────────────────────────────
-// SAVE — Sauvegarde une session dans MongoDB
+// SAVE — Sauvegarde une session dans MongoDB + cache mémoire
 // ─────────────────────────────────────────────
 export async function saveSessionMongo(sessionId, number, authPath) {
     if (!connected || !collection) return false;
@@ -102,11 +147,16 @@ export async function saveSessionMongo(sessionId, number, authPath) {
         const files = readSessionFiles(authPath);
         if (Object.keys(files).length === 0) return false;
 
+        // Sauvegarder en BD
         await collection.updateOne(
             { _id: sessionId },
             { $set: { _id: sessionId, number, files, updatedAt: new Date() } },
             { upsert: true }
         );
+        
+        // Mettre à jour le cache mémoire aussi
+        memCache.set(sessionId, { number, files, updatedAt: new Date() });
+        
         return true;
     } catch (e) {
         console.error(`[MongoDB] ❌ saveSession [${sessionId}]:`, e.message);
@@ -116,27 +166,51 @@ export async function saveSessionMongo(sessionId, number, authPath) {
 
 // ─────────────────────────────────────────────
 // RESTORE — Restaure toutes les sessions depuis MongoDB
+// Utilise le cache mémoire en priorité pour éviter les requêtes BD
 // Retourne le nombre de sessions restaurées
 // ─────────────────────────────────────────────
 export async function restoreAllSessions(sessionsRoot) {
-    if (!connected || !collection) return 0;
+    if (!collection) return 0;
     let count = 0;
+    
     try {
-        const docs = await collection.find({}).toArray();
-        if (docs.length === 0) {
+        let sessionIds = [];
+        
+        // Si cache est vide et on est connecté, charger depuis BD
+        if (memCache.size === 0 && connected) {
+            console.log('[MongoDB] 📥 Cache vide, chargement depuis MongoDB...');
+            try {
+                const docs = await collection.find({}).toArray();
+                for (const doc of docs) {
+                    memCache.set(doc._id, {
+                        number: doc.number,
+                        files: doc.files,
+                        updatedAt: doc.updatedAt
+                    });
+                }
+            } catch (e) {
+                console.warn('[MongoDB] ⚠️  Impossible de charger de MongoDB:', e.message);
+            }
+        }
+        
+        sessionIds = Array.from(memCache.keys());
+        
+        if (sessionIds.length === 0) {
             console.log('[MongoDB] Aucune session en base');
             return 0;
         }
-        console.log(`[MongoDB] ${docs.length} session(s) trouvée(s) — restauration...`);
+        
+        console.log(`[MongoDB] 📌 ${sessionIds.length} session(s) en cache — restauration en TEMP...`);
         
         // 🧹 Nettoie les doublons (mêmes credentials)
         const sessionsByNumber = {};
-        for (const doc of docs) {
-            const number = doc.number || 'unknown';
+        for (const sessionId of sessionIds) {
+            const cached = memCache.get(sessionId);
+            const number = cached.number || 'unknown';
             if (!sessionsByNumber[number]) {
                 sessionsByNumber[number] = [];
             }
-            sessionsByNumber[number].push(doc._id);
+            sessionsByNumber[number].push(sessionId);
         }
         
         // Supprime les doublons (garde le premier, enlève les autres)
@@ -145,7 +219,10 @@ export async function restoreAllSessions(sessionsRoot) {
                 console.log(`[MongoDB] ⚠️  ${ids.length} sessions avec le même numéro [${number}] — nettoyage...`);
                 for (const dupId of ids.slice(1)) {
                     try {
-                        await collection.deleteOne({ _id: dupId });
+                        if (connected) {
+                            await collection.deleteOne({ _id: dupId });
+                        }
+                        memCache.delete(dupId);
                         console.log(`[MongoDB] 🗑️  Session dupliquée [${dupId}] supprimée`);
                     } catch (e) {
                         console.error(`[MongoDB] ❌ Suppression doublon [${dupId}]:`, e.message);
@@ -154,22 +231,20 @@ export async function restoreAllSessions(sessionsRoot) {
             }
         }
         
-        // Restaure uniquement les sessions non-supprimées
-        for (const doc of docs) {
-            // Vérifier si le doc n'a pas été supprimé par le nettoyage
-            const stillExists = await collection.findOne({ _id: doc._id });
-            if (!stillExists) continue;
+        // Restaure uniquement les sessions non-supprimées (dans cache)
+        for (const sessionId of memCache.keys()) {
+            const cached = memCache.get(sessionId);
+            const authPath = path.join(TEMP_DIR, sessionId);
             
-            const authPath = path.join(sessionsRoot, doc._id);
             try {
-                // Toujours écraser depuis MongoDB — vider le dossier local avant de restaurer pour éviter les conflits de clés
+                // Toujours écraser depuis MongoDB — vider le dossier TEMP avant de restaurer
                 fse.removeSync(authPath);
                 fse.ensureDirSync(authPath);
-                writeSessionFiles(authPath, doc.files);
-                console.log(`[MongoDB] ✅ Session [${doc._id}] (${doc.number}) restaurée`);
+                writeSessionFiles(authPath, cached.files);
+                console.log(`[MongoDB] ✅ Session [${sessionId}] (${cached.number}) restaurée en TEMP`);
                 count++;
             } catch (e) {
-                console.error(`[MongoDB] ❌ Restauration [${doc._id}]:`, e.message);
+                console.error(`[MongoDB] ❌ Restauration [${sessionId}]:`, e.message);
             }
         }
     } catch (e) {

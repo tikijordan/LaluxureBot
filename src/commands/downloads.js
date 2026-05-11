@@ -12,8 +12,8 @@ import yts from 'yt-search';
 
 const execPromise = util.promisify(exec);
 
-const MAX_SIZE_BYTES  = 150 * 1024 * 1024;
-const PROCESS_TIMEOUT = 6000_000;
+const MAX_SIZE_BYTES  = 1024 * 1024 * 1024;
+const PROCESS_TIMEOUT = 9000_000;
 
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     ? '/tmp/bot-downloads'
@@ -43,11 +43,11 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // Clients mobiles : contournent la vérification bot sans cookies
-        args.push('--js-runtime node');  // Utiliser Node.js comme runtime JS pour les vidéos
+        // Clients mobiles + web_creator : contournent la vérification bot sans cookies
         args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
+        args.push('--js-runtimes node');
         args.push('--age-limit 99');
-        if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
+        if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
         }
     }
@@ -57,9 +57,10 @@ async function runYtdlp(url, isAudio, filePath) {
     // yt-dlp peut télécharger sans impersonation mais peut être plus lent/bloqué
     // Pour meilleur support, utilise des cookies (voir YT_COOKIES_FILE)
     if (isTiktok) {
-        // Cookies TikTok si disponibles
-        if (fs.existsSync(path.join(process.cwd(), 'cookies.txt'))) {
-            args.push(`--cookies "${path.join(process.cwd(), 'cookies.txt')}"`);
+        // Cookies TikTok si disponibles et non vides
+        const cookiesPath = path.join(process.cwd(), 'cookies.txt');
+        if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
+            args.push(`--cookies "${cookiesPath}"`);
         }
     }
 
@@ -78,34 +79,34 @@ async function runYtdlp(url, isAudio, filePath) {
 
 // ── Téléchargement vidéo commun ────────────────────────────────
 async function downloadVideo({ sock, from, text, msg }) {
-    if (!text) return sock.sendMessage(from, { text: '🎥 Usage: /video [lien]' });
+    if (!text) return sock.sendMessage(from, { text: ' Usage: /video [lien]' });
 
     const filePath = path.join(DOWNLOAD_DIR, `video_${Date.now()}.mp4`);
 
     try {
-        await sock.sendMessage(from, { text: '⏳ Téléchargement en cours...' }, { quoted: msg });
+        await sock.sendMessage(from, { text: ' Téléchargement en cours...' }, { quoted: msg });
 
         await runYtdlp(text, false, filePath);
 
         if (!fs.existsSync(filePath)) {
-            return sock.sendMessage(from, { text: "❌ Échec : Le fichier n'a pas pu être généré." });
+            return sock.sendMessage(from, { text: " Échec : Le fichier n'a pas pu être généré." });
         }
 
         const size = fs.statSync(filePath).size;
         if (size > MAX_SIZE_BYTES) {
             cleanup(filePath);
-            return sock.sendMessage(from, { text: `❌ Fichier trop lourd (${Math.round(size/1024/1024)} Mo).` });
+            return sock.sendMessage(from, { text: ` Fichier trop lourd (${Math.round(size/1024/1024)} Mo).` });
         }
 
         await sock.sendMessage(from, {
             video: fs.readFileSync(filePath),
-            caption: '✅ Téléchargé avec succès',
+            caption: ' Téléchargé avec succès',
             mimetype: 'video/mp4',
         }, { quoted: msg });
 
     } catch (err) {
         console.error('[video]', err.stderr || err.message);
-        await sock.sendMessage(from, { text: `❌ Erreur : ${(err.stderr || err.message).split('\n')[0]}` });
+        await sock.sendMessage(from, { text: ` Erreur : ${(err.stderr || err.message).split('\n')[0]}` });
     } finally {
         cleanup(filePath);
     }
@@ -117,7 +118,7 @@ const cmds = {
     play: {
         description: 'Rechercher et télécharger de la musique en MP3',
         execute: async ({ sock, from, text, msg }) => {
-            if (!text) return sock.sendMessage(from, { text: '🎵 Usage: /play [titre ou lien]' });
+            if (!text) return sock.sendMessage(from, { text: ' Usage: /play [titre ou lien]' });
 
             const filePath = path.join(DOWNLOAD_DIR, `audio_${Date.now()}.mp3`);
 
@@ -130,7 +131,7 @@ const cmds = {
                 if (!text.startsWith('http')) {
                     const search = await yts(text);
                     const video  = search.videos[0];
-                    if (!video) return sock.sendMessage(from, { text: '❌ Aucun résultat trouvé.' });
+                    if (!video) return sock.sendMessage(from, { text: ' Aucun résultat trouvé.' });
                     url      = video.url;
                     title    = video.title;
                     duration = video.timestamp;
@@ -138,15 +139,15 @@ const cmds = {
                 }
 
                 const preview = thumb
-                    ? { image: { url: thumb }, caption: `🎵 *${title}*\n⏱️ ${duration}\n\n📥 Conversion MP3 en cours...` }
-                    : { text: `🎵 Conversion MP3 en cours...\n*${title}*` };
+                    ? { image: { url: thumb }, caption: ` *${title}*\n ${duration}\n\n Conversion MP3 en cours...` }
+                    : { text: ` Conversion MP3 en cours...\n*${title}*` };
 
                 await sock.sendMessage(from, preview, { quoted: msg });
 
                 await runYtdlp(url, true, filePath);
 
                 if (!fs.existsSync(filePath)) {
-                    return sock.sendMessage(from, { text: '❌ Erreur de conversion.' });
+                    return sock.sendMessage(from, { text: ' Erreur de conversion.' });
                 }
 
                 await sock.sendMessage(from, {
@@ -157,7 +158,7 @@ const cmds = {
 
             } catch (err) {
                 console.error('[play]', err.stderr || err.message);
-                await sock.sendMessage(from, { text: '❌ Erreur lors du téléchargement. Veuillez réessayer.' });
+                await sock.sendMessage(from, { text: ' Erreur lors du téléchargement. Veuillez réessayer.' });
             } finally {
                 cleanup(filePath);
             }

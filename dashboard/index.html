@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>LaluxureBot — Dashboard</title>
+<title>LaluxureBot</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -252,8 +252,8 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
       <div id="sync-dot"></div>
       <span id="last-update"></span>
       <span id="hdr-status" class="badge-off">—</span>
-      <button class="btn-ghost btn-sm" onclick="refreshAll(true)" title="Rafraîchir">↻</button>
-      <button class="btn-ghost btn-sm" style="color:var(--red)" onclick="doLogout()" title="Déconnexion">⏏</button>
+      <button class="btn-ghost btn-sm" onclick="refreshAll(true)" title="Rafraîchir"></button>
+      <button class="btn-ghost btn-sm" style="color:var(--red)" onclick="doLogout()" title="Déconnexion"></button>
     </div>
   </header>
 
@@ -264,7 +264,7 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
         <span class="sidebar-label">Sessions</span>
         <div class="sidebar-btns">
           <button class="btn-green btn-sm" onclick="newSession()" id="btn-new" title="Nouvelle session QR">QR</button>
-          <button class="btn-ghost btn-sm" onclick="showPairModal()" title="Code pairing">📱</button>
+          <button class="btn-ghost btn-sm" onclick="showPairModal()" title="Code pairing"></button>
         </div>
       </div>
       <div id="sessions-list"><div class="sess-empty">Chargement...</div></div>
@@ -273,7 +273,7 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
     <!-- MAIN CONTENT -->
     <div class="content" id="main-content">
       <div class="no-session">
-        <div style="font-size:2.8rem">📱</div>
+        <div style="font-size:2.8rem"></div>
         <h2>Aucune session</h2>
         <p>Créez ou sélectionnez une session pour commencer.</p>
         <button class="btn-green" onclick="newSession()">+ Nouvelle session</button>
@@ -284,10 +284,10 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
 
 <!-- MOBILE BOTTOM NAV -->
 <nav class="bottom-nav">
-  <button class="bnav-btn active" id="bnav-dash" onclick="mobileTab('dash')"><span class="bnav-ico">📊</span>Dashboard</button>
-  <button class="bnav-btn" id="bnav-sessions" onclick="mobileTab('sessions')"><span class="bnav-ico">📱</span>Sessions</button>
-  <button class="bnav-btn" id="bnav-logs" onclick="mobileTab('logs')"><span class="bnav-ico">🖥️</span>Logs</button>
-  <button class="bnav-btn" id="bnav-send" onclick="mobileTab('send')"><span class="bnav-ico">💬</span>Envoyer</button>
+  <button class="bnav-btn active" id="bnav-dash" onclick="mobileTab('dash')"><span class="bnav-ico"></span>Dashboard</button>
+  <button class="bnav-btn" id="bnav-sessions" onclick="mobileTab('sessions')"><span class="bnav-ico"></span>Sessions</button>
+  <button class="bnav-btn" id="bnav-logs" onclick="mobileTab('logs')"><span class="bnav-ico"></span>Logs</button>
+  <button class="bnav-btn" id="bnav-send" onclick="mobileTab('send')"><span class="bnav-ico"></span>Envoyer</button>
 </nav>
 
 <!-- MOBILE DRAWER (sessions list) -->
@@ -296,7 +296,7 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
     <span style="font-weight:700;color:var(--bright)">Sessions</span>
     <div style="display:flex;gap:6px">
       <button class="btn-green btn-sm" onclick="newSession()" id="btn-new-m">QR</button>
-      <button class="btn-ghost btn-sm" onclick="showPairModal()">📱</button>
+      <button class="btn-ghost btn-sm" onclick="showPairModal()"></button>
       <button class="btn-ghost btn-sm" onclick="closeDrawer()">✕</button>
     </div>
   </div>
@@ -306,7 +306,7 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
 <!-- MODAL Pairing -->
 <div class="modal-bg" id="pair-modal">
   <div class="modal">
-    <div class="modal-title">📱 Connexion par code</div>
+    <div class="modal-title"> Connexion par code</div>
     <div class="modal-desc">Entrez votre numéro avec l'indicatif pays (ex: 237612345678).<br>WhatsApp → Appareils liés → Lier avec numéro.</div>
     <input type="tel" id="pair-phone" class="fi" placeholder="Ex: 237612345678">
     <div style="display:flex;gap:8px">
@@ -483,7 +483,7 @@ function buildMain(s) {
           <div class="send-form" id="send-form-main">
             <input type="text" id="send-to" class="fi" placeholder="Numéro (237612345678)">
             <textarea id="send-text" class="fi" rows="3" placeholder="Message..."></textarea>
-            <button class="btn-green btn-sm" onclick="sendMsg('${esc(s.id)}')">📤 Envoyer</button>
+            <button class="btn-green btn-sm" onclick="sendMsg('${esc(s.id)}')"> Envoyer</button>
             <div class="send-result" id="send-result"></div>
           </div>
         </div>
@@ -583,7 +583,7 @@ function clearTerm() { const t = document.getElementById('terminal-body'); if (t
 // ═══════════════════════════════════════════════════════════
 function renderQR(s) {
   if (s.connection === 'open')
-    return `<div style="text-align:center"><div style="font-size:2.2rem">✅</div><div style="font-family:var(--mono);color:var(--green);margin-top:6px;font-size:.82rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.7rem;margin-top:3px">${esc(s.connectedNumber||'')}</div></div>`;
+    return `<div style="text-align:center"><div style="font-size:2.2rem"></div><div style="font-family:var(--mono);color:var(--green);margin-top:6px;font-size:.82rem">Session active</div><div style="font-family:var(--mono);color:var(--muted);font-size:.7rem;margin-top:3px">${esc(s.connectedNumber||'')}</div></div>`;
   if (s.qrCode) {
     const u = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data='+encodeURIComponent(s.qrCode)+'&bgcolor=050608&color=25d366&qzone=2';
     return `<img src="${u}" alt="QR"><div class="qr-hint">Scannez avec WhatsApp</div>`;
@@ -593,7 +593,7 @@ function renderQR(s) {
   return `<div class="qr-placeholder">En attente...<br>Cliquez Relancer.</div>`;
 }
 function statusLabel(c) {
-  return c==='open'?'✅ Connecté':c==='connecting'?'⏳ Connexion...':'❌ Déconnecté';
+  return c==='open'?' Connecté':c==='connecting'?' Connexion...':' Déconnecté';
 }
 function renderFeed(cmds) {
   if (!cmds.length) return '<div style="padding:14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.72rem">Aucune activité</div>';
@@ -660,17 +660,17 @@ async function logout(id) {
   const r = await api(`/api/sessions/${encodeURIComponent(id)}/logout`, 'POST');
   toast(r.message || 'Déconnecté', 'ok');
   currentSession = null; lastSessionData = null;
-  document.getElementById('main-content').innerHTML = '<div class="no-session"><div style="font-size:2.5rem">📱</div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
+  document.getElementById('main-content').innerHTML = '<div class="no-session"><div style="font-size:2.5rem"></div><h2>Session supprimée</h2><p>Créez une nouvelle session.</p><button class="btn-green" onclick="newSession()">+ Créer</button></div>';
   refreshSessions();
 }
 async function sendMsg(id) {
   const to   = document.getElementById('send-to')?.value?.trim();
   const text = document.getElementById('send-text')?.value?.trim();
   const res  = document.getElementById('send-result');
-  if (!to || !text) { res.textContent = '⚠️ Champs requis'; res.className = 'send-result err'; res.style.display = 'block'; return; }
+  if (!to || !text) { res.textContent = ' Champs requis'; res.className = 'send-result err'; res.style.display = 'block'; return; }
   const r = await api(`/api/sessions/${encodeURIComponent(id)}/send`, 'POST', {to, text});
-  if (r.ok) { res.textContent = '✅ Envoyé !'; res.className = 'send-result ok'; document.getElementById('send-text').value = ''; }
-  else { res.textContent = '❌ ' + (r.error || 'Erreur'); res.className = 'send-result err'; }
+  if (r.ok) { res.textContent = ' Envoyé !'; res.className = 'send-result ok'; document.getElementById('send-text').value = ''; }
+  else { res.textContent = ' ' + (r.error || 'Erreur'); res.className = 'send-result err'; }
   res.style.display = 'block';
   setTimeout(() => res.style.display = 'none', 3000);
 }
@@ -727,24 +727,24 @@ async function startPairing() {
   const phone = document.getElementById('pair-phone').value.trim().replace(/\D/g,'');
   const res   = document.getElementById('pair-result');
   if (!phone || phone.length < 7) {
-    res.textContent='⚠️ Numéro invalide'; res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return;
+    res.textContent=' Numéro invalide'; res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return;
   }
-  res.textContent='⏳ Création session...'; res.style.cssText='display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem';
+  res.textContent=' Création session...'; res.style.cssText='display:block;background:rgba(88,166,255,.1);color:var(--blue);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem';
   const r = await api('/api/sessions','POST',{phone});
-  if (!r.ok) { res.textContent='❌ '+(r.error||'Erreur'); res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return; }
+  if (!r.ok) { res.textContent=' '+(r.error||'Erreur'); res.style.cssText='display:block;background:rgba(248,81,73,.1);color:var(--red);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:.78rem'; return; }
   const sid = r.sessionId;
-  res.textContent='⏳ Code en cours... (10s)';
+  res.textContent=' Code en cours... (10s)';
   await refreshSessions(); selectSession(sid);
   let att = 0;
   const poll = setInterval(async () => {
     att++;
     const s = await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(()=>null); if (!s) return;
     if (s.pairingCode) {
-      res.innerHTML=`✅ Code: <strong style="font-size:1.2rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.68rem;color:var(--muted)">Valable ~60s</span>`;
+      res.innerHTML=` Code: <strong style="font-size:1.2rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.68rem;color:var(--muted)">Valable ~60s</span>`;
       res.style.cssText='display:block;background:rgba(37,211,102,.07);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.78rem;line-height:1.6';
       clearInterval(poll);
     }
-    if (s.connection==='open') { clearInterval(poll); closePairModal(); toast('✅ Connecté !','ok'); }
+    if (s.connection==='open') { clearInterval(poll); closePairModal(); toast(' Connecté !','ok'); }
     if (att > 15) clearInterval(poll);
   }, 2000);
 }

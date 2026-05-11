@@ -42,7 +42,7 @@ function getMentionedJid(msg, args) {
 // Vérifier que la commande est utilisée dans un groupe
 function checkGroup(sock, from, isGroup) {
   if (!isGroup) {
-    sock.sendMessage(from, { text: '❌ Cette commande fonctionne uniquement dans les groupes.' });
+    sock.sendMessage(from, { text: ' Cette commande fonctionne uniquement dans les groupes.' });
     return false;
   }
   return true;
@@ -61,17 +61,17 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !kick @membre\nMentionnez le membre à expulser.' });
+        await sock.sendMessage(from, { text: ' Usage: !kick @membre\nMentionnez le membre à expulser.' });
         return;
       }
       try {
         await sock.groupParticipantsUpdate(from, [target], 'remove');
         await sock.sendMessage(from, {
-          text: `✅ *${target.split('@')[0]}* a été expulsé du groupe.`,
+          text: ` *${target.split('@')[0]}* a été expulsé du groupe.`,
           mentions: [target],
         });
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Impossible d'expulser ce membre.\n_Vérifiez que le bot est admin._` });
+        await sock.sendMessage(from, { text: ` Impossible d'expulser ce membre.\n_Vérifiez que le bot est admin._` });
       }
     },
   },
@@ -82,7 +82,7 @@ export default {
     execute: async ({ sock, from, isGroup, args, text }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       if (!text) {
-        await sock.sendMessage(from, { text: '❌ Usage: !add [numéro]\nExemple: !add 22890000000' });
+        await sock.sendMessage(from, { text: ' Usage: !add [numéro]\nExemple: !add 22890000000' });
         return;
       }
       const number = text.replace(/[^0-9]/g, '');
@@ -91,14 +91,14 @@ export default {
         const result = await sock.groupParticipantsUpdate(from, [jid], 'add');
         const status = result[0]?.status;
         if (status === '200') {
-          await sock.sendMessage(from, { text: `✅ *${number}* a été ajouté au groupe.` });
+          await sock.sendMessage(from, { text: ` *${number}* a été ajouté au groupe.` });
         } else if (status === '403') {
-          await sock.sendMessage(from, { text: `❌ *${number}* a la confidentialité activée. Il doit être ajouté manuellement.` });
+          await sock.sendMessage(from, { text: ` *${number}* a la confidentialité activée. Il doit être ajouté manuellement.` });
         } else {
-          await sock.sendMessage(from, { text: `⚠️ Statut: ${status} pour ${number}` });
+          await sock.sendMessage(from, { text: ` Statut: ${status} pour ${number}` });
         }
       } catch (err) {
-        await sock.sendMessage(from, { text: `❌ Impossible d'ajouter ce membre: ${err.message}` });
+        await sock.sendMessage(from, { text: ` Impossible d'ajouter ce membre: ${err.message}` });
       }
     },
   },
@@ -110,17 +110,17 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !promote @membre' });
+        await sock.sendMessage(from, { text: ' Usage: !promote @membre' });
         return;
       }
       try {
         await sock.groupParticipantsUpdate(from, [target], 'promote');
         await sock.sendMessage(from, {
-          text: `⬆️ @${target.split('@')[0]} est maintenant *administrateur* du groupe ! 👑`,
+          text: `⬆ @${target.split('@')[0]} est maintenant *administrateur* du groupe ! `,
           mentions: [target],
         });
       } catch {
-        await sock.sendMessage(from, { text: `❌ Impossible de promouvoir ce membre.\n_Vérifiez que le bot est admin._` });
+        await sock.sendMessage(from, { text: ` Impossible de promouvoir ce membre.\n_Vérifiez que le bot est admin._` });
       }
     },
   },
@@ -132,17 +132,17 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !demote @membre' });
+        await sock.sendMessage(from, { text: ' Usage: !demote @membre' });
         return;
       }
       try {
         await sock.groupParticipantsUpdate(from, [target], 'demote');
         await sock.sendMessage(from, {
-          text: `⬇️ @${target.split('@')[0]} n'est plus administrateur.`,
+          text: `⬇ @${target.split('@')[0]} n'est plus administrateur.`,
           mentions: [target],
         });
       } catch {
-        await sock.sendMessage(from, { text: `❌ Impossible de rétrograder ce membre.` });
+        await sock.sendMessage(from, { text: ` Impossible de rétrograder ce membre.` });
       }
     },
   },
@@ -159,10 +159,10 @@ export default {
       try {
         await sock.groupSettingUpdate(from, 'announcement');
         await sock.sendMessage(from, {
-          text: '🔒 *Groupe fermé !*\nSeuls les administrateurs peuvent envoyer des messages.',
+          text: ' *Groupe fermé !*\nSeuls les administrateurs peuvent envoyer des messages.',
         });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de fermer le groupe.\n_Le bot doit être admin._' });
+        await sock.sendMessage(from, { text: ' Impossible de fermer le groupe.\n_Le bot doit être admin._' });
       }
     },
   },
@@ -175,10 +175,10 @@ export default {
       try {
         await sock.groupSettingUpdate(from, 'not_announcement');
         await sock.sendMessage(from, {
-          text: '🔓 *Groupe ouvert !*\nTout le monde peut envoyer des messages.',
+          text: ' *Groupe ouvert !*\nTout le monde peut envoyer des messages.',
         });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible d\'ouvrir le groupe.' });
+        await sock.sendMessage(from, { text: ' Impossible d\'ouvrir le groupe.' });
       }
     },
   },
@@ -189,14 +189,14 @@ export default {
     execute: async ({ sock, from, isGroup, text }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       if (!text) {
-        await sock.sendMessage(from, { text: '❌ Usage: !setname [nouveau nom]' });
+        await sock.sendMessage(from, { text: ' Usage: !setname [nouveau nom]' });
         return;
       }
       try {
         await sock.groupUpdateSubject(from, text);
-        await sock.sendMessage(from, { text: `✅ Nom du groupe changé en *"${text}"*` });
+        await sock.sendMessage(from, { text: ` Nom du groupe changé en *"${text}"*` });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de changer le nom du groupe.' });
+        await sock.sendMessage(from, { text: ' Impossible de changer le nom du groupe.' });
       }
     },
   },
@@ -207,14 +207,14 @@ export default {
     execute: async ({ sock, from, isGroup, text }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       if (!text) {
-        await sock.sendMessage(from, { text: '❌ Usage: !setdesc [nouvelle description]' });
+        await sock.sendMessage(from, { text: ' Usage: setdesc [nouvelle description]' });
         return;
       }
       try {
         await sock.groupUpdateDescription(from, text);
-        await sock.sendMessage(from, { text: `✅ Description du groupe mise à jour !` });
+        await sock.sendMessage(from, { text: ` Description du groupe mise à jour !` });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de changer la description.' });
+        await sock.sendMessage(from, { text: ' Impossible de changer la description.' });
       }
     },
   },
@@ -230,7 +230,7 @@ export default {
       const type = getContentType(targetMsg);
 
       if (type !== 'imageMessage') {
-        await sock.sendMessage(from, { text: '❌ Envoie ou cite une image avec !setico pour changer la photo du groupe.' });
+        await sock.sendMessage(from, { text: ' Envoie ou cite une image avec setico pour changer la photo du groupe.' });
         return;
       }
 
@@ -240,9 +240,9 @@ export default {
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
         await sock.updateProfilePicture(from, buffer);
-        await sock.sendMessage(from, { text: '✅ Photo du groupe mise à jour !' });
+        await sock.sendMessage(from, { text: ' Photo du groupe mise à jour !' });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de changer la photo du groupe.' });
+        await sock.sendMessage(from, { text: ' Impossible de changer la photo du groupe.' });
       }
     },
   },
@@ -258,7 +258,7 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !warn @membre [raison]' });
+        await sock.sendMessage(from, { text: ' Usage: !warn @membre [raison]' });
         return;
       }
 
@@ -268,18 +268,18 @@ export default {
       if (count >= MAX_WARNS) {
         // Kick automatique
         await sock.sendMessage(from, {
-          text: `⛔ @${target.split('@')[0]} a reçu *${count}/${MAX_WARNS} avertissements* et a été *expulsé automatiquement* !\n\n📋 Raison: ${reason}`,
+          text: ` @${target.split('@')[0]} a reçu *${count}/${MAX_WARNS} avertissements* et a été *expulsé automatiquement* !\n\n Raison: ${reason}`,
           mentions: [target],
         });
         try {
           await sock.groupParticipantsUpdate(from, [target], 'remove');
           resetWarns(from, target.split('@')[0]);
         } catch {
-          await sock.sendMessage(from, { text: '❌ Impossible d\'expulser (bot pas admin ?)' });
+          await sock.sendMessage(from, { text: ' Impossible d\'expulser (bot pas admin ?)' });
         }
       } else {
         await sock.sendMessage(from, {
-          text: `⚠️ *Avertissement ${count}/${MAX_WARNS}* pour @${target.split('@')[0]}\n\n📋 Raison: ${reason}\n\n_${MAX_WARNS - count} avertissement(s) avant l'expulsion._`,
+          text: ` *Avertissement ${count}/${MAX_WARNS}* pour @${target.split('@')[0]}\n\n Raison: ${reason}\n\n_${MAX_WARNS - count} avertissement(s) avant l'expulsion._`,
           mentions: [target],
         });
       }
@@ -293,12 +293,12 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !resetwarn @membre' });
+        await sock.sendMessage(from, { text: ' Usage: !resetwarn @membre' });
         return;
       }
       resetWarns(from, target.split('@')[0]);
       await sock.sendMessage(from, {
-        text: `✅ Les avertissements de @${target.split('@')[0]} ont été réinitialisés.`,
+        text: ` Les avertissements de @${target.split('@')[0]} ont été réinitialisés.`,
         mentions: [target],
       });
     },
@@ -313,11 +313,11 @@ export default {
       const entries = Object.entries(warns).filter(([, v]) => v.count > 0);
 
       if (entries.length === 0) {
-        await sock.sendMessage(from, { text: '✅ Aucun membre averti dans ce groupe.' });
+        await sock.sendMessage(from, { text: ' Aucun membre averti dans ce groupe.' });
         return;
       }
 
-      let msg = `⚠️ *Membres avertis (${entries.length})*\n\n`;
+      let msg = ` *Membres avertis (${entries.length})*\n\n`;
       entries.forEach(([num, data]) => {
         msg += `• ${num}: *${data.count}/${MAX_WARNS}* avertissement(s)\n`;
       });
@@ -337,14 +337,14 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !mute @membre' });
+        await sock.sendMessage(from, { text: ' Usage: !mute @membre' });
         return;
       }
 
       // WhatsApp ne supporte pas le mute natif → on utilise kick + invite
       // Alternative: message d'avertissement + surveillance
       await sock.sendMessage(from, {
-        text: `🔇 @${target.split('@')[0]} est *mis en sourdine*.\nTout message de sa part sera supprimé par le bot.\n\n_Utilise !unmute @membre pour lever la sourdine._`,
+        text: ` @${target.split('@')[0]} est *mis en sourdine*.\nTout message de sa part sera supprimé par le bot.\n\n_Utilise !unmute @membre pour lever la sourdine._`,
         mentions: [target],
       });
 
@@ -361,13 +361,13 @@ export default {
       if (!checkGroup(sock, from, isGroup)) return;
       const target = getMentionedJid(msg, args);
       if (!target) {
-        await sock.sendMessage(from, { text: '❌ Usage: !unmute @membre' });
+        await sock.sendMessage(from, { text: ' Usage: !unmute @membre' });
         return;
       }
 
       if (global.mutedMembers) global.mutedMembers.delete(`${from}__${target}`);
       await sock.sendMessage(from, {
-        text: `🔊 @${target.split('@')[0]} peut de nouveau envoyer des messages.`,
+        text: ` @${target.split('@')[0]} peut de nouveau envoyer des messages.`,
         mentions: [target],
       });
     },
@@ -387,7 +387,7 @@ export default {
       if (!action || !['on', 'off'].includes(action)) {
         const status = isAntilinkEnabled(from);
         await sock.sendMessage(from, {
-          text: `🔗 *Anti-lien*\n\nStatut actuel: ${status ? '✅ Activé' : '❌ Désactivé'}\n\n• !antilink on → Activer\n• !antilink off → Désactiver`,
+          text: ` *Anti-lien*\n\nStatut actuel: ${status ? ' Activé' : 'Désactivé'}\n\n• !antilink on → Activer\n• !antilink off → Désactiver`,
         });
         return;
       }
@@ -395,11 +395,11 @@ export default {
       if (action === 'on') {
         enableAntilink(from);
         await sock.sendMessage(from, {
-          text: `🚫 *Anti-lien activé !*\nTout lien posté par un non-admin sera supprimé et l'auteur averti.`,
+          text: ` *Anti-lien activé !*\nTout lien posté par un non-admin sera supprimé et l'auteur averti.`,
         });
       } else {
         disableAntilink(from);
-        await sock.sendMessage(from, { text: '✅ *Anti-lien désactivé.*\nLes liens sont de nouveau autorisés.' });
+        await sock.sendMessage(from, { text: ' *Anti-lien désactivé.*\nLes liens sont de nouveau autorisés.' });
       }
     },
   },
@@ -417,26 +417,26 @@ export default {
 
       if (action === 'off') {
         disableWelcome(from);
-        await sock.sendMessage(from, { text: '✅ Message de bienvenue désactivé.' });
+        await sock.sendMessage(from, { text: ' Message de bienvenue désactivé.' });
         return;
       }
 
       if (action === 'show') {
         const config = getWelcomeConfig(from);
         if (!config?.welcome) {
-          await sock.sendMessage(from, { text: '❌ Aucun message de bienvenue configuré.\nUtilise: !welcome [message]' });
+          await sock.sendMessage(from, { text: ' Aucun message de bienvenue configuré.\nUtilise: !welcome [message]' });
           return;
         }
         await sock.sendMessage(from, {
-          text: `👋 *Message de bienvenue actuel:*\n\n${config.welcome}\n\n_Variables: {nom} {groupe} {date}_`,
+          text: ` *Message de bienvenue actuel:*\n\n${config.welcome}\n\n_Variables: {nom} {groupe} {date}_`,
         });
         return;
       }
 
-      const message = text || '👋 Bienvenue {nom} dans *{groupe}* ! 🎉\n\nNous sommes heureux de t\'avoir parmi nous.\nLis les règles du groupe et amuse-toi bien ! 😊';
+      const message = text || ' Bienvenue {nom} dans *{groupe}* ! \n\nNous sommes heureux de t\'avoir parmi nous.\nLis les règles du groupe et amuse-toi bien ! ';
       setWelcome(from, message);
       await sock.sendMessage(from, {
-        text: `✅ *Message de bienvenue configuré !*\n\n${message}\n\n_Variables disponibles:_\n• {nom} → Prénom du membre\n• {groupe} → Nom du groupe\n• {date} → Date d'arrivée\n\nUtilise !welcome off pour désactiver.`,
+        text: ` *Message de bienvenue configuré !*\n\n${message}\n\n_Variables disponibles:_\n• {nom} → Prénom du membre\n• {groupe} → Nom du groupe\n• {date} → Date d'arrivée\n\nUtilise !welcome off pour désactiver.`,
       });
     },
   },
@@ -450,14 +450,14 @@ export default {
 
       if (action === 'off') {
         setGoodbye(from, null);
-        await sock.sendMessage(from, { text: '✅ Message d\'au revoir désactivé.' });
+        await sock.sendMessage(from, { text: ' Message d\'au revoir désactivé.' });
         return;
       }
 
-      const message = text || '👋 *{nom}* vient de quitter le groupe.\nAu revoir et bonne continuation ! 🙏';
+      const message = text || ' *{nom}* vient de quitter le groupe.\nAu revoir et bonne continuation ! ';
       setGoodbye(from, message);
       await sock.sendMessage(from, {
-        text: `✅ *Message d'au revoir configuré !*\n\n${message}\n\n_Variables: {nom} {groupe} {date}_`,
+        text: ` *Message d'au revoir configuré !*\n\n${message}\n\n_Variables: {nom} {groupe} {date}_`,
       });
     },
   },
