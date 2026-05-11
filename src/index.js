@@ -637,6 +637,7 @@ function getStatsData() {
 // SÉCURITÉ DASHBOARD — Protection maximale
 // ════════════════════════════════════════════════════════════════════
 import { randomBytes, timingSafeEqual, createHash } from 'crypto';
+import admin from './commands/admin.js';
 
 const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD || 'changeme';
 const ALLOWED_ORIGIN = process.env.DASHBOARD_ORIGIN  || null;

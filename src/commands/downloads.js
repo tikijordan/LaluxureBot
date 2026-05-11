@@ -74,7 +74,28 @@ async function runYtdlp(url, isAudio, filePath) {
     }
 
     const cmd = `yt-dlp ${args.join(' ')} "${url}"`;
-    return execPromise(cmd, { timeout: PROCESS_TIMEOUT });
+    try {
+        return await execPromise(cmd, { timeout: PROCESS_TIMEOUT });
+    } catch (e) {
+        // Déchiffrer les erreurs courantes
+        const stderr = e.stderr || e.message || '';
+        
+        if (stderr.includes('429')) {
+            throw new Error('🚫 YouTube vous bloque temporairement. Réessayez dans quelques minutes.');
+        }
+        if (stderr.includes('Sign in to confirm')) {
+            throw new Error('🔐 YouTube demande une authentification. Besoin de cookies YouTube valides.');
+        }
+        if (stderr.includes('impersonation')) {
+            throw new Error('⚠️ TikTok: Dépendances d\'impersonation manquantes (curl_cffi).');
+        }
+        if (stderr.includes('format') || stderr.includes('not available')) {
+            throw new Error('❌ Format vidéo indisponible pour ce lien.');
+        }
+        
+        // Re-lancer l'erreur d'origine
+        throw e;
+    }
 }
 
 // ── Téléchargement vidéo commun ────────────────────────────────

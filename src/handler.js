@@ -132,18 +132,59 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const command = commands[cmdName];
     if (!command) return;
 
+    // ── Vérification mode privé avec métadonnées groupe ────────
+    if (botMode === 'private' && !isOwner) {
+        let isUserOwner = false;
+        
+        if (isGroup) {
+            // Vérifier si l'utilisateur est le owner en comparant les numéros
+            isUserOwner = senderNumber === OWNER;
+        }
+        
+        // Si pas owner et mode private → refus
+        if (!isUserOwner) {
+            return await sock.sendMessage(from, { text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.' });
+        }
+    }
+
+    // ── Vérification accès private ────────────────────────────
+    if (command.private && !isOwner) {
+        return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
+    }
+
+    // ── Vérification accès public ─────────────────────────────
+    if (command.public === false && !isOwner) {
+        return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
+    }
+
     // ── Vérification admin ────────────────────────────────────
     if (command.adminOnly && !isOwner) {
         let isUserAdmin = false;
+        let isBotAdmin = false;
+        
         if (isGroup) {
             const metadata = await sock.groupMetadata(from).catch(() => null);
             if (metadata) {
-                isUserAdmin = !meta.participants.find(
+                // Vérifier si l'utilisateur est admin
+                isUserAdmin = metadata.participants.find(
                     p => p.id === sender && (p.admin || p.isSuperAdmin)
+                );
+                
+                // Vérifier si le bot est admin
+                const botId = sock.user.id;
+                isBotAdmin = metadata.participants.find(
+                    p => p.id === botId && (p.admin || p.isSuperAdmin)
                 );
             }
         }
-        if (!isUserAdmin && ! isOwner) {
+        
+        // Si le bot n'est pas admin dans le groupe
+        if (isGroup && !isBotAdmin && !isOwner) {
+            return await sock.sendMessage(from, { text: '⚠️ Je ne suis pas administrateur du groupe.' });
+        }
+        
+        // Si l'utilisateur n'est pas admin
+        if (!isUserAdmin && !isOwner) {
             return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
         }
     }
