@@ -39,8 +39,58 @@ process.on('uncaughtException', (err) => {
     }
 });
 
+// Throttle pour éviter de spammer la console sur les erreurs de reconnexion
+let _lastIgnoredRejectionLogAt = 0;
+const _IGNORED_REJECTION_LOG_COOLDOWN_MS = 10_000;
+
+function rejectionToString(err) {
+    if (!err) return '';
+    if (typeof err === 'string') return err;
+    if (err instanceof Error) return `${err.message || ''}\n${err.stack || ''}`;
+    if (typeof err === 'object') {
+        const msg = err?.message || err?.reason || '';
+        const stack = err?.stack || '';
+        return `${msg}\n${stack}`;
+    }
+    return String(err);
+}
+
+function isExpectedConnectionCloseRejection(err) {
+    // Baileys/WS peuvent remonter sous formes diverses (Error, string, Boom, {cause}, etc.)
+    const combined = rejectionToString(err);
+    if (!combined) return false;
+
+    // Français + Anglais + cas fréquents
+    const needles = [
+        'Connexion Fermée',
+        'Connection Closed',
+        'close',
+        'WebSocket was closed',
+        'socket hang up',
+        'ECONNRESET',
+        'EPIPE',
+    ];
+
+    if (needles.some(n => combined.includes(n))) return true;
+
+    // Explorer récursivement cause/originalError si présent
+    const cause = err?.cause || err?.originalError || err?.error;
+    if (cause && cause !== err) return isExpectedConnectionCloseRejection(cause);
+    return false;
+}
+
 process.on('unhandledRejection', (err) => {
-    console.error('❌ [Process] Unhandled Rejection:', err?.message || err);
+    if (isExpectedConnectionCloseRejection(err)) {
+        const now = Date.now();
+        if (now - _lastIgnoredRejectionLogAt > _IGNORED_REJECTION_LOG_COOLDOWN_MS) {
+            _lastIgnoredRejectionLogAt = now;
+            console.warn('[Baileys] Connexion fermée (reconnexion attendue)');
+        }
+        return;
+    }
+
+    console.error('❌ [Processus] Rejet Non Manipulé:', err?.message || err);
+    if (err && err.stack) console.error(err.stack);
 });
 
 process.on('warning', (w) => {
@@ -86,17 +136,23 @@ function cleanupTempSessions() {
 cleanupTempSessions();
 
 // Et aussi à l'arrêt gracieux
-process.on('SIGTERM', () => {
-    console.log('[Process] 🛑 SIGTERM reçu — arrêt gracieux...');
+async function gracefulShutdown(signal) {
+    console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
+    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
+    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
+    try {
+        console.log('[Process] ⏳ Flush des sauvegardes en cours...');
+        await Promise.race([
+            flushAllPendingSaves(),
+            new Promise(r => setTimeout(r, 8000))
+        ]);
+    } catch {}
     cleanupTempSessions();
     process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-    console.log('[Process] 🛑 SIGINT reçu — arrêt gracieux...');
-    cleanupTempSessions();
-    process.exit(0);
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
@@ -130,12 +186,92 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave } from './utils/mongostore.js';
+import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves } from './utils/mongostore.js';
+import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
 global.sessions = sessions; // exposé pour que les commandes accèdent aux sockets de toutes les sessions
 const logs = [];
+
+// ══════════════════════════════════════════════════════════════
+// GARDE-FOUS RUNTIME — éviter les multi-sockets / reconnect storms
+// ══════════════════════════════════════════════════════════════
+// 1) Un seul socket actif par "numéro connecté".
+// 2) Un seul timer de reconnexion par sessionId.
+const activeSocketByNumber = new Map(); // number -> { sessionId, sock }
+const reconnectTimerBySessionId = new Map(); // sessionId -> timeout
+
+// Backoff par session pour éviter les storms (408/440)
+const reconnectBackoffBySessionId = new Map(); // sessionId -> { delayMs }
+
+// 440 counter (si ça persiste: pause longue)
+const recent440BySessionId = new Map(); // sessionId -> { count, firstAt }
+
+function note440(sessionId) {
+    const windowMs = 2 * 60 * 1000; // 2 minutes
+    const now = Date.now();
+    const e = recent440BySessionId.get(sessionId) || { count: 0, firstAt: now };
+    if (now - e.firstAt > windowMs) {
+        e.count = 0;
+        e.firstAt = now;
+    }
+    e.count++;
+    recent440BySessionId.set(sessionId, e);
+    return e;
+}
+
+function getCooldownAfterRepeated440Ms(sessionId) {
+    const e = recent440BySessionId.get(sessionId);
+    if (!e) return 0;
+    // 3 fois en 2 min => cooldown 5 min
+    if (e.count >= 3) return 5 * 60 * 1000;
+    return 0;
+}
+
+function getNextBackoffMs(sessionId, reasonCode) {
+    // Base : 3s. En cas de 440/408, on augmente jusqu'à 60s.
+    const base = 3000;
+    const max = 60_000;
+    const entry = reconnectBackoffBySessionId.get(sessionId) || { delayMs: base };
+
+    if (reasonCode === 440 || reasonCode === 408) {
+        entry.delayMs = Math.min(max, Math.max(base, entry.delayMs * 2));
+    } else {
+        entry.delayMs = base;
+    }
+
+    reconnectBackoffBySessionId.set(sessionId, entry);
+    return entry.delayMs;
+}
+
+function clearReconnectTimer(sessionId) {
+    const t = reconnectTimerBySessionId.get(sessionId);
+    if (t) {
+        clearTimeout(t);
+        reconnectTimerBySessionId.delete(sessionId);
+    }
+}
+
+function scheduleReconnect(sessionId, delayMs = 3000) {
+    clearReconnectTimer(sessionId);
+    const t = setTimeout(() => {
+        reconnectTimerBySessionId.delete(sessionId);
+        startSession(sessionId);
+    }, delayMs);
+    reconnectTimerBySessionId.set(sessionId, t);
+}
+
+function ensureSingleActiveSocketForNumber(number, currentSessionId, currentSock) {
+    if (!number) return;
+    const prev = activeSocketByNumber.get(number);
+    if (prev && prev.sock && prev.sock !== currentSock) {
+        addLog('warn', `[${currentSessionId}] Un autre socket est déjà actif pour ${number} — fermeture de l'ancien (${prev.sessionId})`);
+        try { prev.sock.ws?.close(); } catch {}
+        try { prev.sock.end(); } catch {}
+    }
+    activeSocketByNumber.set(number, { sessionId: currentSessionId, sock: currentSock });
+}
 
 function addLog(level, msg) {
     const entry = { level, msg, time: new Date().toISOString() };
@@ -180,6 +316,9 @@ async function startSession(sessionId, phoneNumber = null) {
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
         return; 
     }
+
+    // Si une reconnexion est en file d'attente pour cette session, on la remplace par cet appel
+    clearReconnectTimer(sessionId);
 
     const authPath = path.join(SESSIONS_ROOT, sessionId);
     fse.ensureDirSync(authPath); // ← crée le dossier AVANT useMultiFileAuthState
@@ -292,6 +431,12 @@ async function startSession(sessionId, phoneNumber = null) {
             state.lastActivity    = Date.now();
             state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
 
+            // Reset backoff sur connexion OK
+            reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
+
+            // Anti multi-socket (souvent la cause des 440 / "session remplacée")
+            ensureSingleActiveSocketForNumber(num, state.id, sock);
+
             // Renommer la session avec le numéro réel si différent
             if (sessionId !== num && !sessions.has(num)) {
                 sessions.set(num, state);
@@ -327,9 +472,14 @@ async function startSession(sessionId, phoneNumber = null) {
                 const sessionData = {};
                 files.forEach(f => { sessionData[f] = fs.readFileSync(path.join(aPath,f),'utf-8'); });
                 const sStr = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-                // Log complet — copier cette valeur dans Railway > Variables > SESSION_STRING
-                console.log(`\n========== SESSION_STRING [${state.id}] ==========\n${sStr}\n==================================================\n`);
-                addLog('info', `[${state.id}] SESSION_STRING loggée (voir console pour valeur complète)`);
+                // Par défaut on NE log PAS la SESSION_STRING complète (énorme + sensible).
+                // Pour debug volontaire : DEBUG_SESSION_STRING=1
+                if (process.env.DEBUG_SESSION_STRING === '1') {
+                    console.log(`\n========== SESSION_STRING [${state.id}] ==========\n${sStr}\n==================================================\n`);
+                    addLog('info', `[${state.id}] SESSION_STRING loggée (DEBUG_SESSION_STRING=1)`);
+                } else {
+                    addLog('info', `[${state.id}] SESSION_STRING prête (masquée) — active DEBUG_SESSION_STRING=1 pour l'afficher`);
+                }
                 state.sessionString = sStr; // stocké dans le state pour l'API
             } catch {}
 
@@ -344,27 +494,19 @@ async function startSession(sessionId, phoneNumber = null) {
 
             // ── HEALTH CHECK TOUTES LES 5 MIN — force reconnexion si inactif longtemps ──
             if (state.healthCheckInterval) clearInterval(state.healthCheckInterval);
+            // FIX: healthCheck simplifié — le watchdog gère déjà la détection socket mort.
+            // On ne ferme plus la connexion ici pour éviter les doubles reconnexions.
             state.healthCheckInterval = setInterval(async () => {
-                const now = Date.now();
-                const timeSinceLastActivity = now - (state.lastActivity || now);
-                const MAX_INACTIVITY = 5 * 60 * 1000; // 5 minutes sans activité = morte
-
-                // Si pas d'activité depuis 5 min ET socket semble passif, force un refresh
-                if (timeSinceLastActivity > MAX_INACTIVITY && sock.ws && sock.ws.readyState !== 1) {
-                    addLog('warn', `[${state.id}] Health check FAILED — socket mort après ${Math.round(timeSinceLastActivity/1000)}s inactivité`);
+                const wsState = sock.ws?.readyState;
+                // readyState: 0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED
+                if (wsState === 3) {
+                    // Socket définitivement fermé sans que connection.update ne soit émis
+                    addLog('warn', `[${state.id}] Health check: socket CLOSED sans événement — reconnexion`);
                     state.connection = 'close';
-                    try { sock.ws.close(); } catch {}
-                    try { sock.end(); } catch {}
-                    // Reconnecter dans 3s
-                    setTimeout(() => startSession(state.id), 3000);
-                } else if (timeSinceLastActivity <= MAX_INACTIVITY) {
-                    // Socket vivant, petit log de santé
-                     console.log(`[Health] [${state.id}] OK — inactif depuis ${Math.round(timeSinceLastActivity/1000)}s`);
+                    scheduleReconnect(state.id, 3000);
                 }
-            }, 5 * 60 * 1000); // check toutes les 5 minutes
-            setInterval(()=> {
-                sock.sendPresenceUpdate('available')
-            }, 1000*60*10)
+                // Sinon : le watchdog s'en occupe via le ping toutes les 60s
+            }, 2 * 60 * 1000); // check toutes les 2 minutes
         }
 
         if (connection === 'close') {
@@ -373,11 +515,36 @@ async function startSession(sessionId, phoneNumber = null) {
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
             addLog('warn', `[${state.id}] Déconnecté (code: ${code})`);
+
+            // Nettoyer le mapping number->socket si c'est ce socket
+            try {
+                const n = state.connectedNumber;
+                const prev = n ? activeSocketByNumber.get(n) : null;
+                if (prev?.sock === sock) activeSocketByNumber.delete(n);
+            } catch {}
+
             if (code === DisconnectReason.loggedOut) {
-                addLog('warn', `[${state.id}] Session expirée. Supprimez sessions/${state.id}/ pour rescanner.`);
+                // FIX: WhatsApp envoie loggedOut (401) après rotation de clés ou reconnexion serveur.
+                // On tente une reconnexion — si la session est vraiment révoquée, le QR/pairing
+                // sera affiché dans le dashboard. On ne tue plus le bot définitivement.
+                addLog('warn', `[${state.id}] Session loggedOut (401) — tentative de reconnexion dans 10s`);
+                // Nettoyer les fichiers temp pour forcer un nouveau QR si les creds sont invalides
+                try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
+                scheduleReconnect(state.id, 10000);
             } else {
-                addLog('info', `[${state.id}] Reconnexion dans 3s...`);
-                setTimeout(() => startSession(state.id), 3000);
+                // Anti-loop: si 440 se répète, appliquer un cooldown long
+                let extraCooldown = 0;
+                if (code === 440) {
+                    const stat = note440(state.id);
+                    extraCooldown = getCooldownAfterRepeated440Ms(state.id);
+                    if (extraCooldown > 0) {
+                        addLog('warn', `[${state.id}] 440 répété (${stat.count}x) — pause ${Math.round(extraCooldown/60000)}min pour éviter le storm`);
+                    }
+                }
+
+                const delay = Math.max(getNextBackoffMs(state.id, code), extraCooldown);
+                addLog('info', `[${state.id}] Reconnexion dans ${Math.round(delay/1000)}s...`);
+                scheduleReconnect(state.id, delay);
             }
         }
     });
@@ -406,7 +573,9 @@ async function startSession(sessionId, phoneNumber = null) {
                 const fromMe  = msg.key.fromMe;
                 const isGroup = rawJid.endsWith('@g.us');
                 const isLid   = rawJid.endsWith('@lid');
+                // OWNER = numéro du compte connecté, chargé depuis sock.user.id à connection='open'
                 const OWNER = (state.connectedNumber || '').replace(/\D/g, '');
+                if (!OWNER) continue; // session pas encore pleinement connectée
                 const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
 
                 let senderJid, senderNumber;
@@ -443,23 +612,10 @@ async function startSession(sessionId, phoneNumber = null) {
                 // ── Mode privé : bloquer les non-owners ──────────────────
                 const currentBotMode = getBotMode();
                 if (isCmd && currentBotMode === 'private' && !isOwner) {
-                    let isUserOwner = false;
-                    if (isGroup) {
-                        try {
-                            const metadata = await sock.groupMetadata(from).catch(() => null);
-                            if (metadata) {
-                                // Normalise les numéros pour comparaison
-                                const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
-                                const normOwner = normalize(OWNER);
-                                isUserOwner = metadata.participants.find(
-                                    p => normalize(p.id.split('@')[0]) === normOwner && normalize(senderJid.split('@')[0]) === normOwner
-                                );
-                            }
-                        } catch {}
-                    } else {
-                        const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
-                        isUserOwner = normalize(senderNumber) === normalize(OWNER);
-                    }
+                    // FIX: comparaison directe du numéro (l'ancienne logique groupe était toujours false)
+                    const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
+                    const isUserOwner = normalize(senderNumber) === normalize(OWNER);
+
                     if (!isUserOwner) {
                         const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
                         if (!['public', 'botmode'].includes(cmdCheck)) {
@@ -477,12 +633,19 @@ async function startSession(sessionId, phoneNumber = null) {
                     continue;
                 }
 
+                // FIX: n'appeler handleCommand que si c'est une commande
+                if (!isCmd) continue;
+
                 await handleCommand(sock, msg, {}, {
                     body, from, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
                     botMode: currentBotMode,
                     prefix: PREFIX,
                     owner: OWNER,
+                    onCommand: (cmd, user) => {
+                        if (typeof global.__trackDashboardCommand === 'function')
+                            global.__trackDashboardCommand(cmd, user);
+                    },
                 });
             } catch(err) { addLog('error', `[${state.id}] ${err.message}`); }
         }
@@ -539,51 +702,41 @@ function restoreFromEnvSessionString() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// WATCHDOG — Reconnexion forcée périodique + détection zombie
-// ══════════════════════════════════════════════════════════════
-const WATCHDOG_INTERVAL        = 60   * 1000;       // check toutes les 60s
-const ZOMBIE_TIMEOUT           = 15   * 60  * 1000; // 15 min sans message → zombie
-const FORCE_RECONNECT_INTERVAL = 4    * 3600 * 1000; // reconnexion forcée toutes les 4h
+// WATCHDOG — détection socket mort uniquement
+// FIX: FORCE_RECONNECT_INTERVAL supprimé — déclenchait des reconnexions toutes les 4h
+// qui pouvaient aboutir à un loggedOut (401) sans retour.
+// FIX: ZOMBIE_TIMEOUT supprimé — un bot peu actif n'est pas mort.
+const WATCHDOG_INTERVAL = 60 * 1000; // check toutes les 60s
 
 setInterval(async () => {
     const now = Date.now();
     for (const [id, state] of sessions) {
         if (state.connection !== 'open' || !state.sock) continue;
 
-        if (!state.lastActivity)    state.lastActivity    = now;
-        if (!state.lastConnectedAt) state.lastConnectedAt = now;
-
-        const idle   = now - state.lastActivity;
-        const uptime = now - state.lastConnectedAt;
-        let reason   = null;
-
-        if (idle > ZOMBIE_TIMEOUT)
-            reason = `inactif depuis ${Math.round(idle/60000)}min`;
-        if (uptime > FORCE_RECONNECT_INTERVAL)
-            reason = `reconnexion périodique (${Math.round(uptime/3600000)}h uptime)`;
-
-        if (reason) {
-            addLog('warn', `[Watchdog] [${id}] Reconnexion — ${reason}`);
+        // Vérifier que le WebSocket est vraiment ouvert (readyState 1 = OPEN)
+        const wsState = state.sock.ws?.readyState;
+        if (wsState !== undefined && wsState !== 1) {
+            addLog('warn', `[Watchdog] [${id}] WebSocket fermé (readyState=${wsState}) — reconnexion`);
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-            state.connection = 'close'; // set to close so it can restart
-            try { state.sock.ws.close(); } catch {}
+            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+            state.connection = 'close';
             try { state.sock.end(); } catch {}
-            // Secours si l'événement 'close' n'est pas émis par Baileys
-            setTimeout(() => { if (sessions.get(id)?.connection === 'close') startSession(id); }, 5000);
+            scheduleReconnect(id, 3000);
             continue;
         }
 
+        // Ping léger pour maintenir la connexion active
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
         } catch (e) {
             addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
-            try { state.sock.ws.close(); } catch {}
+            try { state.sock.ws?.close(); } catch {}
             try { state.sock.end(); } catch {}
-            // Secours si l'événement 'close' n'est pas émis
-            setTimeout(() => { if (sessions.get(id)?.connection === 'close') startSession(id); }, 5000);
+            scheduleReconnect(id, 5000);
         }
     }
 }, WATCHDOG_INTERVAL);
@@ -595,6 +748,47 @@ async function loadExistingSessions() {
     // ── 0. Connexion MongoDB ────────────────────────────────────
     const mongoOk = await connectMongo();
     if (mongoOk) {
+        // ── LOCK DISTRIBUÉ ─────────────────────────────────────
+        // Empêche plusieurs instances (Railway/PM2) de connecter WhatsApp en même temps.
+        const db = getMongoDb();
+        const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
+        const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000'); // 60s
+        const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
+        const ownerId = buildOwnerId();
+
+        const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+        if (!lockRes.ok) {
+            addLog('warn', `[Lock] Une autre instance détient le lock (${lockRes.holder}) — WhatsApp ne sera pas démarré ici.`);
+            // On laisse le dashboard/API tourner mais sans connexions WA.
+            return;
+        }
+        addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
+
+        const hb = startLockHeartbeat({
+            db,
+            lockName,
+            ownerId,
+            ttlMs,
+            intervalMs: hbMs,
+            onLost: (info) => {
+                addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
+                // Fermer toutes les sockets pour éviter les 440
+                for (const [id, st] of sessions) {
+                    try { st.sock?.ws?.close(); } catch {}
+                    try { st.sock?.end?.(); } catch {}
+                    st.connection = 'close';
+                    clearReconnectTimer(id);
+                }
+            },
+        });
+
+        const shutdown = async () => {
+            try { hb.stop(); } catch {}
+            try { await releaseLock({ db, lockName, ownerId }); } catch {}
+        };
+        process.on('SIGINT', shutdown);
+        process.on('SIGTERM', shutdown);
+
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
         if (count > 0) {
@@ -635,8 +829,18 @@ async function loadExistingSessions() {
     // ── Démarrer les sessions ──
     if (sessionsToStart.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
     else { 
-        addLog('info',`${sessionsToStart.length} session(s) prêtes: ${sessionsToStart.join(', ')}`);
-        sessionsToStart.forEach(id => startSession(id));
+        // Beaucoup de comptes connectés en même temps déclenchent souvent des 440.
+        // Par défaut, on démarre une seule session (la plus récente) pour stabiliser.
+        // Pour démarrer toutes les sessions: START_ALL_SESSIONS=1
+        const startAll = process.env.START_ALL_SESSIONS !== '0'; // actif par défaut
+        const list = [...sessionsToStart].sort();
+        const selected = startAll ? list : [list[list.length - 1]];
+        addLog('info', `${selected.length}/${list.length} session(s) lancée(s): ${selected.join(', ')}${startAll ? '' : ' (START_ALL_SESSIONS=1 pour tout lancer)'}`);
+
+        // Démarrage séquentiel (petit délai) pour éviter un burst de connexions
+        for (const [i, id] of selected.entries()) {
+            setTimeout(() => startSession(id), i * 1500);
+        }
     }
 }
 

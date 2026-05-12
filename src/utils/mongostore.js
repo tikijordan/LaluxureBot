@@ -27,6 +27,19 @@ let connected  = false;
 let memCache   = new Map(); // Chaque sessionId → { number, files, updatedAt }
 const TEMP_DIR = path.join(os.tmpdir(), 'wa-bot-sessions');
 
+// Expose des accès read-only pour réutiliser le client Mongo ailleurs (lock d'instance, etc.)
+export function getMongoClient() {
+    return client;
+}
+
+export function getMongoDb() {
+    try { return client?.db(DB_NAME) || null; } catch { return null; }
+}
+
+export function getMongoCollection() {
+    return collection;
+}
+
 export async function connectMongo() {
     if (connected) return true;
     // Lire MONGODB_URI ici (après dotenv.config() de index.js)
@@ -263,6 +276,7 @@ export async function deleteSessionMongo(sessionId) {
     if (!connected || !collection) return false;
     try {
         await collection.deleteOne({ _id: sessionId });
+        memCache.delete(sessionId); // FIX: vider aussi le cache mémoire
         console.log(`[MongoDB] 🗑️ Session [${sessionId}] supprimée`);
         return true;
     } catch (e) {
@@ -295,4 +309,32 @@ export function scheduleSave(sessionId, number, authPath) {
         pushTimers.delete(sessionId);
         await saveSessionMongo(sessionId, number, authPath);
     }, 2000)); // attendre 2s d'inactivité avant de sauvegarder
+}
+
+// ─────────────────────────────────────────────
+// FLUSH — Forcer l'exécution immédiate de tous les saves en attente
+// Appelé au SIGTERM pour ne pas perdre les creds mis à jour
+// ─────────────────────────────────────────────
+export async function flushAllPendingSaves() {
+    if (pushTimers.size === 0) return;
+    console.log(`[MongoDB] ⏳ Flush de ${pushTimers.size} save(s) en attente...`);
+    const promises = [];
+    for (const [sessionId, timer] of pushTimers) {
+        clearTimeout(timer);
+        pushTimers.delete(sessionId);
+        // Retrouver le numéro depuis le cache
+        const cached = memCache.get(sessionId);
+        const number = cached?.number || sessionId;
+        // Trouver le authPath depuis les sessions globales (si disponible)
+        const authPath = global.sessions?.get(sessionId)?.authPath || null;
+        if (authPath) {
+            promises.push(
+                saveSessionMongo(sessionId, number, authPath)
+                    .then(() => console.log(`[MongoDB] ✅ Flush [${sessionId}]`))
+                    .catch(e => console.warn(`[MongoDB] ⚠️ Flush [${sessionId}]: ${e.message}`))
+            );
+        }
+    }
+    await Promise.allSettled(promises);
+    console.log('[MongoDB] ✅ Flush terminé');
 }

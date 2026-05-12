@@ -13,25 +13,28 @@ import { addStat } from './utils/stats.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Commandes chargées une fois au démarrage (partagées entre toutes les sessions)
+// ══════════════════════════════════════════════════════════════
+// CHARGEMENT DES COMMANDES — avec attente garantie
+// FIX: l'ancien IIFE fire-and-forget causait commands={} si un
+// message arrivait avant la fin du chargement → bot muet.
+// ══════════════════════════════════════════════════════════════
 let commands = {};
-(async () => {
-    commands = await loadCommands();
-    console.log(`📦 ${Object.keys(commands).length} commandes prêtes.`);
-})();
+let _commandsReady = false;
+const _commandsLoadPromise = loadCommands()
+    .then(cmds => {
+        commands = cmds;
+        _commandsReady = true;
+        console.log(`📦 ${Object.keys(commands).length} commandes prêtes.`);
+    })
+    .catch(err => {
+        console.error('❌ Erreur critique chargement commandes:', err.message);
+    });
 
 // noTagGroups par défaut (utilisé seulement si non fourni par la session)
 const _defaultNoTagGroups = new Set();
 
 // ══════════════════════════════════════════════════════════════
-// DÉDUPLICATION HANDLER — filet de sécurité contre les doubles appels
-// Distinct du cache dans index.js : couvre le cas où handler est
-// appelé directement depuis un autre module sans passer par index.js.
-// Clé : msg.key.id — nettoyage toutes les 5 min
-// ══════════════════════════════════════════════════════════════
-// ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION HANDLER — Map avec TTL (10 min par message)
-// Couvre le cas où handler est appelé directement sans passer par index.js
 // ══════════════════════════════════════════════════════════════
 const _handledMsgIds = new Map();
 const _HANDLER_TTL   = 10 * 60 * 1000;
@@ -48,17 +51,7 @@ setInterval(() => {
  * @param {object} sock    - Socket Baileys de la session
  * @param {object} msg     - Message WhatsApp
  * @param {object} store   - Store Baileys (peut être {})
- * @param {object} ctx     - Contexte pré-calculé par index.js :
- *   - body         {string}  Corps du message
- *   - from         {string}  JID de destination (groupe ou DM)
- *   - isGroup      {boolean}
- *   - isOwner      {boolean}
- *   - senderNumber {string}  Numéro sans @
- *   - sender       {string}  JID complet de l'expéditeur
- *   - prefix       {string}  Préfixe de la session (ex: '/')
- *   - owner        {string}  Numéro du propriétaire de la session
- *   - noTagGroups  {Set}     Groupes en mode no-tag
- *   - onCommand    {function} Callback dashboard (cmd, user)
+ * @param {object} ctx     - Contexte pré-calculé par index.js
  */
 export async function handleCommand(sock, msg, store, ctx = {}) {
 
@@ -69,9 +62,24 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         _handledMsgIds.set(msgId, Date.now());
     }
 
-    // ── Résolution du préfixe et du propriétaire (contexte session ou fallback) ──
-    const PREFIX = ctx.prefix || process.env.PREFIX || '/';
-    const OWNER  = ctx.owner  || (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
+    // ── Attendre que les commandes soient chargées (max 15s) ──
+    // FIX: sans ça, si un message arrive au démarrage, commands={} et le bot ne répond jamais.
+    if (!_commandsReady) {
+        try {
+            await Promise.race([
+                _commandsLoadPromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
+            ]);
+        } catch {
+            // Timeout ou erreur de chargement — on continue quand même
+            // (commands sera peut-être vide, mais on ne bloque pas)
+        }
+    }
+
+    // ── Résolution du préfixe et du propriétaire ──────────────
+    const PREFIX = ctx.prefix || process.env.PREFIX || '!';
+    // OWNER transmis par index.js depuis state.connectedNumber (défini à connection='open')
+    const OWNER  = (ctx.owner || '').replace(/\D/g, '');
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
     // ── Extraction du contexte ────────────────────────────────
@@ -113,7 +121,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     // ── Anti-spam ──────────────────────────────────────────────
     if (!isOwner) {
         if (isSpam(senderNumber)) {
-            return await sock.sendMessage(from, { text: ' Calme-toi ! Trop de messages.' });
+            return await sock.sendMessage(from, { text: '⏱️ Calme-toi ! Trop de messages.' });
         }
         trackMessage(senderNumber);
     }
@@ -126,42 +134,27 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
-    // botMode transmis depuis index.js (le blocage est géré dans index.js)
     const botMode = ctx.botMode || 'public';
 
     const command = commands[cmdName];
     if (!command) return;
 
-    // ── Vérification mode privé avec métadonnées groupe ────────
+    // ── Vérification mode privé ────────────────────────────────
     if (botMode === 'private' && !isOwner) {
-        let isUserOwner = false;
-        
-        if (isGroup) {
-            // Utiliser metadata pour vérifier si l'utilisateur est le owner
-            const metadata = await sock.groupMetadata(from).catch(() => null);
-            if (metadata) {
-                // Vérifier si c'est le owner en comparant le numéro du sender
-                isUserOwner = metadata.participants.find(
-                    p => p.id === sender && p.id.split('@')[0] === OWNER
-                );
-            }
-        } else {
-            // En DM, vérifier directement le numéro
-            isUserOwner = senderNumber === OWNER;
-        }
-        
-        // Si pas owner et mode private → refus
+        // FIX: simplification — comparer directement le senderNumber à OWNER
+        const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
+        const isUserOwner = normalize(senderNumber) === normalize(OWNER);
+
         if (!isUserOwner) {
             return await sock.sendMessage(from, { text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.' });
         }
     }
 
-    // ── Vérification accès private ────────────────────────────
+    // ── Vérification accès private / public ───────────────────
     if (command.private && !isOwner) {
         return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
     }
 
-    // ── Vérification accès public ─────────────────────────────
     if (command.public === false && !isOwner) {
         return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
     }
@@ -170,30 +163,26 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     if (command.adminOnly && !isOwner) {
         let isUserAdmin = false;
         let isBotAdmin = false;
-        
+
         if (isGroup) {
             const metadata = await sock.groupMetadata(from).catch(() => null);
             if (metadata) {
-                // Vérifier si l'utilisateur est admin
-                isUserAdmin = metadata.participants.find(
+                isUserAdmin = !!metadata.participants.find(
                     p => p.id === sender && (p.admin || p.isSuperAdmin)
                 );
-                
-                // Vérifier si le bot est admin
-                const botId = sock.user.id;
-                isBotAdmin = metadata.participants.find(
-                    p => p.id === botId && (p.admin || p.isSuperAdmin)
+                // FIX: normaliser le botId (Baileys peut le renvoyer avec :XX@)
+                const botId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
+                isBotAdmin = !!metadata.participants.find(
+                    p => (p.id === botId || p.id === sock.user?.id) && (p.admin || p.isSuperAdmin)
                 );
             }
         }
-        
-        // Si le bot n'est pas admin dans le groupe
-        if (isGroup && !isBotAdmin && !isOwner) {
+
+        if (isGroup && !isBotAdmin) {
             return await sock.sendMessage(from, { text: '⚠️ Je ne suis pas administrateur du groupe.' });
         }
-        
-        // Si l'utilisateur n'est pas admin
-        if (!isUserAdmin && !isOwner) {
+
+        if (!isUserAdmin) {
             return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
         }
     }
@@ -203,9 +192,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         console.log(`⚡ [${cmdName}] par ${senderNumber} (Owner: ${isOwner})`);
         addStat(senderNumber, cmdName);
 
-        // Notifier le dashboard (via callback de la session)
         if (typeof ctx.onCommand === 'function') ctx.onCommand(cmdName, senderNumber);
-        // Rétro-compat : hook global si présent
         if (global.__trackDashboardCommand) global.__trackDashboardCommand(cmdName, senderNumber);
 
         await command.execute({
