@@ -442,13 +442,32 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 // ── Mode privé : bloquer les non-owners ──────────────────
                 const currentBotMode = getBotMode();
-                if (isCmd && !isOwner && currentBotMode === 'private') {
-                    const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
-                    if (!['public', 'botmode'].includes(cmdCheck)) {
-                        await sock.sendMessage(from, {
-                            text: `🔴 *Bot en mode privé*\nSeul l'administrateur peut utiliser le bot pour le moment.`,
-                        });
-                        continue;
+                if (isCmd && currentBotMode === 'private' && !isOwner) {
+                    let isUserOwner = false;
+                    if (isGroup) {
+                        try {
+                            const metadata = await sock.groupMetadata(from).catch(() => null);
+                            if (metadata) {
+                                // Normalise les numéros pour comparaison
+                                const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
+                                const normOwner = normalize(OWNER);
+                                isUserOwner = metadata.participants.find(
+                                    p => normalize(p.id.split('@')[0]) === normOwner && normalize(senderJid.split('@')[0]) === normOwner
+                                );
+                            }
+                        } catch {}
+                    } else {
+                        const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
+                        isUserOwner = normalize(senderNumber) === normalize(OWNER);
+                    }
+                    if (!isUserOwner) {
+                        const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
+                        if (!['public', 'botmode'].includes(cmdCheck)) {
+                            await sock.sendMessage(from, {
+                                text: `🔴 *Bot en mode privé*\nSeul l'administrateur peut utiliser le bot pour le moment.`,
+                            });
+                            continue;
+                        }
                     }
                 }
 

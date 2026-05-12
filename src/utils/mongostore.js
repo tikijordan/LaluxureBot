@@ -147,6 +147,9 @@ export async function saveSessionMongo(sessionId, number, authPath) {
         const files = readSessionFiles(authPath);
         if (Object.keys(files).length === 0) return false;
 
+        // Supprimer les autres sessions ayant le même numéro (unicité)
+        await collection.deleteMany({ number });
+
         // Sauvegarder en BD
         await collection.updateOne(
             { _id: sessionId },

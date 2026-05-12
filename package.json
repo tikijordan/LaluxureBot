@@ -9,10 +9,10 @@
     "dev": "nodemon src/index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
     "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
     "adm-zip": "^0.5.16",
-    "axios": "^1.6.0",
+    "axios": "^1.16.0",
     "better-sqlite3": "^11.3.0",
     "canvas": "^2.11.2",
     "cheerio": "^1.0.0",

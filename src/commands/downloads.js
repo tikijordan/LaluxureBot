@@ -37,7 +37,6 @@ async function runYtdlp(url, isAudio, filePath) {
         '--no-cache-dir',
         '--socket-timeout 30',
         '--no-playlist',
-        `--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"`,
         `-o "${filePath}"`,
     ];
 
@@ -47,21 +46,23 @@ async function runYtdlp(url, isAudio, filePath) {
         args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
         args.push('--js-runtimes node');
         args.push('--age-limit 99');
+        // Toujours forcer un User-Agent navigateur récent
+        args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
         }
     }
 
     // ── TikTok ─────────────────────────────────────────────────
-    // N'utilise PAS l'impersonation car curl_cffi n'est pas disponible dans la plupart des environnements
-    // yt-dlp peut télécharger sans impersonation mais peut être plus lent/bloqué
-    // Pour meilleur support, utilise des cookies (voir YT_COOKIES_FILE)
     if (isTiktok) {
         // Cookies TikTok si disponibles et non vides
         const cookiesPath = path.join(process.cwd(), 'cookies.txt');
         if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
             args.push(`--cookies "${cookiesPath}"`);
         }
+        // Toujours forcer l'impersonation navigateur
+        args.push('--extractor-args "tiktok:impersonate_browser=chrome"');
+        args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
     }
 
     if (isAudio) {
