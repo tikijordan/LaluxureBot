@@ -1,3 +1,4 @@
+
 /**
  * @file        index.js
  * @description Multi-sessions WhatsApp Bot — Dashboard intégré, sans .env obligatoire
@@ -437,26 +438,8 @@ async function startSession(sessionId, phoneNumber = null) {
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
             state.ownerLid = sock.user?.lid?.split('@')[0] || null;
 
-            // FIX DOUBLON: si un autre session a déjà ce numéro connecté
-            // → garder la PLUS RÉCENTE (lastConnectedAt), supprimer l'ancienne
-            for (const [otherId, otherState] of sessions) {
-                if (otherId !== sessionId &&
-                    otherState.connectedNumber === num &&
-                    otherState.connection === 'open') {
-
-                    const otherAge  = otherState.lastConnectedAt || 0;
-                    const currentAge = Date.now(); // la nouvelle vient de s'ouvrir
-
-                    // La nouvelle session (currentAge) est toujours plus récente
-                    // → supprimer l'ancienne (otherId)
-                    addLog('warn', `[Doublon] ${num} — suppression ancienne session [${otherId}], conservation nouvelle [${sessionId}]`);
-                    try { otherState.sock?.end(); } catch {}
-                    clearReconnectTimer(otherId);
-                    sessions.delete(otherId);
-                    deleteSessionMongo(otherId).catch(() => {});
-                    break;
-                }
-            }
+            // Pas de suppression automatique de doublons ici —
+            // l'utilisateur gère ses sessions manuellement depuis le dashboard
 
             state.connection = 'open';
             state.qrCode = null;
@@ -622,69 +605,29 @@ async function startSession(sessionId, phoneNumber = null) {
                     const isParticipantLid = senderJid.endsWith('@lid');
 
                     if (isParticipantLid) {
-                        const lidKey = senderJid.split('@')[0];
+                        // msg.key.participantAlt contient le JID PN (@s.whatsapp.net)
+                        // quand participant est un LID — peuplé par Baileys à la décryption
+                        const participantAlt = msg.key.participantAlt || null;
 
-                        // Étape 1 : cache local déjà résolu
-                        if (state.lidCache?.[lidKey]) {
-                            senderNumber = state.lidCache[lidKey];
-
+                        if (participantAlt && !participantAlt.endsWith('@lid')) {
+                            // participantAlt = "237693552769:0@s.whatsapp.net"
+                            senderNumber = participantAlt.split(':')[0].split('@')[0].replace(/\D/g, '');
+                            senderJid    = senderNumber + '@s.whatsapp.net';
                         } else {
-                            // Étape 2 : API interne Baileys (cache LRU + keys stockées)
-                            let resolved = false;
+                            // Fallback : getPNForLID (mapping stocké par Baileys)
                             try {
                                 const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
                                 if (pn) {
                                     senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
-                                    if (!state.lidCache) state.lidCache = {};
-                                    state.lidCache[lidKey] = senderNumber;
-                                    resolved = true;
+                                    senderJid    = senderNumber + '@s.whatsapp.net';
+                                } else {
+                                    senderNumber = senderJid.split('@')[0];
+                                    // garder senderJid comme @lid
                                 }
-                            } catch {}
-
-                            if (!resolved) {
-                                // Étape 3 : peupler le mapping via getLIDsForPNs avec le owner
-                                // (force Baileys à appeler USync et stocker le mapping LID↔PN)
-                                try {
-                                    if (OWNER) {
-                                        const ownerJid = OWNER + '@s.whatsapp.net';
-                                        await sock.signalRepository.lidMapping.getLIDsForPNs([ownerJid]);
-                                    }
-                                    // Réessayer getPNForLID après peuplement
-                                    const pn2 = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
-                                    if (pn2) {
-                                        senderNumber = pn2.split(':')[0].split('@')[0].replace(/\D/g, '');
-                                        if (!state.lidCache) state.lidCache = {};
-                                        state.lidCache[lidKey] = senderNumber;
-                                        resolved = true;
-                                    }
-                                } catch {}
-                            }
-
-                            if (!resolved) {
-                                // Étape 4 : fallback groupMetadata (p.phoneNumber si disponible)
-                                try {
-                                    const meta = await sock.groupMetadata(rawJid);
-                                    if (!state.lidCache) state.lidCache = {};
-                                    for (const p of meta.participants) {
-                                        if (p.id.endsWith('@lid') && p.phoneNumber) {
-                                            const k = p.id.split('@')[0];
-                                            const v = p.phoneNumber.split('@')[0].replace(/\D/g,'');
-                                            state.lidCache[k] = v;
-                                        }
-                                        if (p.lid?.endsWith('@lid')) {
-                                            const k = p.lid.split('@')[0];
-                                            const v = p.id.split('@')[0].replace(/\D/g,'');
-                                            state.lidCache[k] = v;
-                                        }
-                                    }
-                                    senderNumber = state.lidCache[lidKey] || lidKey;
-                                } catch {
-                                    senderNumber = lidKey;
-                                }
+                            } catch {
+                                senderNumber = senderJid.split('@')[0];
                             }
                         }
-
-                        senderJid = senderNumber + '@s.whatsapp.net';
                     } else {
                         senderNumber = stripSuffix(senderJid);
                     }
@@ -1254,20 +1197,7 @@ button:hover{background:#1fb858}
         try { body = await readBodySafe(req); } catch {}
         const phone = (body.phone||'').replace(/\D/g,'');
 
-        // FIX DOUBLON: utiliser le numéro comme ID si fourni (évite les doublons)
-        // Si pas de numéro → ID temporaire basé sur timestamp
-        const id = phone ? phone : 'sess_'+Date.now();
-
-        // Bloquer si une session avec ce numéro est déjà active
-        if (phone) {
-            const existing = [...sessions.values()].find(s =>
-                s.connectedNumber === phone ||
-                (s.id === phone && s.connection !== 'close')
-            );
-            if (existing) {
-                return sendJson(res,{ error:`Une session avec le numéro ${phone} existe déjà (ID: ${existing.id})` },409);
-            }
-        }
+        const id = 'sess_'+Date.now();
 
         await startSession(id, phone || null);
         const msg = phone ? 'Session créée, pairing code en cours...' : 'Session créée, QR en cours...';

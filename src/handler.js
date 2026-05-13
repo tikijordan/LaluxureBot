@@ -113,38 +113,25 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             const isParticipantLid = sender.endsWith('@lid');
 
             if (isParticipantLid) {
-                // FIX LID: résoudre le LID en numéro via métadonnées groupe
-                const lidPart = sender.split('@')[0];
-                const ownerLidPart = OWNER_LID || null;
+                // msg.key.participantAlt = PN quand participant est LID (peuplé par Baileys)
+                const participantAlt = msg.key.participantAlt || null;
 
-                let lidResolved = false;
-                try {
-                    const pn = await sock.signalRepository?.lidMapping?.getPNForLID(sender);
-                    if (pn) {
-                        senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
-                        lidResolved = true;
-                    }
-                } catch {}
-
-                if (!lidResolved) {
+                if (participantAlt && !participantAlt.endsWith('@lid')) {
+                    senderNumber = participantAlt.split(':')[0].split('@')[0].replace(/\D/g, '');
+                    sender       = senderNumber + '@s.whatsapp.net';
+                } else {
                     try {
-                        const meta = await sock.groupMetadata(from);
-                        for (const p of meta.participants) {
-                            if (p.id.endsWith('@lid') && p.phoneNumber && p.id.split('@')[0] === lidPart) {
-                                senderNumber = p.phoneNumber.split('@')[0].replace(/\D/g,'');
-                                lidResolved = true;
-                            }
-                            if (p.lid?.endsWith('@lid') && p.lid.split('@')[0] === lidPart) {
-                                senderNumber = p.id.split('@')[0].replace(/\D/g,'');
-                                lidResolved = true;
-                            }
+                        const pn = await sock.signalRepository?.lidMapping?.getPNForLID(sender);
+                        if (pn) {
+                            senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
+                            sender       = senderNumber + '@s.whatsapp.net';
+                        } else {
+                            senderNumber = sender.split('@')[0];
                         }
-                    } catch {}
+                    } catch {
+                        senderNumber = sender.split('@')[0];
+                    }
                 }
-
-                if (!lidResolved) senderNumber = lidPart;
-                sender = senderNumber + '@s.whatsapp.net';
-                sender = senderNumber + '@s.whatsapp.net';
             } else {
                 senderNumber = stripSuffix(sender);
             }
