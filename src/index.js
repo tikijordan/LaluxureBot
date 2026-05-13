@@ -110,6 +110,17 @@ const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
 const startTime     = Date.now();
 
 fse.ensureDirSync(SESSIONS_ROOT);
+
+// Forcer le mode public au démarrage si botmode.json absent ou corrompu
+// (le filesystem Railway est éphémère — botmode.json est perdu au redéploiement)
+try {
+    const botmodeFile = path.join(__dirname, '../data/botmode.json');
+    if (!fs.existsSync(botmodeFile)) {
+        fse.ensureDirSync(path.dirname(botmodeFile));
+        fs.writeFileSync(botmodeFile, JSON.stringify({ mode: 'public' }, null, 2));
+        console.log('[Boot] botmode.json absent — mode public par défaut');
+    }
+} catch {}
 fse.ensureDirSync(DATA_ROOT);
 ['stats','notes','banned'].forEach(d => fse.ensureDirSync(path.join(DATA_ROOT, d)));
 
@@ -424,6 +435,9 @@ async function startSession(sessionId, phoneNumber = null) {
 
         if (connection === 'open') {
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
+            // Stocker aussi le LID du bot (format @lid utilisé par WhatsApp Business)
+            // pour que isOwner fonctionne même avec les JIDs LID
+            state.ownerLid = sock.user?.lid?.split('@')[0] || null;
             state.connection = 'open';
             state.qrCode = null;
             state.pairingCode = null;
@@ -579,10 +593,37 @@ async function startSession(sessionId, phoneNumber = null) {
                 const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
 
                 let senderJid, senderNumber;
-                if (isGroup) { senderJid=msg.key.participant||''; senderNumber=senderJid.split('@')[0].replace(/\D/g,''); }
-                else { senderNumber=fromMe?OWNER:rawJid.split('@')[0].replace(/\D/g,''); senderJid=senderNumber+'@s.whatsapp.net'; }
+                // strip device suffix (:15) avant extraction du numéro
+                // ex: 237691234567:15@s.whatsapp.net → 237691234567
+                const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
 
-                const isOwner = fromMe || senderNumber === OWNER;
+                if (isGroup) {
+                    senderJid    = msg.key.participant || '';
+                    // Dans les groupes, participant peut être @lid (LID WhatsApp)
+                    // ou @s.whatsapp.net (numéro normal)
+                    const isParticipantLid = senderJid.endsWith('@lid');
+                    if (isParticipantLid) {
+                        // LID → on garde le JID brut pour comparaison directe avec ownerLid
+                        senderNumber = senderJid.split('@')[0];
+                    } else {
+                        senderNumber = stripSuffix(senderJid);
+                    }
+                } else {
+                    senderNumber = fromMe ? OWNER : stripSuffix(rawJid);
+                    senderJid    = senderNumber + '@s.whatsapp.net';
+                }
+
+                // isOwner : fromMe OU numéro normal OU LID direct
+                // FIX LID: dans les groupes, comparer le JID LID du participant
+                // directement au LID du owner stocké à connection='open'
+                const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
+                const OWNER_LID = state.ownerLid || null;
+                const senderRawLid = senderJid.endsWith('@lid') ? senderJid.split('@')[0] : null;
+
+                const isOwner = fromMe
+                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
+                    || (OWNER_LID && senderRawLid && senderRawLid === OWNER_LID)
+                    || (OWNER_LID && normalize(senderNumber) === normalize(OWNER_LID));
 
                 const ct = getContentType(msg.message);
                 let body = '';
@@ -611,12 +652,10 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 // ── Mode privé : bloquer les non-owners ──────────────────
                 const currentBotMode = getBotMode();
-                if (isCmd && currentBotMode === 'private' && !isOwner) {
-                    // FIX: comparaison directe du numéro (l'ancienne logique groupe était toujours false)
-                    const normalize = n => (n||'').replace(/[^0-9]/g, '').replace(/^0+/, '');
-                    const isUserOwner = normalize(senderNumber) === normalize(OWNER);
-
-                    if (!isUserOwner) {
+                if (isCmd && currentBotMode === 'private') {
+                    // isOwner = fromMe || senderNumber === OWNER
+                    // On bloque uniquement si ce n'est PAS l'owner
+                    if (!isOwner) {
                         const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
                         if (!['public', 'botmode'].includes(cmdCheck)) {
                             await sock.sendMessage(from, {
@@ -642,6 +681,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     botMode: currentBotMode,
                     prefix: PREFIX,
                     owner: OWNER,
+                    ownerLid: state.ownerLid || null,
                     onCommand: (cmd, user) => {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);

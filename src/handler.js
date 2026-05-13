@@ -79,7 +79,8 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     // ── Résolution du préfixe et du propriétaire ──────────────
     const PREFIX = ctx.prefix || process.env.PREFIX || '!';
     // OWNER transmis par index.js depuis state.connectedNumber (défini à connection='open')
-    const OWNER  = (ctx.owner || '').replace(/\D/g, '');
+    const OWNER     = (ctx.owner || '').replace(/\D/g, '');
+    const OWNER_LID = ctx.ownerLid || null;
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
     // ── Extraction du contexte ────────────────────────────────
@@ -104,16 +105,26 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         isGroup = rawJid.endsWith('@g.us');
         const isLid = rawJid.endsWith('@lid');
 
+        // FIX: strip device suffix (:15) avant extraction du numéro
+        const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
         if (isGroup) {
             from         = rawJid;
             sender       = msg.key.participant || '';
-            senderNumber = sender.split('@')[0].replace(/\D/g, '');
+            // FIX LID: participant peut être @lid (identifiant opaque) ou @s.whatsapp.net
+            const isParticipantLid = sender.endsWith('@lid');
+            senderNumber = isParticipantLid ? sender.split('@')[0] : stripSuffix(sender);
         } else {
             from         = (isLid || fromMe) ? `${OWNER}@s.whatsapp.net` : rawJid;
-            senderNumber = fromMe ? OWNER : rawJid.split('@')[0].replace(/\D/g, '');
+            senderNumber = fromMe ? OWNER : stripSuffix(rawJid);
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
-        isOwner = fromMe || (OWNER && senderNumber === OWNER);
+
+        // FIX LID: comparer le JID LID brut du participant au LID du owner
+        const senderRawLid = sender.endsWith('@lid') ? sender.split('@')[0] : null;
+        isOwner = fromMe
+            || (OWNER && normalize(senderNumber) === normalize(OWNER))
+            || (OWNER_LID && senderRawLid && senderRawLid === OWNER_LID)
+            || (OWNER_LID && normalize(senderNumber) === normalize(OWNER_LID));
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
@@ -171,10 +182,13 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
                     p => p.id === sender && (p.admin || p.isSuperAdmin)
                 );
                 // FIX: normaliser le botId (Baileys peut le renvoyer avec :XX@)
-                const botId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
-                isBotAdmin = !!metadata.participants.find(
-                    p => (p.id === botId || p.id === sock.user?.id) && (p.admin || p.isSuperAdmin)
-                );
+                // FIX LID: le bot peut aussi apparaître avec un @lid dans les groupes
+                const botNumId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
+                const botLidId = sock.user?.lid || null;
+                isBotAdmin = !!metadata.participants.find(p => {
+                    if (!(p.admin || p.isSuperAdmin)) return false;
+                    return p.id === botNumId || p.id === sock.user?.id || (botLidId && p.id === botLidId);
+                });
             }
         }
 
