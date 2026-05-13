@@ -108,23 +108,49 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         // FIX: strip device suffix (:15) avant extraction du numéro
         const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
         if (isGroup) {
-            from         = rawJid;
-            sender       = msg.key.participant || '';
-            // FIX LID: participant peut être @lid (identifiant opaque) ou @s.whatsapp.net
+            from   = rawJid;
+            sender = msg.key.participant || '';
             const isParticipantLid = sender.endsWith('@lid');
-            senderNumber = isParticipantLid ? sender.split('@')[0] : stripSuffix(sender);
+
+            if (isParticipantLid) {
+                // FIX LID: résoudre le LID en numéro via métadonnées groupe
+                const lidPart = sender.split('@')[0];
+                const ownerLidPart = OWNER_LID || null;
+
+                if (ownerLidPart && lidPart === ownerLidPart) {
+                    senderNumber = OWNER;
+                } else {
+                    try {
+                        const meta = await sock.groupMetadata(from);
+                        const lidMap = {};
+                        for (const p of meta.participants) {
+                            // Groupe LID : p.id=@lid, p.phoneNumber=@s.whatsapp.net
+                            if (p.id.endsWith('@lid') && p.phoneNumber) {
+                                lidMap[p.id.split('@')[0]] = p.phoneNumber.split('@')[0].replace(/\D/g,'');
+                            }
+                            // Mixte : p.id=@s.whatsapp.net, p.lid=@lid
+                            if (p.lid?.endsWith('@lid')) {
+                                lidMap[p.lid.split('@')[0]] = p.id.split('@')[0].replace(/\D/g,'');
+                            }
+                        }
+                        senderNumber = lidMap[lidPart] || lidPart;
+                        sender = senderNumber + '@s.whatsapp.net';
+                    } catch {
+                        senderNumber = lidPart;
+                    }
+                }
+                sender = senderNumber + '@s.whatsapp.net';
+            } else {
+                senderNumber = stripSuffix(sender);
+            }
         } else {
             from         = (isLid || fromMe) ? `${OWNER}@s.whatsapp.net` : rawJid;
             senderNumber = fromMe ? OWNER : stripSuffix(rawJid);
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
-        // FIX LID: comparer le JID LID brut du participant au LID du owner
-        const senderRawLid = sender.endsWith('@lid') ? sender.split('@')[0] : null;
         isOwner = fromMe
-            || (OWNER && normalize(senderNumber) === normalize(OWNER))
-            || (OWNER_LID && senderRawLid && senderRawLid === OWNER_LID)
-            || (OWNER_LID && normalize(senderNumber) === normalize(OWNER_LID));
+            || (OWNER && normalize(senderNumber) === normalize(OWNER));
     }
 
     if (!body || !body.startsWith(PREFIX)) return;

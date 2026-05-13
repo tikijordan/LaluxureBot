@@ -598,13 +598,47 @@ async function startSession(sessionId, phoneNumber = null) {
                 const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
 
                 if (isGroup) {
-                    senderJid    = msg.key.participant || '';
-                    // Dans les groupes, participant peut être @lid (LID WhatsApp)
-                    // ou @s.whatsapp.net (numéro normal)
+                    senderJid = msg.key.participant || '';
                     const isParticipantLid = senderJid.endsWith('@lid');
+
                     if (isParticipantLid) {
-                        // LID → on garde le JID brut pour comparaison directe avec ownerLid
-                        senderNumber = senderJid.split('@')[0];
+                        // Groupe en mode LID (addressing_mode=lid) :
+                        // p.id = "34347558133923@lid"  (identifiant opaque)
+                        // p.phoneNumber = "237693552769@s.whatsapp.net"  (vrai numéro)
+                        const lidPart = senderJid.split('@')[0];
+
+                        // 1. LID déjà dans le cache → numéro connu, pas de requête réseau
+                        if (state.lidCache?.[lidPart]) {
+                            senderNumber = state.lidCache[lidPart];
+                            senderJid    = senderNumber + '@s.whatsapp.net';
+                        } else {
+                            // 2. Résoudre via groupMetadata
+                            // Baileys retourne : { id: "@lid", phoneNumber: "@s.whatsapp.net" }
+                            try {
+                                const meta = await sock.groupMetadata(rawJid);
+                                if (!state.lidCache) state.lidCache = {};
+
+                                for (const p of meta.participants) {
+                                    // Cas groupe LID : p.id est @lid, p.phoneNumber est le vrai numéro
+                                    if (p.id.endsWith('@lid') && p.phoneNumber) {
+                                        const pLid = p.id.split('@')[0];
+                                        const pNum = p.phoneNumber.split('@')[0].replace(/\D/g, '');
+                                        if (pLid && pNum) state.lidCache[pLid] = pNum;
+                                    }
+                                    // Cas mixte : p.id est @s.whatsapp.net, p.lid est @lid
+                                    if (p.lid && p.lid.endsWith('@lid')) {
+                                        const pLid = p.lid.split('@')[0];
+                                        const pNum = p.id.split('@')[0].replace(/\D/g, '');
+                                        if (pLid && pNum) state.lidCache[pLid] = pNum;
+                                    }
+                                }
+
+                                senderNumber = state.lidCache[lidPart] || lidPart;
+                                senderJid    = senderNumber + '@s.whatsapp.net';
+                            } catch {
+                                senderNumber = lidPart;
+                            }
+                        }
                     } else {
                         senderNumber = stripSuffix(senderJid);
                     }
@@ -613,17 +647,11 @@ async function startSession(sessionId, phoneNumber = null) {
                     senderJid    = senderNumber + '@s.whatsapp.net';
                 }
 
-                // isOwner : fromMe OU numéro normal OU LID direct
-                // FIX LID: dans les groupes, comparer le JID LID du participant
-                // directement au LID du owner stocké à connection='open'
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 const OWNER_LID = state.ownerLid || null;
-                const senderRawLid = senderJid.endsWith('@lid') ? senderJid.split('@')[0] : null;
 
                 const isOwner = fromMe
-                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
-                    || (OWNER_LID && senderRawLid && senderRawLid === OWNER_LID)
-                    || (OWNER_LID && normalize(senderNumber) === normalize(OWNER_LID));
+                    || (OWNER && normalize(senderNumber) === normalize(OWNER));
 
                 const ct = getContentType(msg.message);
                 let body = '';
