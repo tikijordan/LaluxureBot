@@ -1,4 +1,3 @@
-
 /**
  * @file        index.js
  * @description Multi-sessions WhatsApp Bot — Dashboard intégré, sans .env obligatoire
@@ -426,6 +425,17 @@ async function startSession(sessionId, phoneNumber = null) {
         }, 3000);
     }
 
+    // Écouter les mappings LID→PN émis par Baileys
+    // { pn: "237693552769@s.whatsapp.net", lid: "34347558133923@lid" }
+    sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
+        if (!pn || !lid) return;
+        const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
+        const lidNum = lid.split('@')[0];
+        if (!state.lidCache) state.lidCache = {};
+        state.lidCache[lidNum] = pnNum;   // LID → numéro
+        state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
+    });
+
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
         if (qr && !phoneNumber) {
             state.qrCode = qr;
@@ -436,7 +446,21 @@ async function startSession(sessionId, phoneNumber = null) {
 
         if (connection === 'open') {
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
+            // sock.user.lid = LID du compte connecté (format "XXXXXXX@lid")
+            // Utilisé pour reconnaître l'owner dans les groupes LID
             state.ownerLid = sock.user?.lid?.split('@')[0] || null;
+
+            // Si ownerLid absent dans sock.user, tenter de le récupérer via lidMapping
+            if (!state.ownerLid && num) {
+                try {
+                    const ownerPnJid = num + '@s.whatsapp.net';
+                    const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([ownerPnJid]);
+                    if (pairs && pairs.length > 0) {
+                        state.ownerLid = pairs[0].lid.split('@')[0];
+                        addLog('info', `[${sessionId}] ownerLid résolu: ${state.ownerLid}`);
+                    }
+                } catch {}
+            }
 
             // Pas de suppression automatique de doublons ici —
             // l'utilisateur gère ses sessions manuellement depuis le dashboard
@@ -541,12 +565,10 @@ async function startSession(sessionId, phoneNumber = null) {
             } catch {}
 
             if (code === DisconnectReason.loggedOut) {
-                // FIX: WhatsApp envoie loggedOut (401) après rotation de clés ou reconnexion serveur.
-                // On tente une reconnexion — si la session est vraiment révoquée, le QR/pairing
-                // sera affiché dans le dashboard. On ne tue plus le bot définitivement.
-                addLog('warn', `[${state.id}] Session loggedOut (401) — tentative de reconnexion dans 10s`);
-                // Nettoyer les fichiers temp pour forcer un nouveau QR si les creds sont invalides
-                try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
+                // WhatsApp envoie loggedOut (401) après rotation de clés, redéploiement, etc.
+                // On tente une reconnexion avec les creds existants (MongoDB les a).
+                // NE PAS supprimer /tmp — les creds sont encore valides dans la plupart des cas.
+                addLog('warn', `[${state.id}] Session loggedOut (401) — reconnexion dans 10s`);
                 scheduleReconnect(state.id, 10000);
             } else {
                 // Anti-loop: si 440 se répète, appliquer un cooldown long
@@ -605,27 +627,36 @@ async function startSession(sessionId, phoneNumber = null) {
                     const isParticipantLid = senderJid.endsWith('@lid');
 
                     if (isParticipantLid) {
-                        // msg.key.participantAlt contient le JID PN (@s.whatsapp.net)
-                        // quand participant est un LID — peuplé par Baileys à la décryption
-                        const participantAlt = msg.key.participantAlt || null;
+                        const lidNum = senderJid.split('@')[0];
 
-                        if (participantAlt && !participantAlt.endsWith('@lid')) {
-                            // participantAlt = "237693552769:0@s.whatsapp.net"
-                            senderNumber = participantAlt.split(':')[0].split('@')[0].replace(/\D/g, '');
+                        // 1. Cache lidCache peuplé via lid-mapping.update
+                        if (state.lidCache?.[lidNum]) {
+                            senderNumber = state.lidCache[lidNum];
                             senderJid    = senderNumber + '@s.whatsapp.net';
+
+                        // 2. participantAlt fourni directement par WhatsApp dans la stanza
+                        } else if (msg.key.participantAlt && !msg.key.participantAlt.endsWith('@lid')) {
+                            senderNumber = msg.key.participantAlt.split(':')[0].split('@')[0].replace(/\D/g, '');
+                            senderJid    = senderNumber + '@s.whatsapp.net';
+                            if (!state.lidCache) state.lidCache = {};
+                            state.lidCache[lidNum] = senderNumber;
+
+                        // 3. getPNForLID Baileys (mapping persisté sur disque)
                         } else {
-                            // Fallback : getPNForLID (mapping stocké par Baileys)
                             try {
                                 const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
                                 if (pn) {
                                     senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
                                     senderJid    = senderNumber + '@s.whatsapp.net';
+                                    if (!state.lidCache) state.lidCache = {};
+                                    state.lidCache[lidNum] = senderNumber;
                                 } else {
-                                    senderNumber = senderJid.split('@')[0];
-                                    // garder senderJid comme @lid
+                                    // LID non résolu — garder le LID brut
+                                    // isOwner sera vérifié via OWNER_LID plus bas
+                                    senderNumber = lidNum;
                                 }
                             } catch {
-                                senderNumber = senderJid.split('@')[0];
+                                senderNumber = lidNum;
                             }
                         }
                     } else {
@@ -639,8 +670,12 @@ async function startSession(sessionId, phoneNumber = null) {
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 const OWNER_LID = state.ownerLid || null;
 
+                // isOwner: fromMe OU numéro résolu OU LID direct si participant encore @lid
+                const senderIsLid = senderJid.endsWith('@lid');
                 const isOwner = fromMe
-                    || (OWNER && normalize(senderNumber) === normalize(OWNER));
+                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
+                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID)
+                    || (OWNER_LID && !senderIsLid && normalize(senderNumber) === normalize(OWNER));
 
                 const ct = getContentType(msg.message);
                 let body = '';
