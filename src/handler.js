@@ -117,27 +117,27 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
                 const lidPart = sender.split('@')[0];
                 const ownerLidPart = OWNER_LID || null;
 
-                if (ownerLidPart && lidPart === ownerLidPart) {
-                    senderNumber = OWNER;
-                } else {
-                    try {
+                try {
+                    const pn = await sock.signalRepository?.lidMapping?.getPNForLID(sender);
+                    if (pn) {
+                        senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
+                    } else {
+                        // Fallback groupMetadata
                         const meta = await sock.groupMetadata(from);
-                        const lidMap = {};
                         for (const p of meta.participants) {
-                            // Groupe LID : p.id=@lid, p.phoneNumber=@s.whatsapp.net
                             if (p.id.endsWith('@lid') && p.phoneNumber) {
-                                lidMap[p.id.split('@')[0]] = p.phoneNumber.split('@')[0].replace(/\D/g,'');
+                                if (p.id.split('@')[0] === lidPart)
+                                    senderNumber = p.phoneNumber.split('@')[0].replace(/\D/g,'');
                             }
-                            // Mixte : p.id=@s.whatsapp.net, p.lid=@lid
-                            if (p.lid?.endsWith('@lid')) {
-                                lidMap[p.lid.split('@')[0]] = p.id.split('@')[0].replace(/\D/g,'');
+                            if (p.lid?.endsWith('@lid') && p.lid.split('@')[0] === lidPart) {
+                                senderNumber = p.id.split('@')[0].replace(/\D/g,'');
                             }
                         }
-                        senderNumber = lidMap[lidPart] || lidPart;
-                        sender = senderNumber + '@s.whatsapp.net';
-                    } catch {
-                        senderNumber = lidPart;
+                        if (!senderNumber || senderNumber === lidPart) senderNumber = lidPart;
                     }
+                    sender = senderNumber + '@s.whatsapp.net';
+                } catch {
+                    senderNumber = lidPart;
                 }
                 sender = senderNumber + '@s.whatsapp.net';
             } else {

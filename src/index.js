@@ -602,43 +602,33 @@ async function startSession(sessionId, phoneNumber = null) {
                     const isParticipantLid = senderJid.endsWith('@lid');
 
                     if (isParticipantLid) {
-                        // Groupe en mode LID (addressing_mode=lid) :
-                        // p.id = "34347558133923@lid"  (identifiant opaque)
-                        // p.phoneNumber = "237693552769@s.whatsapp.net"  (vrai numéro)
-                        const lidPart = senderJid.split('@')[0];
-
-                        // 1. LID déjà dans le cache → numéro connu, pas de requête réseau
-                        if (state.lidCache?.[lidPart]) {
-                            senderNumber = state.lidCache[lidPart];
-                            senderJid    = senderNumber + '@s.whatsapp.net';
-                        } else {
-                            // 2. Résoudre via groupMetadata
-                            // Baileys retourne : { id: "@lid", phoneNumber: "@s.whatsapp.net" }
-                            try {
+                        // Groupe en mode LID — utiliser l'API officielle Baileys
+                        // sock.signalRepository.lidMapping.getPNForLID() cherche dans
+                        // le cache LRU interne de Baileys (peuplé automatiquement à chaque message)
+                        try {
+                            const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
+                            if (pn) {
+                                // pn = "237693552769:0@s.whatsapp.net" → extraire le numéro
+                                senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
+                            } else {
+                                // Mapping pas encore en cache — fallback groupMetadata
                                 const meta = await sock.groupMetadata(rawJid);
                                 if (!state.lidCache) state.lidCache = {};
-
                                 for (const p of meta.participants) {
-                                    // Cas groupe LID : p.id est @lid, p.phoneNumber est le vrai numéro
                                     if (p.id.endsWith('@lid') && p.phoneNumber) {
-                                        const pLid = p.id.split('@')[0];
-                                        const pNum = p.phoneNumber.split('@')[0].replace(/\D/g, '');
-                                        if (pLid && pNum) state.lidCache[pLid] = pNum;
+                                        state.lidCache[p.id.split('@')[0]] = p.phoneNumber.split('@')[0].replace(/\D/g,'');
                                     }
-                                    // Cas mixte : p.id est @s.whatsapp.net, p.lid est @lid
-                                    if (p.lid && p.lid.endsWith('@lid')) {
-                                        const pLid = p.lid.split('@')[0];
-                                        const pNum = p.id.split('@')[0].replace(/\D/g, '');
-                                        if (pLid && pNum) state.lidCache[pLid] = pNum;
+                                    if (p.lid?.endsWith('@lid')) {
+                                        state.lidCache[p.lid.split('@')[0]] = p.id.split('@')[0].replace(/\D/g,'');
                                     }
                                 }
-
-                                senderNumber = state.lidCache[lidPart] || lidPart;
-                                senderJid    = senderNumber + '@s.whatsapp.net';
-                            } catch {
-                                senderNumber = lidPart;
+                                const lidKey = senderJid.split('@')[0];
+                                senderNumber = state.lidCache[lidKey] || lidKey;
                             }
+                        } catch {
+                            senderNumber = senderJid.split('@')[0];
                         }
+                        senderJid = senderNumber + '@s.whatsapp.net';
                     } else {
                         senderNumber = stripSuffix(senderJid);
                     }
