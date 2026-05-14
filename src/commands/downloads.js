@@ -12,8 +12,12 @@ import yts from 'yt-search';
 
 const execPromise = util.promisify(exec);
 
-const MAX_SIZE_BYTES  = 1024 * 1024 * 1024;
-const PROCESS_TIMEOUT = 9000_000;
+// FIX 1 — WhatsApp refuse les fichiers > ~64 MB ; on coupe à 60 MB
+const MAX_SIZE_BYTES  = 60 * 1024 * 1024;          // 60 MB
+
+// FIX 2 — 9 000 000 ms (≈ 2h30) était absurde ; WhatsApp coupe la connexion bien avant.
+//          90 s est amplement suffisant pour une vidéo 720p.
+const PROCESS_TIMEOUT = 90_000;                    // 90 secondes
 
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     ? '/tmp/bot-downloads'
@@ -42,11 +46,10 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // Clients mobiles + web_creator : contournent la vérification bot sans cookies
-        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
-        args.push('--js-runtimes node');
+        // FIX 3 — ios/android/web_creator sont bloqués par YouTube depuis début 2025.
+        //          tv_embedded + mweb contournent la vérification bot sans cookies.
+        args.push('--extractor-args "youtube:player_client=tv_embedded,mweb"');
         args.push('--age-limit 99');
-        // Toujours forcer un User-Agent navigateur récent
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
@@ -55,13 +58,13 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── TikTok ─────────────────────────────────────────────────
     if (isTiktok) {
-        // Cookies TikTok si disponibles et non vides
         const cookiesPath = path.join(process.cwd(), 'cookies.txt');
         if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
             args.push(`--cookies "${cookiesPath}"`);
         }
-        // Toujours forcer l'impersonation navigateur
-        args.push('--extractor-args "tiktok:impersonate_browser=chrome"');
+        // FIX 4 — impersonate_browser=chrome nécessite curl_cffi (absent sur Railway).
+        //          app_name=trill donne le même résultat sans dépendance native.
+        args.push('--extractor-args "tiktok:app_name=trill"');
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
     }
 
@@ -78,9 +81,8 @@ async function runYtdlp(url, isAudio, filePath) {
     try {
         return await execPromise(cmd, { timeout: PROCESS_TIMEOUT });
     } catch (e) {
-        // Déchiffrer les erreurs courantes
         const stderr = e.stderr || e.message || '';
-        
+
         if (stderr.includes('429')) {
             throw new Error('🚫 YouTube vous bloque temporairement. Réessayez dans quelques minutes.');
         }
@@ -93,8 +95,7 @@ async function runYtdlp(url, isAudio, filePath) {
         if (stderr.includes('format') || stderr.includes('not available')) {
             throw new Error('❌ Format vidéo indisponible pour ce lien.');
         }
-        
-        // Re-lancer l'erreur d'origine
+
         throw e;
     }
 }
@@ -117,7 +118,7 @@ async function downloadVideo({ sock, from, text, msg }) {
         const size = fs.statSync(filePath).size;
         if (size > MAX_SIZE_BYTES) {
             cleanup(filePath);
-            return sock.sendMessage(from, { text: ` Fichier trop lourd (${Math.round(size/1024/1024)} Mo).` });
+            return sock.sendMessage(from, { text: ` Fichier trop lourd (${Math.round(size/1024/1024)} Mo). Limite : 60 Mo.` });
         }
 
         await sock.sendMessage(from, {
