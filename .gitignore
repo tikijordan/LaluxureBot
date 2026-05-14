@@ -6,6 +6,7 @@ sessions/
 bot-final.zip
 session.zip
 bot.zip
+bot-.zip
 # Variables sensibles
 .env
 env.txt
@@ -22,3 +23,5 @@ npm-debug.log*
 Thumbs.db
 #app
 yt-dlp.exe
+test4.mp4.part*.mp4
+*.part

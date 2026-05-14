@@ -676,6 +676,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 const OWNER_LID = state.ownerLid || null;
                 const MASTER_OWNER = (process.env.OWNER || '').replace(/\D/g, '');
 
+                const senderIsLid = senderJid.endsWith('@lid');
                 let resolvedLidToPn = senderNumber;
                 if (senderIsLid) {
                     try {
