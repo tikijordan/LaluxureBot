@@ -65,7 +65,8 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
         { $set: { ownerId, updatedAt: nowDate, expiresAt } },
         { returnDocument: 'after' }
     );
-    if (acquired?.value?.ownerId === ownerId) return { ok: true, reason: 'expired-acquired' };
+    const acquiredDoc = acquired?.value || acquired;
+    if (acquiredDoc?.ownerId === ownerId) return { ok: true, reason: 'expired-acquired' };
 
     // 3) renouveler si on est owner
     const renewed = await col.findOneAndUpdate(
@@ -73,7 +74,8 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
         { $set: { updatedAt: nowDate, expiresAt } },
         { returnDocument: 'after' }
     );
-    if (renewed?.value?.ownerId === ownerId) return { ok: true, reason: 'renewed' };
+    const renewedDoc = renewed?.value || renewed;
+    if (renewedDoc?.ownerId === ownerId) return { ok: true, reason: 'renewed' };
 
     // 4) sinon lock détenu par quelqu'un d'autre
     const doc = await col.findOne({ _id: lockName });
