@@ -169,23 +169,19 @@ process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
 // Clé : msg.key.id (identifiant unique Baileys)
 // ══════════════════════════════════════════════════════════════
-// DÉDUPLICATION MESSAGES — Map par session (pas globale)
-// Chaque session gère sa propre déduplication dans state.processedMsgIds
+// DÉDUPLICATION MESSAGES — Map avec TTL par message (10 min)
+// Évite le clear() global qui causait des doubles réponses
 // ══════════════════════════════════════════════════════════════
+const processedMsgIds = new Map(); // msgId → timestamp
 const MSG_TTL = 10 * 60 * 1000;   // 10 minutes par message
 
 // Nettoyage ciblé : seuls les messages expirés sont supprimés
 setInterval(() => {
     const now = Date.now();
-    for (const state of sessions.values()) {
-        if (!state.processedMsgIds) continue;
-        for (const [msgId, timestamp] of state.processedMsgIds.entries()) {
-            if (now - timestamp > MSG_TTL) {
-                state.processedMsgIds.delete(msgId);
-            }
-        }
+    for (const [id, ts] of processedMsgIds) {
+        if (now - ts > MSG_TTL) processedMsgIds.delete(id);
     }
-}, 60_000); // Nettoyage toutes les minutes
+}, 60 * 1000); // check toutes les minutes
 
 // Filtre anti-logs Baileys
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
@@ -346,7 +342,6 @@ async function startSession(sessionId, phoneNumber = null) {
             commandsCount: 0, messagesCount: 0, recentCommands: [],
             lastPing: null, createdAt: new Date().toISOString(),
             authPath, // ← on stocke le chemin courant dans le state
-            processedMsgIds: new Map(), // ← déduplication par session (pas globale)
         };
         sessions.set(sessionId, state);
     }
@@ -605,11 +600,11 @@ async function startSession(sessionId, phoneNumber = null) {
             // ── Mise à jour activité (anti-zombie watchdog) ──
             state.lastActivity = Date.now();
 
-            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message (par session) ──
-            // Chaque session gère sa propre déduplication
+            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message ──
+            // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
             const msgId = msg.key.id;
-            if (!msgId || state.processedMsgIds.has(msgId)) continue;
-            state.processedMsgIds.set(msgId, Date.now());
+            if (!msgId || processedMsgIds.has(msgId)) continue;
+            processedMsgIds.set(msgId, Date.now());
 
             state.messagesCount++;
             try {
@@ -618,16 +613,21 @@ async function startSession(sessionId, phoneNumber = null) {
                 const isGroup = rawJid.endsWith('@g.us');
                 const isLid   = rawJid.endsWith('@lid');
                 // OWNER = numéro du compte connecté, chargé depuis sock.user.id à connection='open'
-                const OWNER = (state.connectedNumber || '').replace(/\D/g, '');
+                const rawConnected = state.connectedNumber || '';
+                const connectedNum = rawConnected.includes(':') ? rawConnected.split(':')[0].replace(/\D/g, '') : rawConnected.replace(/\D/g, '');
+                
+                const OWNER = connectedNum;
                 if (!OWNER) continue; // session pas encore pleinement connectée
                 const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
 
                 let senderJid, senderNumber;
-                // strip device suffix (:15) avant extraction du numéro
-                // ex: 237691234567:15@s.whatsapp.net → 237691234567
-                const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
+                // Extraction robuste du numéro, en ignorant le suffixe d'appareil et le domaine
+                const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
 
-                if (isGroup) {
+                if (fromMe) {
+                    senderNumber = OWNER;
+                    senderJid    = isGroup ? (msg.key.participant || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
+                } else if (isGroup) {
                     senderJid = msg.key.participant || '';
                     const isParticipantLid = senderJid.endsWith('@lid');
 
@@ -665,20 +665,22 @@ async function startSession(sessionId, phoneNumber = null) {
                             }
                         }
                     } else {
-                        senderNumber = stripSuffix(senderJid);
+                        senderNumber = cleanPhone(senderJid);
                     }
                 } else {
-                    senderNumber = fromMe ? OWNER : stripSuffix(rawJid);
+                    senderNumber = cleanPhone(rawJid);
                     senderJid    = senderNumber + '@s.whatsapp.net';
                 }
 
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 const OWNER_LID = state.ownerLid || null;
+                const MASTER_OWNER = (process.env.OWNER || '').replace(/\D/g, '');
 
                 // isOwner: fromMe OU numéro résolu OU LID direct si participant encore @lid
                 const senderIsLid = senderJid.endsWith('@lid');
                 const isOwner = fromMe
                     || (OWNER && normalize(senderNumber) === normalize(OWNER))
+                    || (MASTER_OWNER && normalize(senderNumber) === normalize(MASTER_OWNER))
                     || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID)
                     || (OWNER_LID && !senderIsLid && normalize(senderNumber) === normalize(OWNER));
 
@@ -714,9 +716,9 @@ async function startSession(sessionId, phoneNumber = null) {
                     // On bloque uniquement si ce n'est PAS l'owner
                     if (!isOwner) {
                         const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
-                        if (!['public', 'botmode'].includes(cmdCheck)) {
+                        if (!['public', 'private', 'botmode'].includes(cmdCheck)) {
                             await sock.sendMessage(from, {
-                                text: `🔴 *Bot en mode privé*\nSeul l'administrateur peut utiliser le bot pour le moment.`,
+                                text: `tu n'es pas l'admin.`,
                             });
                             continue;
                         }

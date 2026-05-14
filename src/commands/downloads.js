@@ -46,9 +46,9 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // FIX 3 — tv_embedded + mweb bloqués depuis 2025. Utiliser web client (par défaut) + cookies si dispo.
-        //          Pas de player_client forcé : yt-dlp gère les rotations automatiquement.
-        // args.push('--extractor-args "youtube:player_client=web"'); // Optionnel, par défaut OK
+        // FIX 3 — ios/android/web_creator sont bloqués par YouTube depuis début 2025.
+        //          tv_embedded + mweb contournent la vérification bot sans cookies.
+        args.push('--extractor-args "youtube:player_client=tv_embedded,mweb"');
         args.push('--age-limit 99');
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
@@ -62,8 +62,9 @@ async function runYtdlp(url, isAudio, filePath) {
         if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
             args.push(`--cookies "${cookiesPath}"`);
         }
-        // FIX 4 — app_name=trill bloqué par TikTok (403). Utiliser app_name=musical_ly (app mobile officiel, plus robuste).
-        args.push('--extractor-args "tiktok:app_name=musical_ly"');
+        // FIX 4 — impersonate_browser=chrome nécessite curl_cffi (absent sur Railway).
+        //          Anciennement app_name=trill, maintenant retiré ou modifié.
+
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
     }
 
@@ -87,9 +88,6 @@ async function runYtdlp(url, isAudio, filePath) {
         }
         if (stderr.includes('Sign in to confirm')) {
             throw new Error('🔐 YouTube demande une authentification. Besoin de cookies YouTube valides.');
-        }
-        if (stderr.includes('403')) {
-            throw new Error('⚠️ TikTok / YouTube bloquent cette vidéo (403 Forbidden). Vérifiez que la vidéo est publique.');
         }
         if (stderr.includes('impersonation')) {
             throw new Error('⚠️ TikTok: Dépendances d\'impersonation manquantes (curl_cffi).');
