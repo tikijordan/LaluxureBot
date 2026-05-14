@@ -10,13 +10,13 @@ import { getContentType } from '@whiskeysockets/baileys';
 import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
+// FIX 2 — lire le mode bot dynamiquement depuis le fichier plutôt que depuis ctx
+import { getBotMode } from './commands/security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ══════════════════════════════════════════════════════════════
 // CHARGEMENT DES COMMANDES — avec attente garantie
-// FIX: l'ancien IIFE fire-and-forget causait commands={} si un
-// message arrivait avant la fin du chargement → bot muet.
 // ══════════════════════════════════════════════════════════════
 let commands = {};
 let _commandsReady = false;
@@ -30,7 +30,6 @@ const _commandsLoadPromise = loadCommands()
         console.error('❌ Erreur critique chargement commandes:', err.message);
     });
 
-// noTagGroups par défaut (utilisé seulement si non fourni par la session)
 const _defaultNoTagGroups = new Set();
 
 // ══════════════════════════════════════════════════════════════
@@ -44,6 +43,11 @@ setInterval(() => {
         if (now - ts > _HANDLER_TTL) _handledMsgIds.delete(id);
     }
 }, 60 * 1000);
+
+// FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
+//          (était définie seulement dans le bloc private, causant ReferenceError
+//          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
+const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
 
 /**
  * Traite un message entrant et exécute la commande correspondante.
@@ -63,7 +67,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     }
 
     // ── Attendre que les commandes soient chargées (max 15s) ──
-    // FIX: sans ça, si un message arrive au démarrage, commands={} et le bot ne répond jamais.
     if (!_commandsReady) {
         try {
             await Promise.race([
@@ -72,13 +75,11 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             ]);
         } catch {
             // Timeout ou erreur de chargement — on continue quand même
-            // (commands sera peut-être vide, mais on ne bloque pas)
         }
     }
 
     // ── Résolution du préfixe et du propriétaire ──────────────
-    const PREFIX = ctx.prefix || process.env.PREFIX || '!';
-    // OWNER transmis par index.js depuis state.connectedNumber (défini à connection='open')
+    const PREFIX    = ctx.prefix || process.env.PREFIX || '!';
     const OWNER     = (ctx.owner || '').replace(/\D/g, '');
     const OWNER_LID = ctx.ownerLid || null;
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
@@ -105,7 +106,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         isGroup = rawJid.endsWith('@g.us');
         const isLid = rawJid.endsWith('@lid');
 
-        // FIX: strip device suffix (:15) avant extraction du numéro
         const stripSuffix = jid => (jid||'').replace(/:[0-9]+@/, '@').split('@')[0].replace(/\D/g,'');
         if (isGroup) {
             from   = rawJid;
@@ -113,7 +113,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             const isParticipantLid = sender.endsWith('@lid');
 
             if (isParticipantLid) {
-                // msg.key.participantAlt = PN quand participant est LID (peuplé par Baileys)
                 const participantAlt = msg.key.participantAlt || null;
 
                 if (participantAlt && !participantAlt.endsWith('@lid')) {
@@ -141,6 +140,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
+        // FIX 1 — normalize est maintenant disponible ici (définie au niveau module)
         isOwner = fromMe
             || (OWNER && normalize(senderNumber) === normalize(OWNER));
     }
@@ -163,18 +163,23 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
-    const botMode = ctx.botMode || 'public';
+    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
+    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
+    const botMode = getBotMode();
 
     const command = commands[cmdName];
     if (!command) return;
 
     // ── Vérification mode privé ────────────────────────────────
-    if (botMode === 'private' && !isOwner) {
-        // FIX: simplification — comparer directement le senderNumber à OWNER
-        const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
-        const isUserOwner = normalize(senderNumber) === normalize(OWNER);
+    // FIX 3 — utiliser msg.key.fromMe comme garde absolue : si le bot envoie
+    //          lui-même le message (propriétaire sur son propre appareil), c'est
+    //          toujours autorisé, quelle que soit la correspondance des numéros.
+    if (botMode === 'private') {
+        const isActualOwner = msg?.key?.fromMe
+            || isOwner
+            || (OWNER && normalize(senderNumber) === normalize(OWNER));
 
-        if (!isUserOwner) {
+        if (!isActualOwner) {
             return await sock.sendMessage(from, { text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.' });
         }
     }
@@ -199,8 +204,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
                 isUserAdmin = !!metadata.participants.find(
                     p => p.id === sender && (p.admin || p.isSuperAdmin)
                 );
-                // FIX: normaliser le botId (Baileys peut le renvoyer avec :XX@)
-                // FIX LID: le bot peut aussi apparaître avec un @lid dans les groupes
                 const botNumId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
                 const botLidId = sock.user?.lid || null;
                 isBotAdmin = !!metadata.participants.find(p => {

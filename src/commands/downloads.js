@@ -13,7 +13,7 @@ import yts from 'yt-search';
 const execPromise = util.promisify(exec);
 
 // FIX 1 — WhatsApp refuse les fichiers > ~64 MB ; on coupe à 60 MB
-const MAX_SIZE_BYTES  = 60 * 1024 * 1024;          // 60 MB
+const MAX_SIZE_BYTES  = 250 * 1024 * 1024;          // 60 MB
 
 // FIX 2 — 9 000 000 ms (≈ 2h30) était absurde ; WhatsApp coupe la connexion bien avant.
 //          90 s est amplement suffisant pour une vidéo 720p.
