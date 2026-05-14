@@ -12,8 +12,8 @@ import yts from 'yt-search';
 
 const execPromise = util.promisify(exec);
 
-const MAX_SIZE_BYTES  = 250* 1024 * 1024;   // 60 MB — limite WhatsApp réelle
-const PROCESS_TIMEOUT = 90_000;              // 90s — au-delà yt-dlp est bloqué
+const MAX_SIZE_BYTES  = 250* 1024 * 1024;   // 250 MB — limite WhatsApp réelle
+const PROCESS_TIMEOUT = 180_000;              // 180s — au-delà yt-dlp est bloqué
 
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     ? '/tmp/bot-downloads'
