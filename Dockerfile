@@ -23,7 +23,7 @@ RUN yt-dlp -U || echo "yt-dlp update skipped"
 #  - js-runtimes : node (runtime JS pour les extracteurs)
 #  - no-check-certificates : évite les erreurs SSL
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--extractor-args youtube:player_client=ios,android,web_creator\n--js-runtimes node\n--no-check-certificates\n--socket-timeout 30\n" \
+    printf -- "--no-check-certificates\n--socket-timeout 30\n--no-playlist\n" \
     > /root/.config/yt-dlp/config
 
 WORKDIR /app

@@ -147,23 +147,7 @@ function cleanupTempSessions() {
 cleanupTempSessions();
 
 // Et aussi à l'arrêt gracieux
-async function gracefulShutdown(signal) {
-    console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
-    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
-    try {
-        console.log('[Process] ⏳ Flush des sauvegardes en cours...');
-        await Promise.race([
-            flushAllPendingSaves(),
-            new Promise(r => setTimeout(r, 8000))
-        ]);
-    } catch {}
-    cleanupTempSessions();
-    process.exit(0);
-}
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+// SIGTERM/SIGINT handled in loadExistingSessions (avec lock release)
 
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
@@ -454,9 +438,11 @@ async function startSession(sessionId, phoneNumber = null) {
             if (!state.ownerLid && num) {
                 try {
                     const ownerPnJid = num + '@s.whatsapp.net';
+                    // getLIDsForPNs retourne { [pnJid]: { lid, pn } } — pas un tableau
                     const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([ownerPnJid]);
-                    if (pairs && pairs.length > 0) {
-                        state.ownerLid = pairs[0].lid.split('@')[0];
+                    const first = pairs ? Object.values(pairs)[0] : null;
+                    if (first?.lid) {
+                        state.ownerLid = first.lid.split('@')[0];
                         addLog('info', `[${sessionId}] ownerLid résolu: ${state.ownerLid}`);
                     }
                 } catch {}
@@ -888,12 +874,23 @@ async function loadExistingSessions() {
             },
         });
 
-        const shutdown = async () => {
+        const shutdown = async (signal) => {
+            console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
             try { hb.stop(); } catch {}
+            // Flush des sauvegardes MongoDB en attente avant de quitter
+            try {
+                await Promise.race([
+                    flushAllPendingSaves(),
+                    new Promise(r => setTimeout(r, 8000))
+                ]);
+            } catch {}
+            // Nettoyer /tmp et relâcher le lock
+            cleanupTempSessions();
             try { await releaseLock({ db, lockName, ownerId }); } catch {}
+            process.exit(0);
         };
-        process.on('SIGINT', shutdown);
-        process.on('SIGTERM', shutdown);
+        process.on('SIGINT',  () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
 
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);

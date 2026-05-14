@@ -12,12 +12,8 @@ import yts from 'yt-search';
 
 const execPromise = util.promisify(exec);
 
-// FIX 1 — WhatsApp refuse les fichiers > ~64 MB ; on coupe à 60 MB
-const MAX_SIZE_BYTES  = 250 * 1024 * 1024;          // 60 MB
-
-// FIX 2 — 9 000 000 ms (≈ 2h30) était absurde ; WhatsApp coupe la connexion bien avant.
-//          90 s est amplement suffisant pour une vidéo 720p.
-const PROCESS_TIMEOUT = 90_000;                    // 90 secondes
+const MAX_SIZE_BYTES  = 250* 1024 * 1024;   // 60 MB — limite WhatsApp réelle
+const PROCESS_TIMEOUT = 90_000;              // 90s — au-delà yt-dlp est bloqué
 
 const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     ? '/tmp/bot-downloads'
@@ -33,8 +29,10 @@ function cleanup(filePath) {
  * Exécute yt-dlp avec des options adaptées par plateforme
  */
 async function runYtdlp(url, isAudio, filePath) {
-    const isYoutube = /youtube\.com|youtu\.be/i.test(url);
-    const isTiktok  = /tiktok\.com/i.test(url);
+    const isYoutube  = /youtube\.com|youtu\.be/i.test(url);
+    const isTiktok   = /tiktok\.com/i.test(url);
+    const isInstagram = /instagram\.com/i.test(url);
+    const isFacebook  = /facebook\.com|fb\.watch/i.test(url);
 
     const args = [
         '--no-check-certificate',
@@ -46,10 +44,11 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // FIX 3 — ios/android/web_creator fonctionnent mieux avec yt-dlp récent (2025+) pour éviter le blocage.
-        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
+        // tv_embedded + mweb contournent la vérification bot sans cookies en 2025
+        args.push('--extractor-args "youtube:player_client=tv_embedded,mweb"');
         args.push('--age-limit 99');
-        args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
+        args.push('--add-header "User-Agent: Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"');
+        // Cookies optionnels si configurés
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
             args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
         }
@@ -57,21 +56,25 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── TikTok ─────────────────────────────────────────────────
     if (isTiktok) {
+        // curl_cffi est installé dans le Dockerfile → impersonation chrome disponible
+        args.push('--impersonate chrome');
         const cookiesPath = path.join(process.cwd(), 'cookies.txt');
         if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
             args.push(`--cookies "${cookiesPath}"`);
         }
-        // FIX 4 — impersonate_browser=chrome nécessite curl_cffi (absent sur Railway).
-        //          Anciennement app_name=trill, maintenant retiré ou modifié.
+    }
 
+    // ── Instagram / Facebook ────────────────────────────────────
+    if (isInstagram || isFacebook) {
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
     }
 
     if (isAudio) {
         args.push('-x', '--audio-format mp3', '--audio-quality 0');
     } else {
+        // Limiter à 480p pour rester sous 60MB sur Railway
         args.push(
-            '-f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]"',
+            '-f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best"',
             '--merge-output-format mp4'
         );
     }
@@ -81,54 +84,56 @@ async function runYtdlp(url, isAudio, filePath) {
         return await execPromise(cmd, { timeout: PROCESS_TIMEOUT });
     } catch (e) {
         const stderr = e.stderr || e.message || '';
-
-        if (stderr.includes('429')) {
-            throw new Error('🚫 YouTube vous bloque temporairement. Réessayez dans quelques minutes.');
+        if (stderr.includes('429') || stderr.includes('Too Many Requests')) {
+            throw new Error('🚫 Plateforme temporairement bloquée. Réessaie dans quelques minutes.');
         }
-        if (stderr.includes('Sign in to confirm')) {
-            throw new Error('🔐 YouTube demande une authentification. Besoin de cookies YouTube valides.');
+        if (stderr.includes('Sign in to confirm') || stderr.includes('bot')) {
+            throw new Error('🔐 YouTube demande une vérification. Essaie avec un autre lien.');
         }
-        if (stderr.includes('impersonation')) {
-            throw new Error('⚠️ TikTok: Dépendances d\'impersonation manquantes (curl_cffi).');
+        if (stderr.includes('Video unavailable') || stderr.includes('not available')) {
+            throw new Error('❌ Vidéo indisponible ou privée.');
         }
-        if (stderr.includes('format') || stderr.includes('not available')) {
-            throw new Error('❌ Format vidéo indisponible pour ce lien.');
+        if (stderr.includes('timeout') || e.killed) {
+            throw new Error('⏱️ Téléchargement trop long (>90s). Essaie une vidéo plus courte.');
         }
-
-        throw e;
+        const firstLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
+            || stderr.split('\n')[0];
+        throw new Error(firstLine || e.message);
     }
 }
 
 // ── Téléchargement vidéo commun ────────────────────────────────
 async function downloadVideo({ sock, from, text, msg }) {
-    if (!text) return sock.sendMessage(from, { text: ' Usage: /video [lien]' });
+    if (!text) return sock.sendMessage(from, { text: '📎 Usage: !video [lien]' });
 
     const filePath = path.join(DOWNLOAD_DIR, `video_${Date.now()}.mp4`);
 
     try {
-        await sock.sendMessage(from, { text: ' Téléchargement en cours...' }, { quoted: msg });
+        await sock.sendMessage(from, { text: '⬇️ Téléchargement en cours...' }, { quoted: msg });
 
         await runYtdlp(text, false, filePath);
 
         if (!fs.existsSync(filePath)) {
-            return sock.sendMessage(from, { text: " Échec : Le fichier n'a pas pu être généré." });
+            return sock.sendMessage(from, { text: "❌ Échec : le fichier n'a pas pu être généré." });
         }
 
         const size = fs.statSync(filePath).size;
         if (size > MAX_SIZE_BYTES) {
             cleanup(filePath);
-            return sock.sendMessage(from, { text: ` Fichier trop lourd (${Math.round(size/1024/1024)} Mo). Limite : 60 Mo.` });
+            return sock.sendMessage(from, {
+                text: `❌ Fichier trop lourd (${Math.round(size / 1024 / 1024)} Mo > 60 Mo).\nEssaie une vidéo plus courte ou utilise !play pour l'audio.`
+            });
         }
 
         await sock.sendMessage(from, {
             video: fs.readFileSync(filePath),
-            caption: ' Téléchargé avec succès',
+            caption: '✅ Téléchargé avec succès',
             mimetype: 'video/mp4',
         }, { quoted: msg });
 
     } catch (err) {
-        console.error('[video]', err.stderr || err.message);
-        await sock.sendMessage(from, { text: ` Erreur : ${(err.stderr || err.message).split('\n')[0]}` });
+        console.error('[video]', err.message);
+        await sock.sendMessage(from, { text: `❌ ${err.message}` });
     } finally {
         cleanup(filePath);
     }
@@ -140,7 +145,7 @@ const cmds = {
     play: {
         description: 'Rechercher et télécharger de la musique en MP3',
         execute: async ({ sock, from, text, msg }) => {
-            if (!text) return sock.sendMessage(from, { text: ' Usage: /play [titre ou lien]' });
+            if (!text) return sock.sendMessage(from, { text: '🎵 Usage: !play [titre ou lien]' });
 
             const filePath = path.join(DOWNLOAD_DIR, `audio_${Date.now()}.mp3`);
 
@@ -151,9 +156,10 @@ const cmds = {
                 let thumb = null;
 
                 if (!text.startsWith('http')) {
+                    await sock.sendMessage(from, { text: `🔍 Recherche : *${text}*...` }, { quoted: msg });
                     const search = await yts(text);
                     const video  = search.videos[0];
-                    if (!video) return sock.sendMessage(from, { text: ' Aucun résultat trouvé.' });
+                    if (!video) return sock.sendMessage(from, { text: '❌ Aucun résultat trouvé.' });
                     url      = video.url;
                     title    = video.title;
                     duration = video.timestamp;
@@ -161,15 +167,21 @@ const cmds = {
                 }
 
                 const preview = thumb
-                    ? { image: { url: thumb }, caption: ` *${title}*\n ${duration}\n\n Conversion MP3 en cours...` }
-                    : { text: ` Conversion MP3 en cours...\n*${title}*` };
+                    ? { image: { url: thumb }, caption: `🎵 *${title}*\n⏱ ${duration}\n\n⬇️ Conversion MP3 en cours...` }
+                    : { text: `⬇️ Conversion MP3 en cours...\n*${title}*` };
 
                 await sock.sendMessage(from, preview, { quoted: msg });
 
                 await runYtdlp(url, true, filePath);
 
                 if (!fs.existsSync(filePath)) {
-                    return sock.sendMessage(from, { text: ' Erreur de conversion.' });
+                    return sock.sendMessage(from, { text: '❌ Erreur de conversion.' });
+                }
+
+                const size = fs.statSync(filePath).size;
+                if (size > MAX_SIZE_BYTES) {
+                    cleanup(filePath);
+                    return sock.sendMessage(from, { text: `❌ Fichier audio trop lourd (${Math.round(size / 1024 / 1024)} Mo).` });
                 }
 
                 await sock.sendMessage(from, {
@@ -179,8 +191,8 @@ const cmds = {
                 }, { quoted: msg });
 
             } catch (err) {
-                console.error('[play]', err.stderr || err.message);
-                await sock.sendMessage(from, { text: ' Erreur lors du téléchargement. Veuillez réessayer.' });
+                console.error('[play]', err.message);
+                await sock.sendMessage(from, { text: `❌ ${err.message}` });
             } finally {
                 cleanup(filePath);
             }
@@ -188,14 +200,14 @@ const cmds = {
     },
 
     video: {
-        description: 'Télécharger une vidéo',
+        description: 'Télécharger une vidéo YouTube/TikTok/Instagram',
         execute: downloadVideo,
     },
 
     dl: {
-        description: 'Téléchargeur universel',
+        description: 'Téléchargeur universel (lien → vidéo, titre → MP3)',
         execute: async ({ sock, from, text, msg }) => {
-            if (!text) return sock.sendMessage(from, { text: 'Usage: /dl [lien ou titre]' });
+            if (!text) return sock.sendMessage(from, { text: '📎 Usage: !dl [lien ou titre]' });
             if (text.startsWith('http')) return downloadVideo({ sock, from, text, msg });
             return cmds.play.execute({ sock, from, text, msg });
         },
@@ -207,7 +219,12 @@ const cmds = {
     },
 
     ytmp4: {
-        description: 'YouTube → MP4',
+        description: 'YouTube → MP4 (480p max)',
+        execute: async (ctx) => downloadVideo(ctx),
+    },
+
+    tiktok: {
+        description: 'Télécharger une vidéo TikTok',
         execute: async (ctx) => downloadVideo(ctx),
     },
 };
