@@ -169,19 +169,23 @@ process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
 // Clé : msg.key.id (identifiant unique Baileys)
 // ══════════════════════════════════════════════════════════════
-// DÉDUPLICATION MESSAGES — Map avec TTL par message (10 min)
-// Évite le clear() global qui causait des doubles réponses
+// DÉDUPLICATION MESSAGES — Map par session (pas globale)
+// Chaque session gère sa propre déduplication dans state.processedMsgIds
 // ══════════════════════════════════════════════════════════════
-const processedMsgIds = new Map(); // msgId → timestamp
 const MSG_TTL = 10 * 60 * 1000;   // 10 minutes par message
 
 // Nettoyage ciblé : seuls les messages expirés sont supprimés
 setInterval(() => {
     const now = Date.now();
-    for (const [id, ts] of processedMsgIds) {
-        if (now - ts > MSG_TTL) processedMsgIds.delete(id);
+    for (const state of sessions.values()) {
+        if (!state.processedMsgIds) continue;
+        for (const [msgId, timestamp] of state.processedMsgIds.entries()) {
+            if (now - timestamp > MSG_TTL) {
+                state.processedMsgIds.delete(msgId);
+            }
+        }
     }
-}, 60 * 1000); // check toutes les minutes
+}, 60_000); // Nettoyage toutes les minutes
 
 // Filtre anti-logs Baileys
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
@@ -342,6 +346,7 @@ async function startSession(sessionId, phoneNumber = null) {
             commandsCount: 0, messagesCount: 0, recentCommands: [],
             lastPing: null, createdAt: new Date().toISOString(),
             authPath, // ← on stocke le chemin courant dans le state
+            processedMsgIds: new Map(), // ← déduplication par session (pas globale)
         };
         sessions.set(sessionId, state);
     }
@@ -600,11 +605,11 @@ async function startSession(sessionId, phoneNumber = null) {
             // ── Mise à jour activité (anti-zombie watchdog) ──
             state.lastActivity = Date.now();
 
-            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message ──
-            // Plusieurs sessions ou événements Baileys peuvent rejouer le même message
+            // ── FIX DOUBLE RÉPONSE #2 : déduplication par ID de message (par session) ──
+            // Chaque session gère sa propre déduplication
             const msgId = msg.key.id;
-            if (!msgId || processedMsgIds.has(msgId)) continue;
-            processedMsgIds.set(msgId, Date.now());
+            if (!msgId || state.processedMsgIds.has(msgId)) continue;
+            state.processedMsgIds.set(msgId, Date.now());
 
             state.messagesCount++;
             try {
