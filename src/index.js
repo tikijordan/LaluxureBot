@@ -676,13 +676,19 @@ async function startSession(sessionId, phoneNumber = null) {
                 const OWNER_LID = state.ownerLid || null;
                 const MASTER_OWNER = (process.env.OWNER || '').replace(/\D/g, '');
 
-                // isOwner: fromMe OU numéro résolu OU LID direct si participant encore @lid
-                const senderIsLid = senderJid.endsWith('@lid');
+                let resolvedLidToPn = senderNumber;
+                if (senderIsLid) {
+                    try {
+                        const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
+                        if (pn) resolvedLidToPn = cleanPhone(pn);
+                    } catch {}
+                }
+
+                // isOwner: fromMe OU numéro résolu (via lidMapping ou suffix strip)
                 const isOwner = fromMe
-                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
-                    || (MASTER_OWNER && normalize(senderNumber) === normalize(MASTER_OWNER))
-                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID)
-                    || (OWNER_LID && !senderIsLid && normalize(senderNumber) === normalize(OWNER));
+                    || (OWNER && normalize(resolvedLidToPn) === normalize(OWNER))
+                    || (MASTER_OWNER && normalize(resolvedLidToPn) === normalize(MASTER_OWNER))
+                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID);
 
                 const ct = getContentType(msg.message);
                 let body = '';

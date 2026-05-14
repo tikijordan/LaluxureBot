@@ -46,9 +46,8 @@ async function runYtdlp(url, isAudio, filePath) {
 
     // ── YouTube ────────────────────────────────────────────────
     if (isYoutube) {
-        // FIX 3 — ios/android/web_creator sont bloqués par YouTube depuis début 2025.
-        //          tv_embedded + mweb contournent la vérification bot sans cookies.
-        args.push('--extractor-args "youtube:player_client=tv_embedded,mweb"');
+        // FIX 3 — ios/android/web_creator fonctionnent mieux avec yt-dlp récent (2025+) pour éviter le blocage.
+        args.push('--extractor-args "youtube:player_client=ios,android,web_creator"');
         args.push('--age-limit 99');
         args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
         if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
