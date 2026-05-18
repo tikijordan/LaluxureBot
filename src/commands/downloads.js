@@ -34,7 +34,7 @@ async function runYtdlp(url, isAudio, filePath) {
     const isInstagram = /instagram\.com/i.test(url);
     const isFacebook  = /facebook\.com|fb\.watch/i.test(url);
 
-    const args = [
+    const baseArgs = [
         '--no-check-certificate',
         '--no-cache-dir',
         '--socket-timeout 30',
@@ -42,48 +42,74 @@ async function runYtdlp(url, isAudio, filePath) {
         `-o "${filePath}"`,
     ];
 
-    // ── YouTube ────────────────────────────────────────────────
-    if (isYoutube) {
-        // tv_embedded + mweb contournent la vérification bot sans cookies en 2025
-        args.push('--extractor-args "youtube:player_client=tv_embedded,mweb"');
-        args.push('--age-limit 99');
-        args.push('--add-header "User-Agent: Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"');
-        // Cookies optionnels si configurés
-        if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE) && fs.statSync(process.env.YT_COOKIES_FILE).size > 0) {
-            args.push(`--cookies "${process.env.YT_COOKIES_FILE}"`);
+    const ytCookiesFile = process.env.YT_COOKIES_FILE;
+    const tiktokAppName = process.env.TIKTOK_APP_NAME || 'tiktok_web';
+    const proxyUrl = process.env.YTDLP_PROXY || process.env.PROXY_URL || '';
+
+    const buildArgs = ({ ytClient, tiktokImpersonate } = {}) => {
+        const args = [...baseArgs];
+
+        if (proxyUrl) {
+            args.push(`--proxy "${proxyUrl}"`);
         }
-    }
 
-    // ── TikTok ─────────────────────────────────────────────────
-    if (isTiktok) {
-        // curl_cffi est installé dans le Dockerfile → impersonation chrome disponible
-        args.push('--impersonate chrome');
-        const cookiesPath = path.join(process.cwd(), 'cookies.txt');
-        if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
-            args.push(`--cookies "${cookiesPath}"`);
+        // ── YouTube ────────────────────────────────────────────────
+        if (isYoutube) {
+            const client = ytClient || 'ios,android,web_creator';
+            args.push(`--extractor-args "youtube:player_client=${client}"`);
+            args.push('--age-limit 99');
+            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
+            if (ytCookiesFile && fs.existsSync(ytCookiesFile) && fs.statSync(ytCookiesFile).size > 0) {
+                args.push(`--cookies "${ytCookiesFile}"`);
+            }
         }
-    }
 
-    // ── Instagram / Facebook ────────────────────────────────────
-    if (isInstagram || isFacebook) {
-        args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
-    }
+        // ── TikTok ─────────────────────────────────────────────────
+        if (isTiktok) {
+            const useImpersonate = tiktokImpersonate !== false;
+            if (useImpersonate) args.push('--impersonate chrome');
+            args.push(`--extractor-args "tiktok:app_name=${tiktokAppName}"`);
+            const cookiesPath = path.join(process.cwd(), 'cookies.txt');
+            if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
+                args.push(`--cookies "${cookiesPath}"`);
+            }
+            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
+        }
 
-    if (isAudio) {
-        args.push('-x', '--audio-format mp3', '--audio-quality 0');
-    } else {
-        // Limiter à 480p pour rester sous 60MB sur Railway
-        args.push(
-            '-f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best"',
-            '--merge-output-format mp4'
-        );
-    }
+        // ── Instagram / Facebook ────────────────────────────────────
+        if (isInstagram || isFacebook) {
+            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
+        }
 
-    const cmd = `yt-dlp ${args.join(' ')} "${url}"`;
+        if (isAudio) {
+            args.push('-x', '--audio-format mp3', '--audio-quality 0');
+        } else {
+            // Limiter à 480p pour rester sous 60MB sur Railway
+            args.push(
+                '-f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best"',
+                '--merge-output-format mp4'
+            );
+        }
+
+        return args;
+    };
+
+    const execWithArgs = (args) => execPromise(`yt-dlp ${args.join(' ')} "${url}"`, { timeout: PROCESS_TIMEOUT });
+
     try {
-        return await execPromise(cmd, { timeout: PROCESS_TIMEOUT });
+        return await execWithArgs(buildArgs());
     } catch (e) {
         const stderr = e.stderr || e.message || '';
+        const lower = stderr.toLowerCase();
+
+        if (isYoutube && (lower.includes('po token') || lower.includes('http error 403') || lower.includes('sabr'))) {
+            return await execWithArgs(buildArgs({ ytClient: 'tv_embedded,mweb' }));
+        }
+
+        if (isTiktok && (lower.includes('impersonation') || lower.includes('no impersonate target'))) {
+            return await execWithArgs(buildArgs({ tiktokImpersonate: false }));
+        }
+
         if (stderr.includes('429') || stderr.includes('Too Many Requests')) {
             throw new Error('🚫 Plateforme temporairement bloquée. Réessaie dans quelques minutes.');
         }
