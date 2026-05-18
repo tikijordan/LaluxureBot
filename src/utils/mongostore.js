@@ -160,8 +160,9 @@ export async function saveSessionMongo(sessionId, number, authPath) {
         const files = readSessionFiles(authPath);
         if (Object.keys(files).length === 0) return false;
 
-        // Supprimer les autres sessions ayant le même numéro (unicité)
-        await collection.deleteMany({ number });
+        // NE PAS faire deleteMany({ number }) ici — ça supprimait toutes les autres
+        // sessions du même numéro à chaque sauvegarde (catastrophique en cas de doublon)
+        // L'unicité est gérée manuellement depuis le dashboard
 
         // Sauvegarder en BD
         await collection.updateOne(
