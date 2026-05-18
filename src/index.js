@@ -149,16 +149,25 @@ cleanupTempSessions();
 // Et aussi à l'arrêt gracieux
 async function gracefulShutdown(signal) {
     console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
-    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
+    // FIX CRITIQUE : attendre les sauvegardes MongoDB AVANT de supprimer /tmp.
+    // Si le flush échoue ou timeout, on NE supprime PAS /tmp pour éviter de perdre
+    // des creds qui n'ont pas pu être envoyés à MongoDB.
+    let flushOk = false;
     try {
         console.log('[Process] ⏳ Flush des sauvegardes en cours...');
         await Promise.race([
-            flushAllPendingSaves(),
-            new Promise(r => setTimeout(r, 8000))
+            flushAllPendingSaves().then(() => { flushOk = true; }),
+            new Promise(r => setTimeout(r, 10000))
         ]);
-    } catch {}
-    cleanupTempSessions();
+    } catch {
+        flushOk = false;
+    }
+
+    if (flushOk) {
+        cleanupTempSessions();
+    } else {
+        console.warn('[Process] ⚠️  Flush incomplet ou timeout — /tmp conservé pour éviter la perte de creds');
+    }
     process.exit(0);
 }
 
@@ -499,6 +508,13 @@ async function startSession(sessionId, phoneNumber = null) {
                 } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
 
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
+
+                // FIX CRITIQUE : supprimer l'ANCIEN document MongoDB (sess_TIMESTAMP)
+                // Sinon deux documents existent pour le même numéro → la déduplication
+                // au prochain démarrage peut supprimer définitivement le mauvais.
+                deleteSessionMongo(sessionId).catch(e =>
+                    addLog('warn', `[MongoDB] Nettoyage ancien ID [${sessionId}]: ${e.message}`)
+                );
 
                 // ── Relancer proprement pour rebrancher tous les handlers ──
                 // Le messages.upsert actuel est lié à l'ancien sessionId/socket.

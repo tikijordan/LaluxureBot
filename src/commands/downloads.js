@@ -44,7 +44,17 @@ async function runYtdlp(url, isAudio, filePath) {
 
     const ytCookiesFile = process.env.YT_COOKIES_FILE;
     const tiktokAppName = process.env.TIKTOK_APP_NAME || 'tiktok_web';
-    const proxyUrl = process.env.YTDLP_PROXY || process.env.PROXY_URL || '';
+    const torEnabled = ['1', 'true', 'yes'].includes((process.env.TOR_PROXY || '').toLowerCase());
+    const rawProxyUrl = process.env.YTDLP_PROXY || process.env.PROXY_URL || (torEnabled ? 'socks5h://127.0.0.1:9050' : '');
+    let proxyUrl = '';
+    if (rawProxyUrl) {
+        try {
+            const parsed = new URL(rawProxyUrl);
+            if (parsed.port && /^\d+$/.test(parsed.port)) {
+                proxyUrl = rawProxyUrl;
+            }
+        } catch {}
+    }
 
     const buildArgs = ({ ytClient, tiktokImpersonate } = {}) => {
         const args = [...baseArgs];
@@ -96,6 +106,10 @@ async function runYtdlp(url, isAudio, filePath) {
 
     const execWithArgs = (args) => execPromise(`yt-dlp ${args.join(' ')} "${url}"`, { timeout: PROCESS_TIMEOUT });
 
+    if (rawProxyUrl && !proxyUrl) {
+        throw new Error('⚠️ Proxy invalide. Utilise un format type http://user:pass@host:8080');
+    }
+
     try {
         return await execWithArgs(buildArgs());
     } catch (e) {
@@ -115,6 +129,9 @@ async function runYtdlp(url, isAudio, filePath) {
         }
         if (stderr.includes('Sign in to confirm') || stderr.includes('bot')) {
             throw new Error('🔐 YouTube demande une vérification. Essaie avec un autre lien.');
+        }
+        if (isTiktok && (lower.includes('video unavailable') || lower.includes('private') || lower.includes('status code') || lower.includes('access'))) {
+            throw new Error('⚠️ TikTok a refusé la vidéo (blocage IP ou privée). Essaie un proxy/cookies.');
         }
         if (stderr.includes('Video unavailable') || stderr.includes('not available')) {
             throw new Error('❌ Vidéo indisponible ou privée.');

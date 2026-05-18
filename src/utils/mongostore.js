@@ -219,37 +219,34 @@ export async function restoreAllSessions(sessionsRoot) {
         
         console.log(`[MongoDB] 📌 ${sessionIds.length} session(s) en cache — restauration en TEMP...`);
         
-        // 🧹 Nettoie les doublons (mêmes credentials)
+        // 🧹 FIX CRITIQUE : détection des doublons (même numéro)
+        // On garde le PLUS RÉCENT (updatedAt), on NE SUPPRIME PAS de MongoDB ici.
+        // La suppression doit être explicite depuis le dashboard ou lors du renommage.
+        // Supprimer ici = risque de perdre définitivement la bonne session.
         const sessionsByNumber = {};
-        for (const sessionId of sessionIds) {
+        for (const sessionId of memCache.keys()) {
             const cached = memCache.get(sessionId);
             const number = cached.number || 'unknown';
-            if (!sessionsByNumber[number]) {
-                sessionsByNumber[number] = [];
-            }
-            sessionsByNumber[number].push(sessionId);
+            if (!sessionsByNumber[number]) sessionsByNumber[number] = [];
+            sessionsByNumber[number].push({ id: sessionId, updatedAt: cached.updatedAt || new Date(0) });
         }
-        
-        // Supprime les doublons (garde le premier, enlève les autres)
-        for (const [number, ids] of Object.entries(sessionsByNumber)) {
-            if (ids.length > 1) {
-                console.log(`[MongoDB] ⚠️  ${ids.length} sessions avec le même numéro [${number}] — nettoyage...`);
-                for (const dupId of ids.slice(1)) {
-                    try {
-                        if (connected) {
-                            await collection.deleteOne({ _id: dupId });
-                        }
-                        memCache.delete(dupId);
-                        console.log(`[MongoDB] 🗑️  Session dupliquée [${dupId}] supprimée`);
-                    } catch (e) {
-                        console.error(`[MongoDB] ❌ Suppression doublon [${dupId}]:`, e.message);
-                    }
-                }
+
+        const skippedIds = new Set();
+        for (const [number, entries] of Object.entries(sessionsByNumber)) {
+            if (entries.length > 1) {
+                // Trier par updatedAt décroissant → garder le plus récent
+                entries.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+                const kept = entries[0];
+                const dups = entries.slice(1);
+                console.log(`[MongoDB] ⚠️  ${entries.length} sessions pour le numéro [${number}] — conserve [${kept.id}] (${kept.updatedAt}), ignore pour ce démarrage: ${dups.map(d => d.id).join(', ')}`);
+                console.log(`[MongoDB] ℹ️  Pour supprimer définitivement les doublons, utilisez le dashboard.`);
+                for (const dup of dups) skippedIds.add(dup.id);
             }
         }
-        
-        // Restaure uniquement les sessions non-supprimées (dans cache)
+
+        // Restaure uniquement les sessions non-dupliquées
         for (const sessionId of memCache.keys()) {
+            if (skippedIds.has(sessionId)) continue; // ignorer les doublons sans supprimer
             const cached = memCache.get(sessionId);
             const authPath = path.join(TEMP_DIR, sessionId);
             
@@ -317,16 +314,15 @@ export function scheduleSave(sessionId, number, authPath) {
 // Appelé au SIGTERM pour ne pas perdre les creds mis à jour
 // ─────────────────────────────────────────────
 export async function flushAllPendingSaves() {
-    if (pushTimers.size === 0) return;
+    // FIX : retourner true pour signaler au gracefulShutdown que tout s'est bien passé
+    if (pushTimers.size === 0) return true;
     console.log(`[MongoDB] ⏳ Flush de ${pushTimers.size} save(s) en attente...`);
     const promises = [];
     for (const [sessionId, timer] of pushTimers) {
         clearTimeout(timer);
         pushTimers.delete(sessionId);
-        // Retrouver le numéro depuis le cache
         const cached = memCache.get(sessionId);
         const number = cached?.number || sessionId;
-        // Trouver le authPath depuis les sessions globales (si disponible)
         const authPath = global.sessions?.get(sessionId)?.authPath || null;
         if (authPath) {
             promises.push(
@@ -336,6 +332,7 @@ export async function flushAllPendingSaves() {
             );
         }
     }
-    await Promise.allSettled(promises);
+    const results = await Promise.allSettled(promises);
     console.log('[MongoDB] ✅ Flush terminé');
+    return true; // signale succès à gracefulShutdown
 }

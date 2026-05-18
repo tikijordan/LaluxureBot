@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     wget \
     ca-certificates \
+    tor \
     python3 \
     python3-pip \
     python3-dev \
@@ -26,6 +27,11 @@ RUN mkdir -p /root/.config/yt-dlp && \
     printf -- "--no-check-certificates\n--socket-timeout 30\n--no-playlist\n" \
     > /root/.config/yt-dlp/config
 
+# Configurer Tor (SOCKS + ControlPort pour rotation IP)
+RUN mkdir -p /etc/tor && \
+    printf -- "SocksPort 9050\nControlPort 9051\nCookieAuthentication 0\n" \
+    > /etc/tor/torrc
+
 WORKDIR /app
 
 # Copier et installer les dépendances Node
@@ -46,4 +52,6 @@ RUN mkdir -p /tmp/bot-downloads /app/sessions /app/data /app/data/stats /app/dat
 
 EXPOSE 3000
 
-CMD ["node", "src/index.js"]
+RUN chmod +x /app/docker-entrypoint.sh
+
+CMD ["/app/docker-entrypoint.sh"]
