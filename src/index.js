@@ -147,7 +147,23 @@ function cleanupTempSessions() {
 cleanupTempSessions();
 
 // Et aussi à l'arrêt gracieux
-// SIGTERM/SIGINT handled in loadExistingSessions (avec lock release)
+async function gracefulShutdown(signal) {
+    console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
+    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
+    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
+    try {
+        console.log('[Process] ⏳ Flush des sauvegardes en cours...');
+        await Promise.race([
+            flushAllPendingSaves(),
+            new Promise(r => setTimeout(r, 8000))
+        ]);
+    } catch {}
+    cleanupTempSessions();
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
@@ -411,6 +427,15 @@ async function startSession(sessionId, phoneNumber = null) {
 
     // Écouter les mappings LID→PN émis par Baileys
     // { pn: "237693552769@s.whatsapp.net", lid: "34347558133923@lid" }
+    // Tracker toute activité Baileys pour détecter une connexion morte
+    // (readyState peut rester OPEN même si la connexion TCP est coupée)
+    const markActivity = () => { state.lastActivity = Date.now(); };
+    sock.ev.on('creds.update',       markActivity);
+    sock.ev.on('presence.update',    markActivity);
+    sock.ev.on('chats.update',       markActivity);
+    sock.ev.on('contacts.update',    markActivity);
+    sock.ev.on('lid-mapping.update', markActivity);
+
     sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
         if (!pn || !lid) return;
         const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
@@ -438,11 +463,9 @@ async function startSession(sessionId, phoneNumber = null) {
             if (!state.ownerLid && num) {
                 try {
                     const ownerPnJid = num + '@s.whatsapp.net';
-                    // getLIDsForPNs retourne { [pnJid]: { lid, pn } } — pas un tableau
                     const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([ownerPnJid]);
-                    const first = pairs ? Object.values(pairs)[0] : null;
-                    if (first?.lid) {
-                        state.ownerLid = first.lid.split('@')[0];
+                    if (pairs && pairs.length > 0) {
+                        state.ownerLid = pairs[0].lid.split('@')[0];
                         addLog('info', `[${sessionId}] ownerLid résolu: ${state.ownerLid}`);
                     }
                 } catch {}
@@ -817,15 +840,33 @@ setInterval(async () => {
             continue;
         }
 
-        // Ping léger pour maintenir la connexion active
+        // Détecter connexion TCP morte silencieuse (readyState=OPEN mais rien ne passe)
+        // Si aucune activité Baileys depuis 10 min → connexion morte → reconnexion
+        const SILENT_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+        const idle = Date.now() - (state.lastActivity || Date.now());
+        if (idle > SILENT_TIMEOUT) {
+            addLog('warn', `[Watchdog] [${id}] Silence depuis ${Math.round(idle/60000)}min — connexion TCP probablement morte — reconnexion forcée`);
+            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+            state.connection = 'close';
+            try { state.sock.ws?.terminate?.(); } catch {}
+            try { state.sock.ws?.close(); } catch {}
+            try { state.sock.end(); } catch {}
+            scheduleReconnect(id, 3000);
+            continue;
+        }
+
+        // Ping léger pour maintenir la connexion active + vérifier qu'elle répond
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
+            state.lastActivity = Date.now(); // le ping lui-même compte comme activité
         } catch (e) {
             addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
+            try { state.sock.ws?.terminate?.(); } catch {}
             try { state.sock.ws?.close(); } catch {}
             try { state.sock.end(); } catch {}
             scheduleReconnect(id, 5000);
@@ -874,23 +915,12 @@ async function loadExistingSessions() {
             },
         });
 
-        const shutdown = async (signal) => {
-            console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
+        const shutdown = async () => {
             try { hb.stop(); } catch {}
-            // Flush des sauvegardes MongoDB en attente avant de quitter
-            try {
-                await Promise.race([
-                    flushAllPendingSaves(),
-                    new Promise(r => setTimeout(r, 8000))
-                ]);
-            } catch {}
-            // Nettoyer /tmp et relâcher le lock
-            cleanupTempSessions();
             try { await releaseLock({ db, lockName, ownerId }); } catch {}
-            process.exit(0);
         };
-        process.on('SIGINT',  () => shutdown('SIGINT'));
-        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', shutdown);
+        process.on('SIGTERM', shutdown);
 
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
