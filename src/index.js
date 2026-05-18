@@ -323,9 +323,17 @@ async function autoSaveViewOnce(sock, msg, OWNER, ctx) {
 // phoneNumber optionnel → active le pairing code au lieu du QR
 async function startSession(sessionId, phoneNumber = null) {
     const existing = sessions.get(sessionId);
-    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
-        addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
-        return; 
+    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) {
+        // Vérifier que le socket est vraiment vivant avant d'ignorer
+        const wsState = existing.sock?.ws?.readyState;
+        const socketAlive = wsState === 0 || wsState === 1; // CONNECTING ou OPEN
+        if (socketAlive) {
+            addLog('warn',`Session ${sessionId} ignorée : ${existing.connection} (wsState=${wsState})`);
+            return;
+        }
+        // Socket mort malgré state=open → laisser redémarrer
+        addLog('warn',`Session ${sessionId} : state=${existing.connection} mais socket mort (wsState=${wsState}) — redémarrage forcé`);
+        existing.connection = 'close';
     }
 
     // Si une reconnexion est en file d'attente pour cette session, on la remplace par cet appel
@@ -427,15 +435,6 @@ async function startSession(sessionId, phoneNumber = null) {
 
     // Écouter les mappings LID→PN émis par Baileys
     // { pn: "237693552769@s.whatsapp.net", lid: "34347558133923@lid" }
-    // Tracker toute activité Baileys pour détecter une connexion morte
-    // (readyState peut rester OPEN même si la connexion TCP est coupée)
-    const markActivity = () => { state.lastActivity = Date.now(); };
-    sock.ev.on('creds.update',       markActivity);
-    sock.ev.on('presence.update',    markActivity);
-    sock.ev.on('chats.update',       markActivity);
-    sock.ev.on('contacts.update',    markActivity);
-    sock.ev.on('lid-mapping.update', markActivity);
-
     sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
         if (!pn || !lid) return;
         const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
@@ -840,33 +839,15 @@ setInterval(async () => {
             continue;
         }
 
-        // Détecter connexion TCP morte silencieuse (readyState=OPEN mais rien ne passe)
-        // Si aucune activité Baileys depuis 10 min → connexion morte → reconnexion
-        const SILENT_TIMEOUT = 10 * 60 * 1000; // 10 minutes
-        const idle = Date.now() - (state.lastActivity || Date.now());
-        if (idle > SILENT_TIMEOUT) {
-            addLog('warn', `[Watchdog] [${id}] Silence depuis ${Math.round(idle/60000)}min — connexion TCP probablement morte — reconnexion forcée`);
-            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
-            state.connection = 'close';
-            try { state.sock.ws?.terminate?.(); } catch {}
-            try { state.sock.ws?.close(); } catch {}
-            try { state.sock.end(); } catch {}
-            scheduleReconnect(id, 3000);
-            continue;
-        }
-
-        // Ping léger pour maintenir la connexion active + vérifier qu'elle répond
+        // Ping léger pour maintenir la connexion active
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
-            state.lastActivity = Date.now(); // le ping lui-même compte comme activité
         } catch (e) {
             addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
-            try { state.sock.ws?.terminate?.(); } catch {}
             try { state.sock.ws?.close(); } catch {}
             try { state.sock.end(); } catch {}
             scheduleReconnect(id, 5000);
