@@ -146,24 +146,7 @@ function cleanupTempSessions() {
 // Nettoyer le TEMP au démarrage (ne garder que ce qui est en MongoDB)
 cleanupTempSessions();
 
-// Et aussi à l'arrêt gracieux
-async function gracefulShutdown(signal) {
-    console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
-    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
-    try {
-        console.log('[Process] ⏳ Flush des sauvegardes en cours...');
-        await Promise.race([
-            flushAllPendingSaves(),
-            new Promise(r => setTimeout(r, 8000))
-        ]);
-    } catch {}
-    cleanupTempSessions();
-    process.exit(0);
-}
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+// SIGTERM/SIGINT gérés dans loadExistingSessions (avec lock release + flush)
 
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION GLOBALE — empêche de traiter deux fois le même message
@@ -393,12 +376,11 @@ async function startSession(sessionId, phoneNumber = null) {
 
     // ── Sauvegarde sur disque d'abord, PUIS MongoDB + SESSION_STRING ──
     sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
-        await saveCreds(); // Attendre que l'écriture sur le disque local soit terminée
-        
-        // ── Sauvegarde synchrone/immédiate forcée ──
-        saveSessionMongo(state.id, state.connectedNumber || state.id, state.authPath).catch(() => {});
+        await saveCreds(); // Écriture disque local
 
-        // Sauvegarde MongoDB avec debounce
+        // Sauvegarde MongoDB immédiate ET avec debounce (double filet)
+        // await ici pour que SIGTERM ne coupe pas la sauvegarde en cours
+        await saveSessionMongo(state.id, state.connectedNumber || state.id, state.authPath).catch(() => {});
         scheduleSave(state.id, state.connectedNumber || state.id, state.authPath);
         
         // Mettre à jour la SESSION_STRING en mémoire
@@ -470,8 +452,7 @@ async function startSession(sessionId, phoneNumber = null) {
             state.pairingCode = null;
             state.connectedNumber = num;
             state.lastActivity    = Date.now();
-            state.lastConnectedAt = Date.now();
-            state._401count = 0; // reset compteur 401 sur connexion réussie
+            state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
 
             // Reset backoff sur connexion OK
             reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
@@ -493,17 +474,9 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
 
-                // Supprimer l'ancienne session de MongoDB (creds liés à sess_XXXXX)
-                // et sauvegarder immédiatement sous le nouveau nom (numéro)
-                try {
-                    await deleteSessionMongo(sessionId);
-                    await saveSessionMongo(num, num, newPath);
-                    addLog('info', `[MongoDB] Session migrée [${sessionId}] → [${num}]`);
-                } catch(e) {
-                    addLog('warn', `[MongoDB] Migration session: ${e.message}`);
-                }
-
-                // Relancer proprement pour rebrancher tous les handlers
+                // ── Relancer proprement pour rebrancher tous les handlers ──
+                // Le messages.upsert actuel est lié à l'ancien sessionId/socket.
+                // On ferme et on repart proprement sur le bon numéro.
                 addLog('info', `[${num}] Redémarrage automatique des handlers...`);
                 try { sock.end(); } catch {}
                 setTimeout(() => {
@@ -897,12 +870,25 @@ async function loadExistingSessions() {
             },
         });
 
-        const shutdown = async () => {
+        const shutdown = async (signal) => {
+            console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
             try { hb.stop(); } catch {}
+            // Flush des sauvegardes MongoDB en attente (max 10s)
+            try {
+                await Promise.race([
+                    flushAllPendingSaves(),
+                    new Promise(r => setTimeout(r, 10000))
+                ]);
+                console.log('[Process] ✅ Flush terminé');
+            } catch {}
+            // Relâcher le lock distribué
             try { await releaseLock({ db, lockName, ownerId }); } catch {}
+            // Nettoyer /tmp APRÈS le flush
+            cleanupTempSessions();
+            process.exit(0);
         };
-        process.on('SIGINT', shutdown);
-        process.on('SIGTERM', shutdown);
+        process.on('SIGINT',  () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
 
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
