@@ -149,25 +149,16 @@ cleanupTempSessions();
 // Et aussi à l'arrêt gracieux
 async function gracefulShutdown(signal) {
     console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-    // FIX CRITIQUE : attendre les sauvegardes MongoDB AVANT de supprimer /tmp.
-    // Si le flush échoue ou timeout, on NE supprime PAS /tmp pour éviter de perdre
-    // des creds qui n'ont pas pu être envoyés à MongoDB.
-    let flushOk = false;
+    // Attendre que toutes les sauvegardes MongoDB en cours finissent (max 8s)
+    // avant de supprimer /tmp — sinon les creds mis à jour sont perdus
     try {
         console.log('[Process] ⏳ Flush des sauvegardes en cours...');
         await Promise.race([
-            flushAllPendingSaves().then(() => { flushOk = true; }),
-            new Promise(r => setTimeout(r, 10000))
+            flushAllPendingSaves(),
+            new Promise(r => setTimeout(r, 8000))
         ]);
-    } catch {
-        flushOk = false;
-    }
-
-    if (flushOk) {
-        cleanupTempSessions();
-    } else {
-        console.warn('[Process] ⚠️  Flush incomplet ou timeout — /tmp conservé pour éviter la perte de creds');
-    }
+    } catch {}
+    cleanupTempSessions();
     process.exit(0);
 }
 
@@ -332,17 +323,9 @@ async function autoSaveViewOnce(sock, msg, OWNER, ctx) {
 // phoneNumber optionnel → active le pairing code au lieu du QR
 async function startSession(sessionId, phoneNumber = null) {
     const existing = sessions.get(sessionId);
-    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) {
-        // Vérifier que le socket est vraiment vivant avant d'ignorer
-        const wsState = existing.sock?.ws?.readyState;
-        const socketAlive = wsState === 0 || wsState === 1; // CONNECTING ou OPEN
-        if (socketAlive) {
-            addLog('warn',`Session ${sessionId} ignorée : ${existing.connection} (wsState=${wsState})`);
-            return;
-        }
-        // Socket mort malgré state=open → laisser redémarrer
-        addLog('warn',`Session ${sessionId} : state=${existing.connection} mais socket mort (wsState=${wsState}) — redémarrage forcé`);
-        existing.connection = 'close';
+    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
+        addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
+        return; 
     }
 
     // Si une reconnexion est en file d'attente pour cette session, on la remplace par cet appel
@@ -487,7 +470,8 @@ async function startSession(sessionId, phoneNumber = null) {
             state.pairingCode = null;
             state.connectedNumber = num;
             state.lastActivity    = Date.now();
-            state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
+            state.lastConnectedAt = Date.now();
+            state._401count = 0; // reset compteur 401 sur connexion réussie
 
             // Reset backoff sur connexion OK
             reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
@@ -509,16 +493,17 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
 
-                // FIX CRITIQUE : supprimer l'ANCIEN document MongoDB (sess_TIMESTAMP)
-                // Sinon deux documents existent pour le même numéro → la déduplication
-                // au prochain démarrage peut supprimer définitivement le mauvais.
-                deleteSessionMongo(sessionId).catch(e =>
-                    addLog('warn', `[MongoDB] Nettoyage ancien ID [${sessionId}]: ${e.message}`)
-                );
+                // Supprimer l'ancienne session de MongoDB (creds liés à sess_XXXXX)
+                // et sauvegarder immédiatement sous le nouveau nom (numéro)
+                try {
+                    await deleteSessionMongo(sessionId);
+                    await saveSessionMongo(num, num, newPath);
+                    addLog('info', `[MongoDB] Session migrée [${sessionId}] → [${num}]`);
+                } catch(e) {
+                    addLog('warn', `[MongoDB] Migration session: ${e.message}`);
+                }
 
-                // ── Relancer proprement pour rebrancher tous les handlers ──
-                // Le messages.upsert actuel est lié à l'ancien sessionId/socket.
-                // On ferme et on repart proprement sur le bon numéro.
+                // Relancer proprement pour rebrancher tous les handlers
                 addLog('info', `[${num}] Redémarrage automatique des handlers...`);
                 try { sock.end(); } catch {}
                 setTimeout(() => {
