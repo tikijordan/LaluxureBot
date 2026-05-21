@@ -1259,6 +1259,8 @@ button:hover{background:#1fb858}
     // ──────────────────────────────────────────────────────────
 
     // GET /api/health — Endpoint pour cron jobs (UptimeRobot, easycron, etc.)
+    // Par défaut on renvoie 200 même si 0 session connectée (évite alertes auto).
+    // Pour un check strict: ?strict=1 ou STRICT_HEALTH_CHECK=1 → 503 si 0 connectée.
     if (pathname==='/api/health' && method==='GET') {
         const sessionsList = [...sessions.values()].map(s => ({
             id: s.id,
@@ -1267,8 +1269,9 @@ button:hover{background:#1fb858}
             lastActivity: s.lastActivity
         }));
         const connectedCount = sessionsList.filter(s => s.status === 'open').length;
-        // Retourner 503 si aucune session connectée → UptimeRobot peut alerter
-        const httpStatus = connectedCount > 0 ? 200 : 503;
+        const strict = url.searchParams.get('strict') === '1' || process.env.STRICT_HEALTH_CHECK === '1';
+        // Retourner 503 seulement si strict activé et aucune session connectée
+        const httpStatus = (strict && connectedCount === 0) ? 503 : 200;
         return sendJson(res, {
             status: connectedCount > 0 ? 'ok' : 'degraded',
             uptime: Math.round((Date.now() - startTime) / 1000),
@@ -1454,7 +1457,7 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
 //   SELF_PING=0              → désactiver (si tu utilises UptimeRobot à la place)
 //   SELF_PING_URL=https://…  → forcer une URL précise (recommandé sur Render)
 //
-// Sur Render : ajoute SELF_PING_URL=https://<ton-app>.onrender.com/api/health
+// Sur Render : ajoute SELF_PING_URL=https://<ton-app>.onrender.com/api/status
 // ══════════════════════════════════════════════════════════════
 (function startSelfPing() {
     if (process.env.SELF_PING === '0') return;
@@ -1464,11 +1467,11 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
     function getPingUrl() {
         if (process.env.SELF_PING_URL) return process.env.SELF_PING_URL;
         // Render expose RENDER_EXTERNAL_URL automatiquement
-        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/health`;
+        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/status`;
         // Railway
-        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/health`;
+        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/status`;
         // Fallback localhost
-        return `http://127.0.0.1:${PORT}/api/health`;
+        return `http://127.0.0.1:${PORT}/api/status`;
     }
 
     const doSelfPing = () => {

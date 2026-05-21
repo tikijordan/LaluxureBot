@@ -29,7 +29,7 @@ RUN mkdir -p /root/.config/yt-dlp && \
 
 # Configurer Tor (SOCKS + ControlPort pour rotation IP)
 RUN mkdir -p /etc/tor && \
-    printf -- "SocksPort 9050\nControlPort 9051\nCookieAuthentication 0\n" \
+    printf -- "SocksPort 9050\nControlPort 9051\nCookieAuthentication 1\nCookieAuthFile /tmp/tor_auth_cookie\nLog notice file /tmp/tor_log\n" \
     > /etc/tor/torrc
 
 WORKDIR /app

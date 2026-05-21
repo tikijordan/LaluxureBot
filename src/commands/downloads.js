@@ -5,6 +5,7 @@
  */
 
 import { exec } from 'child_process';
+import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import util from 'util';
@@ -20,6 +21,76 @@ const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
     : path.join(process.cwd(), 'downloads');
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+const TOR_COOKIE_PATHS = [
+    process.env.TOR_CONTROL_COOKIE,
+    '/tmp/tor_auth_cookie',
+    '/run/tor/control.authcookie',
+    '/var/run/tor/control.authcookie',
+].filter(Boolean);
+
+function isTorEnabled() {
+    return ['1', 'true', 'yes'].includes((process.env.TOR_PROXY || '').toLowerCase());
+}
+
+function isTorRotationEnabled() {
+    const raw = (process.env.TOR_ROTATE_ON_BLOCK ?? '1').toString().toLowerCase();
+    return ['1', 'true', 'yes'].includes(raw);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function readTorAuthCookieHex() {
+    for (const p of TOR_COOKIE_PATHS) {
+        try {
+            if (fs.existsSync(p)) return fs.readFileSync(p).toString('hex');
+        } catch {}
+    }
+    return null;
+}
+
+async function sendTorControl(command) {
+    const host = process.env.TOR_CONTROL_HOST || '127.0.0.1';
+    const port = parseInt(process.env.TOR_CONTROL_PORT || '9051', 10);
+    const password = process.env.TOR_CONTROL_PASSWORD || '';
+    const cookieHex = readTorAuthCookieHex();
+
+    return new Promise((resolve, reject) => {
+        const socket = net.createConnection({ host, port }, () => {
+            let authCmd = 'AUTHENTICATE';
+            if (password) authCmd = `AUTHENTICATE "${password}"`;
+            else if (cookieHex) authCmd = `AUTHENTICATE ${cookieHex}`;
+            else authCmd = 'AUTHENTICATE ""';
+            socket.write(`${authCmd}\r\n${command}\r\nQUIT\r\n`);
+        });
+
+        // Timeout : évite que la Promise reste en suspens si le port est inaccessible
+        socket.setTimeout(5000, () => {
+            socket.destroy();
+            reject(new Error('Tor control port timeout (5s)'));
+        });
+
+        let buffer = '';
+        socket.on('data', (data) => { buffer += data.toString(); });
+        socket.on('error', reject);
+        socket.on('end', () => {
+            if (buffer.includes('250 OK')) return resolve(buffer);
+            reject(new Error(buffer.trim() || 'Tor control error'));
+        });
+    });
+}
+
+async function rotateTorIdentity() {
+    try {
+        await sendTorControl('SIGNAL NEWNYM');
+        return true;
+    } catch (e) {
+        console.warn('[Tor] Rotation IP impossible:', e.message);
+        return false;
+    }
+}
 
 function cleanup(filePath) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
@@ -44,7 +115,10 @@ async function runYtdlp(url, isAudio, filePath) {
 
     const ytCookiesFile = process.env.YT_COOKIES_FILE;
     const tiktokAppName = process.env.TIKTOK_APP_NAME || 'tiktok_web';
-    const torEnabled = ['1', 'true', 'yes'].includes((process.env.TOR_PROXY || '').toLowerCase());
+    const torEnabled = isTorEnabled();
+    const rotateOnBlock = torEnabled && isTorRotationEnabled();
+    const maxRotations = Math.max(0, parseInt(process.env.TOR_MAX_ROTATIONS || '4', 10));
+    const rotationDelayMs = Math.max(10000, parseInt(process.env.TOR_ROTATE_DELAY_MS || '10000', 10));
     const rawProxyUrl = process.env.YTDLP_PROXY || process.env.PROXY_URL || (torEnabled ? 'socks5h://127.0.0.1:9050' : '');
     let proxyUrl = '';
     if (rawProxyUrl) {
@@ -110,39 +184,77 @@ async function runYtdlp(url, isAudio, filePath) {
         throw new Error('⚠️ Proxy invalide. Utilise un format type http://user:pass@host:8080');
     }
 
-    try {
-        return await execWithArgs(buildArgs());
-    } catch (e) {
-        const stderr = e.stderr || e.message || '';
-        const lower = stderr.toLowerCase();
+    const totalAttempts = rotateOnBlock ? maxRotations + 1 : 1;
+    let lastError;
 
-        if (isYoutube && (lower.includes('po token') || lower.includes('http error 403') || lower.includes('sabr'))) {
-            return await execWithArgs(buildArgs({ ytClient: 'tv_embedded,mweb' }));
-        }
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+        try {
+            return await execWithArgs(buildArgs());
+        } catch (e) {
+            let stderr = e.stderr || e.message || '';
+            let lower = stderr.toLowerCase();
 
-        if (isTiktok && (lower.includes('impersonation') || lower.includes('no impersonate target'))) {
-            return await execWithArgs(buildArgs({ tiktokImpersonate: false }));
-        }
+            if (isYoutube && (lower.includes('po token') || lower.includes('http error 403') || lower.includes('sabr'))) {
+                try {
+                    return await execWithArgs(buildArgs({ ytClient: 'tv_embedded,mweb' }));
+                } catch (err2) {
+                    e = err2;
+                    stderr = err2.stderr || err2.message || '';
+                    lower = stderr.toLowerCase();
+                }
+            }
 
-        if (stderr.includes('429') || stderr.includes('Too Many Requests')) {
-            throw new Error('🚫 Plateforme temporairement bloquée. Réessaie dans quelques minutes.');
+            if (isTiktok && (lower.includes('impersonation') || lower.includes('no impersonate target'))) {
+                try {
+                    return await execWithArgs(buildArgs({ tiktokImpersonate: false }));
+                } catch (err2) {
+                    e = err2;
+                    stderr = err2.stderr || err2.message || '';
+                    lower = stderr.toLowerCase();
+                }
+            }
+
+            const blockNeedles = [
+                'http error 403', 'status code 403', 'forbidden', '429', 'too many requests',
+                'captcha', 'sign in to confirm', 'unusual traffic', 'access denied', 'blocked',
+            ];
+            const tiktokBlockNeedles = [
+                'video unavailable', 'private', 'status code', 'access', 'not available',
+            ];
+
+            const isBlocked = blockNeedles.some(n => lower.includes(n)) ||
+                (isTiktok && tiktokBlockNeedles.some(n => lower.includes(n)));
+
+            if (isBlocked && rotateOnBlock && attempt < totalAttempts) {
+                console.warn(`[Tor] Blocage détecté — rotation IP (${attempt}/${totalAttempts - 1})`);
+                const rotated = await rotateTorIdentity();
+                if (rotated) await sleep(rotationDelayMs);
+                lastError = e;
+                continue;
+            }
+
+            if (stderr.includes('429') || stderr.includes('Too Many Requests')) {
+                throw new Error('🚫 Plateforme temporairement bloquée. Réessaie dans quelques minutes.');
+            }
+            if (stderr.includes('Sign in to confirm') || stderr.includes('bot')) {
+                throw new Error('🔐 YouTube demande une vérification. Essaie avec un autre lien.');
+            }
+            if (isTiktok && (lower.includes('video unavailable') || lower.includes('private') || lower.includes('status code') || lower.includes('access'))) {
+                throw new Error('⚠️ TikTok a refusé la vidéo (blocage IP ou privée). Essaie un proxy/cookies.');
+            }
+            if (stderr.includes('Video unavailable') || stderr.includes('not available')) {
+                throw new Error('❌ Vidéo indisponible ou privée.');
+            }
+            if (stderr.includes('timeout') || e.killed) {
+                throw new Error('⏱️ Téléchargement trop long (>90s). Essaie une vidéo plus courte.');
+            }
+            const firstLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
+                || stderr.split('\n')[0];
+            throw new Error(firstLine || e.message);
         }
-        if (stderr.includes('Sign in to confirm') || stderr.includes('bot')) {
-            throw new Error('🔐 YouTube demande une vérification. Essaie avec un autre lien.');
-        }
-        if (isTiktok && (lower.includes('video unavailable') || lower.includes('private') || lower.includes('status code') || lower.includes('access'))) {
-            throw new Error('⚠️ TikTok a refusé la vidéo (blocage IP ou privée). Essaie un proxy/cookies.');
-        }
-        if (stderr.includes('Video unavailable') || stderr.includes('not available')) {
-            throw new Error('❌ Vidéo indisponible ou privée.');
-        }
-        if (stderr.includes('timeout') || e.killed) {
-            throw new Error('⏱️ Téléchargement trop long (>90s). Essaie une vidéo plus courte.');
-        }
-        const firstLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
-            || stderr.split('\n')[0];
-        throw new Error(firstLine || e.message);
     }
+
+    throw new Error(lastError?.message || '❌ Téléchargement échoué après rotation Tor.');
 }
 
 // ── Téléchargement vidéo commun ────────────────────────────────
