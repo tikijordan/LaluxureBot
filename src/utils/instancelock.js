@@ -16,15 +16,20 @@ function now() {
     return new Date();
 }
 
-function ms(n) {
-    return n;
-}
+// FIX: ms() était définie mais jamais utilisée — supprimée
 
 export function buildOwnerId() {
     const pid = process.pid;
     const host = os.hostname();
     const unique = Math.random().toString(16).slice(2);
     return `${host}:${pid}:${unique}`;
+}
+
+// FIX: MongoDB driver v5+ retourne le document directement (plus de .value)
+// Cette fonction normalise les deux formats pour compatibilité ascendante
+function extractDoc(result) {
+    if (!result) return null;
+    return result.value !== undefined ? result.value : result;
 }
 
 /**
@@ -40,44 +45,40 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
     const nowDate = now();
     const expiresAt = new Date(nowDate.getTime() + ttlMs);
 
-    // TTL index (best effort)
+    // TTL index (best effort) — expireAfterSeconds=0 => Mongo supprime à expiresAt
     try {
-        // expireAfterSeconds = 0 => Mongo supprime à expiresAt
         await col.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
     } catch {}
 
     // 1) tenter de créer si absent
     try {
-        await col.insertOne({
-            _id: lockName,
-            ownerId,
-            updatedAt: nowDate,
-            expiresAt,
-        });
+        await col.insertOne({ _id: lockName, ownerId, updatedAt: nowDate, expiresAt });
         return { ok: true, reason: 'created' };
     } catch {
-        // ignore duplicate
+        // ignore duplicate key error
     }
 
     // 2) tenter d'acquérir si expiré
-    const acquired = await col.findOneAndUpdate(
-        { _id: lockName, expiresAt: { $lte: nowDate } },
-        { $set: { ownerId, updatedAt: nowDate, expiresAt } },
-        { returnDocument: 'after' }
+    const acquiredDoc = extractDoc(
+        await col.findOneAndUpdate(
+            { _id: lockName, expiresAt: { $lte: nowDate } },
+            { $set: { ownerId, updatedAt: nowDate, expiresAt } },
+            { returnDocument: 'after' }
+        )
     );
-    const acquiredDoc = acquired?.value || acquired;
     if (acquiredDoc?.ownerId === ownerId) return { ok: true, reason: 'expired-acquired' };
 
-    // 3) renouveler si on est owner
-    const renewed = await col.findOneAndUpdate(
-        { _id: lockName, ownerId },
-        { $set: { updatedAt: nowDate, expiresAt } },
-        { returnDocument: 'after' }
+    // 3) renouveler si on est déjà owner
+    const renewedDoc = extractDoc(
+        await col.findOneAndUpdate(
+            { _id: lockName, ownerId },
+            { $set: { updatedAt: nowDate, expiresAt } },
+            { returnDocument: 'after' }
+        )
     );
-    const renewedDoc = renewed?.value || renewed;
     if (renewedDoc?.ownerId === ownerId) return { ok: true, reason: 'renewed' };
 
-    // 4) sinon lock détenu par quelqu'un d'autre
+    // 4) lock détenu par quelqu'un d'autre
     const doc = await col.findOne({ _id: lockName });
     return { ok: false, reason: 'held', holder: doc?.ownerId || 'unknown', expiresAt: doc?.expiresAt };
 }
@@ -90,7 +91,14 @@ export async function releaseLock({ db, lockName, ownerId }) {
 }
 
 /**
- * Démarre un renouvellement périodique.
+ * Démarre un renouvellement périodique du lock.
+ *
+ * FIX: le premier tick est retardé de intervalMs (pas immédiat) pour éviter
+ * un renouvellement inutile juste après l'acquisition initiale.
+ *
+ * FIX: compteur de failures consécutives — si la DB est instable pendant
+ * MAX_CONSECUTIVE_FAILURES ticks, onLost() est appelé pour éviter deux
+ * instances actives en silence.
  */
 export function startLockHeartbeat({
     db,
@@ -101,27 +109,34 @@ export function startLockHeartbeat({
     onLost,
 }) {
     let stopped = false;
+    const MAX_CONSECUTIVE_FAILURES = 3;
+    let consecutiveFailures = 0;
 
     const tick = async () => {
         if (stopped) return;
         try {
             const res = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+            consecutiveFailures = 0; // reset sur succès
             if (!res.ok) {
                 stopped = true;
                 onLost?.(res);
             }
         } catch (e) {
-            // Si DB instable, on ne coupe pas brutalement
-            // mais on signale qu'on n'a pas pu renouveler.
-            // Au prochain tick, ça retentera.
+            // DB instable : on ne coupe pas immédiatement, mais on compte les échecs
+            consecutiveFailures++;
+            console.warn(`[Lock] Heartbeat erreur (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${e.message}`);
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                stopped = true;
+                console.error('[Lock] Trop d\'erreurs consécutives — lock considéré perdu (DB instable)');
+                onLost?.({ ok: false, reason: 'db-unavailable' });
+            }
         }
     };
 
+    // FIX: premier tick après intervalMs, pas immédiatement
+    // (le lock vient juste d'être acquis — pas besoin de le renouveler de suite)
     const timer = setInterval(tick, intervalMs);
     timer.unref?.();
-
-    // premier tick immédiat
-    tick();
 
     return {
         stop: () => {

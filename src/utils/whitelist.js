@@ -17,8 +17,13 @@
 import fs from 'fs'; import path from 'path'; import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(__dirname, '../../data/whitelist.json');
-function load() { try { return JSON.parse(fs.readFileSync(FILE,'utf8')); } catch { return {}; } }
-function save(d) { fs.writeFileSync(FILE, JSON.stringify(d,null,2)); }
+let _cache = null;
+function load() {
+    if (_cache) return _cache;
+    try { _cache = JSON.parse(fs.readFileSync(FILE,'utf8')); } catch { _cache = {}; }
+    return _cache;
+}
+function save(d) { _cache = d; fs.writeFileSync(FILE, JSON.stringify(d,null,2)); }
 export function addToWhitelist(groupId, number) {
   const d = load(); if (!d[groupId]) d[groupId] = [];
   if (!d[groupId].includes(number)) d[groupId].push(number); save(d);

@@ -50,32 +50,36 @@ export async function connectMongo() {
     }
     try {
         client = new MongoClient(MONGODB_URI, {
-            serverSelectionTimeoutMS: 15000,  // 15s pour la sélection du serveur
-            connectTimeoutMS:        15000,   // 15s pour la connexion
-            socketTimeoutMS:         15000,   // 15s pour les opérations socket
+            serverSelectionTimeoutMS: 15000,
+            connectTimeoutMS:        15000,
+            socketTimeoutMS:         15000,
         });
         await client.connect();
         const db = client.db(DB_NAME);
         collection = db.collection(COLLECTION);
-        // Index sur _id (sessionId) — déjà par défaut, on ajoute updatedAt pour TTL optionnel
         await collection.createIndex({ updatedAt: 1 });
         connected = true;
         console.log('[MongoDB] ✅ Connecté à Atlas');
-        
-        // Pré-charger toutes les sessions en mémoire au démarrage (avec timeout)
-        const preloadPromise = preloadSessionsToMemory();
-        // Attendre max 10s, sinon continuer sans pré-charge
-        Promise.race([
-            preloadPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Preload timeout')), 10000))
-        ]).catch(e => {
+
+        // Pré-charger toutes les sessions en mémoire (await avec timeout de 10s)
+        // FIX: était non-awaité → connectMongo() retournait true avant que le cache soit prêt
+        try {
+            await Promise.race([
+                preloadSessionsToMemory(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Preload timeout')), 10000))
+            ]);
+        } catch (e) {
             console.warn('[MongoDB] ⚠️  Preload sessions timeout/erreur (continuant sans cache):', e.message);
-        });
-        
+        }
+
         return true;
     } catch (e) {
         console.error('[MongoDB] ❌ Connexion échouée:', e.message);
         connected = false;
+        // FIX: reset client pour permettre une nouvelle tentative propre
+        try { await client?.close(); } catch {}
+        client = null;
+        collection = null;
         return false;
     }
 }
@@ -114,28 +118,23 @@ function readSessionFiles(authPath) {
     const result = {};
     if (!fs.existsSync(authPath)) return result;
 
-    // creds.json à la racine
-    const credsPath = path.join(authPath, 'creds.json');
-    if (fs.existsSync(credsPath)) {
-        result['creds.json'] = fs.readFileSync(credsPath, 'utf-8');
-    }
-
-    // Sous-dossiers (keys/, app-state-sync/, etc.)
-    const entries = fs.readdirSync(authPath, { withFileTypes: true });
-    for (const entry of entries) {
-        if (entry.isDirectory()) {
-            const subDir = path.join(authPath, entry.name);
-            for (const f of fs.readdirSync(subDir)) {
-                const fp = path.join(subDir, f);
-                if (fs.statSync(fp).isFile()) {
-                    result[`${entry.name}/${f}`] = fs.readFileSync(fp, 'utf-8');
-                }
+    // Lecture récursive pour couvrir tous les sous-dossiers (keys/, app-state-sync/, etc.)
+    function readDir(dir, prefix) {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                readDir(fullPath, relPath);
+            } else if (entry.name.endsWith('.json')) {
+                try {
+                    result[relPath] = fs.readFileSync(fullPath, 'utf-8');
+                } catch {}
             }
-        } else if (entry.name.endsWith('.json') && entry.name !== 'creds.json') {
-            result[entry.name] = fs.readFileSync(path.join(authPath, entry.name), 'utf-8');
         }
     }
 
+    readDir(authPath, '');
     return result;
 }
 
@@ -302,11 +301,14 @@ export async function listSessionsMongo() {
 const pushTimers = new Map(); // sessionId → timer
 
 export function scheduleSave(sessionId, number, authPath) {
+    // FIX: authPath capturé ici à l'appel (pas dans le callback) pour éviter
+    // les problèmes si la session est renommée avant l'exécution du timeout
+    const capturedPath = authPath;
     if (pushTimers.has(sessionId)) clearTimeout(pushTimers.get(sessionId));
     pushTimers.set(sessionId, setTimeout(async () => {
         pushTimers.delete(sessionId);
-        await saveSessionMongo(sessionId, number, authPath);
-    }, 2000)); // attendre 2s d'inactivité avant de sauvegarder
+        await saveSessionMongo(sessionId, number, capturedPath);
+    }, 2000));
 }
 
 // ─────────────────────────────────────────────
@@ -314,7 +316,6 @@ export function scheduleSave(sessionId, number, authPath) {
 // Appelé au SIGTERM pour ne pas perdre les creds mis à jour
 // ─────────────────────────────────────────────
 export async function flushAllPendingSaves() {
-    // FIX : retourner true pour signaler au gracefulShutdown que tout s'est bien passé
     if (pushTimers.size === 0) return true;
     console.log(`[MongoDB] ⏳ Flush de ${pushTimers.size} save(s) en attente...`);
     const promises = [];
@@ -323,16 +324,33 @@ export async function flushAllPendingSaves() {
         pushTimers.delete(sessionId);
         const cached = memCache.get(sessionId);
         const number = cached?.number || sessionId;
-        const authPath = global.sessions?.get(sessionId)?.authPath || null;
-        if (authPath) {
-            promises.push(
-                saveSessionMongo(sessionId, number, authPath)
-                    .then(() => console.log(`[MongoDB] ✅ Flush [${sessionId}]`))
-                    .catch(e => console.warn(`[MongoDB] ⚠️ Flush [${sessionId}]: ${e.message}`))
-            );
+
+        // FIX: chercher l'authPath depuis global.sessions, mais aussi depuis toutes
+        // les sessions si la session a été renommée (l'ancien sessionId ne matche plus)
+        let authPath = global.sessions?.get(sessionId)?.authPath || null;
+        if (!authPath) {
+            // Parcourir toutes les sessions pour trouver celle qui correspond au numéro
+            if (global.sessions) {
+                for (const [, s] of global.sessions) {
+                    if ((s.id === sessionId || s.connectedNumber === number) && s.authPath) {
+                        authPath = s.authPath;
+                        break;
+                    }
+                }
+            }
         }
+        // Dernier recours : reconstruire le chemin depuis TEMP_DIR
+        if (!authPath) {
+            authPath = path.join(TEMP_DIR, sessionId);
+        }
+
+        promises.push(
+            saveSessionMongo(sessionId, number, authPath)
+                .then(() => console.log(`[MongoDB] ✅ Flush [${sessionId}]`))
+                .catch(e => console.warn(`[MongoDB] ⚠️ Flush [${sessionId}]: ${e.message}`))
+        );
     }
-    const results = await Promise.allSettled(promises);
+    await Promise.allSettled(promises);
     console.log('[MongoDB] ✅ Flush terminé');
-    return true; // signale succès à gracefulShutdown
+    return true;
 }

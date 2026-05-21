@@ -184,12 +184,8 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         }
     }
 
-    // ── Vérification accès private / public ───────────────────
-    if (command.private && !isOwner) {
-        return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
-    }
-
-    if (command.public === false && !isOwner) {
+    // ── Vérification accès private ────────────────────────────
+    if ((command.private || command.public === false) && !isOwner) {
         return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
     }
 

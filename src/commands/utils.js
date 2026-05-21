@@ -25,8 +25,14 @@ import { getUserStats } from '../utils/stats.js';
 
 const math = create(all);
 
-// Évaluation sécurisée (interdire les fonctions dangereuses)
-const limitedEvaluate = math.evaluate;
+// Évaluation sécurisée — scope vide pour bloquer import/require/process/etc.
+const limitedEvaluate = (expr) => {
+    // Bloquer les tentatives d'accès aux propriétés dangereuses
+    if (/\b(import|require|process|global|__dirname|__filename|fetch|XMLHttpRequest|eval|Function)\b/.test(expr)) {
+        throw new Error('Expression non autorisée');
+    }
+    return math.evaluate(expr);
+};
 
 export default {
   qrcode: {

@@ -164,7 +164,7 @@ async function downloadVideo({ sock, from, text, msg }) {
         if (size > MAX_SIZE_BYTES) {
             cleanup(filePath);
             return sock.sendMessage(from, {
-                text: `❌ Fichier trop lourd (${Math.round(size / 1024 / 1024)} Mo > 60 Mo).\nEssaie une vidéo plus courte ou utilise !play pour l'audio.`
+                text: `❌ Fichier trop lourd (${Math.round(size / 1024 / 1024)} Mo > 250 Mo).\nEssaie une vidéo plus courte ou utilise !play pour l'audio.`
             });
         }
 

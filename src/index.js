@@ -515,21 +515,30 @@ async function startSession(sessionId, phoneNumber = null) {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
             }, 30_000);
 
-            // ── HEALTH CHECK TOUTES LES 5 MIN — force reconnexion si inactif longtemps ──
+            // ── HEALTH CHECK TOUTES LES 2 MIN ──
+            // Vérifie readyState=3 (CLOSED sans événement) ET zombie silencieux
             if (state.healthCheckInterval) clearInterval(state.healthCheckInterval);
-            // FIX: healthCheck simplifié — le watchdog gère déjà la détection socket mort.
-            // On ne ferme plus la connexion ici pour éviter les doubles reconnexions.
             state.healthCheckInterval = setInterval(async () => {
                 const wsState = sock.ws?.readyState;
-                // readyState: 0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED
                 if (wsState === 3) {
-                    // Socket définitivement fermé sans que connection.update ne soit émis
                     addLog('warn', `[${state.id}] Health check: socket CLOSED sans événement — reconnexion`);
                     state.connection = 'close';
                     scheduleReconnect(state.id, 3000);
+                    return;
                 }
-                // Sinon : le watchdog s'en occupe via le ping toutes les 60s
-            }, 2 * 60 * 1000); // check toutes les 2 minutes
+                // Zombie check : si lastActivity est vieille de > 25min ET pong échoue
+                const inactiveSince = Date.now() - (state.lastActivity || state.lastConnectedAt || 0);
+                if (wsState === 1 && inactiveSince > 25 * 60 * 1000) {
+                    const alive = await wsPingCheck(sock);
+                    if (!alive) {
+                        addLog('warn', `[${state.id}] Health check: zombie confirmé — reconnexion`);
+                        state.connection = 'close';
+                        try { sock.ws?.close(); } catch {}
+                        try { sock.end(); } catch {}
+                        scheduleReconnect(state.id, 5000);
+                    }
+                }
+            }, 2 * 60 * 1000);
         }
 
         if (connection === 'close') {
@@ -707,7 +716,7 @@ async function startSession(sessionId, phoneNumber = null) {
                         const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
                         if (!['public', 'private', 'botmode'].includes(cmdCheck)) {
                             await sock.sendMessage(from, {
-                                text: `tu n'es pas l'admin.`,
+                                text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.',
                             });
                             continue;
                         }
@@ -790,22 +799,48 @@ function restoreFromEnvSessionString() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// WATCHDOG — détection socket mort uniquement
-// FIX: FORCE_RECONNECT_INTERVAL supprimé — déclenchait des reconnexions toutes les 4h
-// qui pouvaient aboutir à un loggedOut (401) sans retour.
-// FIX: ZOMBIE_TIMEOUT supprimé — un bot peu actif n'est pas mort.
-const WATCHDOG_INTERVAL = 60 * 1000; // check toutes les 60s
+// WATCHDOG — détection socket mort + zombies silencieux
+//
+// Problème sur Railway : après ~24h, le WebSocket reste readyState=1 (OPEN)
+// mais WhatsApp ne délivre plus de messages (connexion fantôme/zombie).
+// sendPresenceUpdate() peut encore "réussir" côté WS sans que WA ack le paquet.
+//
+// Solution : double critère
+//   1. readyState !== 1 → mort certain → reconnexion immédiate
+//   2. lastActivity > ZOMBIE_THRESHOLD → SUSPECT → on envoie un ping WS bas niveau
+//      via sock.ws.ping() avec timeout de 10s. Si pas de pong → zombie → reconnexion.
+// ══════════════════════════════════════════════════════════════
+const WATCHDOG_INTERVAL   = 60 * 1000;       // check toutes les 60s
+const ZOMBIE_THRESHOLD_MS = 20 * 60 * 1000;  // 20 min sans aucun message reçu = suspect
+const PING_TIMEOUT_MS     = 10 * 1000;        // 10s pour recevoir le pong WS
+
+function wsPingCheck(sock) {
+    return new Promise((resolve) => {
+        const ws = sock.ws;
+        if (!ws || typeof ws.ping !== 'function') { resolve(true); return; } // pas de support ping → on laisse passer
+        const t = setTimeout(() => resolve(false), PING_TIMEOUT_MS); // timeout = zombie
+        try {
+            ws.ping(undefined, false, (err) => {
+                clearTimeout(t);
+                resolve(!err); // err = pas de pong ou WS fermé
+            });
+        } catch {
+            clearTimeout(t);
+            resolve(false);
+        }
+    });
+}
 
 setInterval(async () => {
     const now = Date.now();
     for (const [id, state] of sessions) {
         if (state.connection !== 'open' || !state.sock) continue;
 
-        // Vérifier que le WebSocket est vraiment ouvert (readyState 1 = OPEN)
+        // ── 1. Socket clairement fermé (readyState !== OPEN) ──
         const wsState = state.sock.ws?.readyState;
         if (wsState !== undefined && wsState !== 1) {
             addLog('warn', `[Watchdog] [${id}] WebSocket fermé (readyState=${wsState}) — reconnexion`);
-            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+            if (state.pingInterval)      { clearInterval(state.pingInterval);      state.pingInterval = null; }
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
             try { state.sock.end(); } catch {}
@@ -813,14 +848,36 @@ setInterval(async () => {
             continue;
         }
 
-        // Ping léger pour maintenir la connexion active
+        // ── 2. Détection zombie : inactif depuis ZOMBIE_THRESHOLD ──
+        const lastActivity = state.lastActivity || state.lastConnectedAt || 0;
+        const inactiveSince = now - lastActivity;
+        if (inactiveSince > ZOMBIE_THRESHOLD_MS) {
+            addLog('info', `[Watchdog] [${id}] Inactif depuis ${Math.round(inactiveSince/60000)}min — vérification WS ping...`);
+            const alive = await wsPingCheck(state.sock);
+            if (!alive) {
+                addLog('warn', `[Watchdog] [${id}] Zombie détecté (pas de pong après ${PING_TIMEOUT_MS/1000}s) — reconnexion forcée`);
+                if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
+                if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+                state.connection = 'close';
+                try { state.sock.ws?.close(); } catch {}
+                try { state.sock.end(); } catch {}
+                scheduleReconnect(id, 5000);
+                continue;
+            }
+            // Pong reçu : connexion WS vivante, juste pas de messages (bot peu actif)
+            addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK, bot inactif normalement`);
+            // Forcer la mise à jour lastActivity pour éviter les checks répétés inutiles
+            state.lastActivity = now;
+        }
+
+        // ── 3. Ping léger pour maintenir la connexion active ──
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
         } catch (e) {
-            addLog('warn', `[Watchdog] [${id}] Ping échoué: ${e.message} — reconnexion`);
-            if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
-            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+            addLog('warn', `[Watchdog] [${id}] sendPresence échoué: ${e.message} — reconnexion`);
+            if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
+            if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
             try { state.sock.ws?.close(); } catch {}
             try { state.sock.end(); } catch {}
@@ -933,7 +990,7 @@ async function loadExistingSessions() {
         // Beaucoup de comptes connectés en même temps déclenchent souvent des 440.
         // Par défaut, on démarre une seule session (la plus récente) pour stabiliser.
         // Pour démarrer toutes les sessions: START_ALL_SESSIONS=1
-        const startAll = process.env.START_ALL_SESSIONS !== '0'; // actif par défaut
+        const startAll = process.env.START_ALL_SESSIONS === '1'; // désactivé par défaut — évite les 440 storm au démarrage
         const list = [...sessionsToStart].sort();
         const selected = startAll ? list : [list[list.length - 1]];
         addLog('info', `${selected.length}/${list.length} session(s) lancée(s): ${selected.join(', ')}${startAll ? '' : ' (START_ALL_SESSIONS=1 pour tout lancer)'}`);
@@ -945,11 +1002,7 @@ async function loadExistingSessions() {
     }
 }
 
-// Helpers
-function sendJson(res, data, status=200) {
-    res.writeHead(status, { 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' });
-    res.end(JSON.stringify(data));
-}
+// Helpers internes (usage non-HTTP)
 function readBody(req) {
     return new Promise(r => { let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{r(JSON.parse(b));}catch{r({});} }); });
 }
@@ -1081,7 +1134,16 @@ function getSessionToken(req) {
     return (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1] || null;
 }
 function recordFailedLogin(ip) {
-    checkLoginAttempt(ip);
+    const now = Date.now();
+    const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:now };
+    if (e.lockedUntil > now) return; // déjà bloqué
+    if (now - e.windowStart > LOGIN_WINDOW) { e.attempts=0; e.windowStart=now; }
+    e.attempts++;
+    if (e.attempts >= LOGIN_MAX) {
+        e.lockedUntil = now + LOCKOUT_TIME;
+        addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
+    }
+    loginTracker.set(ip, e);
 }
 function clearLoginAttempts(ip) {
     loginTracker.delete(ip);
@@ -1164,7 +1226,7 @@ button:hover{background:#1fb858}
         let b = '';
         await new Promise(r => { req.on('data',c=>b+=c.slice(0,500)); req.on('end',r); });
         const pwd = new URLSearchParams(b).get('password') || '';
-        if (pwd !== DASH_PASSWORD) {
+        if (!checkPassword(pwd)) {
             recordFailedLogin(ip);
             addLog('warn', `[Auth] Échec login depuis ${ip}`);
             res.writeHead(302,{Location:'/login?error=1'}); return res.end();
@@ -1204,13 +1266,16 @@ button:hover{background:#1fb858}
             messagesCount: s.messagesCount,
             lastActivity: s.lastActivity
         }));
-        
+        const connectedCount = sessionsList.filter(s => s.status === 'open').length;
+        // Retourner 503 si aucune session connectée → UptimeRobot peut alerter
+        const httpStatus = connectedCount > 0 ? 200 : 503;
         return sendJson(res, {
-            status: 'ok',
+            status: connectedCount > 0 ? 'ok' : 'degraded',
             uptime: Math.round((Date.now() - startTime) / 1000),
             sessions: sessionsList.length,
+            connected: connectedCount,
             timestamp: new Date().toISOString()
-        });
+        }, httpStatus);
     }
 
     // ──────────────────────────────────────────────────────────
@@ -1371,8 +1436,53 @@ button:hover{background:#1fb858}
     if (railwayUrl) addLog('success', `URL publique Railway: ${railwayUrl}`);
 
     if (DASH_PASSWORD === 'changeme') {
-        addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables Railway !');
+        addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables d\'environnement !');
     }
 });
 
 loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+
+// ══════════════════════════════════════════════════════════════
+// SELF-PING — Empêche Render (et Railway) de mettre le service en veille
+//
+// Render Free : s'endort après 15 min sans trafic HTTP → toutes les connexions
+//               WhatsApp sont coupées → le bot ne répond plus.
+// Render Paid  : pas de sleep, MAIS le zombie WhatsApp peut quand même arriver.
+// Ce self-ping toutes les 4 minutes maintient le service actif en permanence.
+//
+// Variables d'environnement :
+//   SELF_PING=0              → désactiver (si tu utilises UptimeRobot à la place)
+//   SELF_PING_URL=https://…  → forcer une URL précise (recommandé sur Render)
+//
+// Sur Render : ajoute SELF_PING_URL=https://<ton-app>.onrender.com/api/health
+// ══════════════════════════════════════════════════════════════
+(function startSelfPing() {
+    if (process.env.SELF_PING === '0') return;
+
+    const PING_INTERVAL_MS = 4 * 60 * 1000; // toutes les 4 min (< 15 min = seuil Render Free)
+
+    function getPingUrl() {
+        if (process.env.SELF_PING_URL) return process.env.SELF_PING_URL;
+        // Render expose RENDER_EXTERNAL_URL automatiquement
+        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/health`;
+        // Railway
+        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/health`;
+        // Fallback localhost
+        return `http://127.0.0.1:${PORT}/api/health`;
+    }
+
+    const doSelfPing = () => {
+        const url = getPingUrl();
+        axios.get(url, { timeout: 10000 })
+            .then(() => { /* ping silencieux — garder le service éveillé */ })
+            .catch(e => addLog('warn', `[SelfPing] Échec ping ${url}: ${e.message}`));
+    };
+
+    // Attendre 30s après le démarrage avant le premier ping
+    setTimeout(() => {
+        doSelfPing();
+        setInterval(doSelfPing, PING_INTERVAL_MS);
+    }, 30_000);
+
+    addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
+})();
