@@ -14,17 +14,18 @@ RUN apt-get update && apt-get install -y \
     rm -rf /var/lib/apt/lists/*
 
 # Installer curl_cffi (nécessaire pour TikTok impersonation) et yt-dlp via pip
-RUN pip3 install --break-system-packages curl_cffi yt-dlp
-
-# S'assurer que yt-dlp est à jour (optionnel, ne pas échouer si pas de connexion)
-RUN yt-dlp -U || echo "yt-dlp update skipped"
+RUN pip3 install --break-system-packages curl_cffi 
+RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -O /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
+    yt-dlp -U
 
 # Configurer yt-dlp :
 #  - player_client : ios + android + web_creator (bypass détection bot YouTube)
 #  - js-runtimes : node (runtime JS pour les extracteurs)
 #  - no-check-certificates : évite les erreurs SSL
 RUN mkdir -p /root/.config/yt-dlp && \
-    printf -- "--no-check-certificates\n--socket-timeout 30\n--no-playlist\n" \
+    printf -- "--js-runtimes node\n--extractor-args youtube:player_client=ios,android\n--no-check-certificates\n" \
     > /root/.config/yt-dlp/config
 
 # Configurer Tor (SOCKS + ControlPort pour rotation IP)

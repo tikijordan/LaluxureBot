@@ -110,6 +110,7 @@ async function runYtdlp(url, isAudio, filePath) {
         '--no-cache-dir',
         '--socket-timeout 30',
         '--no-playlist',
+        '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"',
         `-o "${filePath}"`,
     ];
 
@@ -142,7 +143,6 @@ async function runYtdlp(url, isAudio, filePath) {
             const client = ytClient || 'ios,android,web_creator';
             args.push(`--extractor-args "youtube:player_client=${client}"`);
             args.push('--age-limit 99');
-            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
             if (ytCookiesFile && fs.existsSync(ytCookiesFile) && fs.statSync(ytCookiesFile).size > 0) {
                 args.push(`--cookies "${ytCookiesFile}"`);
             }
@@ -157,12 +157,11 @@ async function runYtdlp(url, isAudio, filePath) {
             if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
                 args.push(`--cookies "${cookiesPath}"`);
             }
-            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
         }
 
         // ── Instagram / Facebook ────────────────────────────────────
         if (isInstagram || isFacebook) {
-            args.push('--add-header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"');
+            // user-agent défini dans baseArgs
         }
 
         if (isAudio) {
