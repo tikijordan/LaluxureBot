@@ -59,7 +59,7 @@ export async function forceReleaseExpiredLock({ db, lockName }) {
  * Reprend un lock dont le heartbeat est mort (ancienne instance Render crashée).
  * Si updatedAt > ttlMs sans renouvellement → vol légitime.
  */
-export async function forceStealStaleLock({ db, lockName, ownerId, ttlMs }) {
+export async function forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId = '' }) {
     if (!db) return false;
     try {
         const col = db.collection(COLLECTION);
@@ -67,7 +67,7 @@ export async function forceStealStaleLock({ db, lockName, ownerId, ttlMs }) {
         const stolen = extractDoc(
             await col.findOneAndUpdate(
                 { _id: lockName, updatedAt: { $lte: staleBefore } },
-                { $set: { ownerId, updatedAt: now(), expiresAt: new Date(now().getTime() + ttlMs) } },
+                { $set: { ownerId, updatedAt: now(), expiresAt: new Date(now().getTime() + ttlMs), deployId } },
                 { returnDocument: 'after' }
             )
         );
@@ -79,7 +79,60 @@ export async function forceStealStaleLock({ db, lockName, ownerId, ttlMs }) {
     return false;
 }
 
-export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
+/**
+ * Reprend le lock si un autre déploiement Render le détient encore (rolling deploy).
+ * L'ancien conteneur heartbeat toutes les 30s → forceStealStaleLock ne suffit pas.
+ */
+export async function forceStealOlderDeploy({ db, lockName, ownerId, ttlMs, deployId }) {
+    if (!db || !deployId) return false;
+    try {
+        const col = db.collection(COLLECTION);
+        const expiresAt = new Date(now().getTime() + ttlMs);
+        const patch = { ownerId, updatedAt: now(), expiresAt, deployId };
+
+        // Lock sans deployId (ancienne version) ou deployId différent → reprise immédiate
+        for (const filter of [
+            { _id: lockName, deployId: { $ne: deployId } },
+            { _id: lockName, deployId: { $exists: false } },
+        ]) {
+            const stolen = extractDoc(
+                await col.findOneAndUpdate(filter, { $set: patch }, { returnDocument: 'after' })
+            );
+            if (stolen?.ownerId === ownerId) {
+                console.log(`[Lock] Lock repris — nouveau déploiement (${deployId.slice(0, 8)})`);
+                return true;
+            }
+        }
+    } catch {}
+    return false;
+}
+
+/** Reprise forcée après échecs répétés (une seule instance Render attendue) */
+export async function forceTakeoverLock({ db, lockName, ownerId, ttlMs, deployId = '' }) {
+    if (!db) return false;
+    try {
+        const col = db.collection(COLLECTION);
+        await col.updateOne(
+            { _id: lockName },
+            { $set: { ownerId, updatedAt: now(), expiresAt: new Date(now().getTime() + ttlMs), deployId } },
+            { upsert: true }
+        );
+        console.log(`[Lock] Lock "${lockName}" repris de force (takeover)`);
+        return true;
+    } catch {}
+    return false;
+}
+
+export async function getLockInfo({ db, lockName }) {
+    if (!db) return null;
+    try {
+        return await db.collection(COLLECTION).findOne({ _id: lockName });
+    } catch {
+        return null;
+    }
+}
+
+export async function tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId = '' }) {
     if (!db) return { ok: true, reason: 'no-db' }; // fail-open si pas de DB
     const col = db.collection(COLLECTION);
 
@@ -91,9 +144,11 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
         await col.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
     } catch {}
 
+    const lockFields = { ownerId, updatedAt: nowDate, expiresAt, deployId };
+
     // 1) tenter de créer si absent
     try {
-        await col.insertOne({ _id: lockName, ownerId, updatedAt: nowDate, expiresAt });
+        await col.insertOne({ _id: lockName, ...lockFields });
         return { ok: true, reason: 'created' };
     } catch {
         // ignore duplicate key error
@@ -103,7 +158,7 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
     const acquiredDoc = extractDoc(
         await col.findOneAndUpdate(
             { _id: lockName, expiresAt: { $lte: nowDate } },
-            { $set: { ownerId, updatedAt: nowDate, expiresAt } },
+            { $set: lockFields },
             { returnDocument: 'after' }
         )
     );
@@ -113,7 +168,7 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
     const renewedDoc = extractDoc(
         await col.findOneAndUpdate(
             { _id: lockName, ownerId },
-            { $set: { updatedAt: nowDate, expiresAt } },
+            { $set: lockFields },
             { returnDocument: 'after' }
         )
     );
@@ -121,7 +176,13 @@ export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
 
     // 4) lock détenu par quelqu'un d'autre
     const doc = await col.findOne({ _id: lockName });
-    return { ok: false, reason: 'held', holder: doc?.ownerId || 'unknown', expiresAt: doc?.expiresAt };
+    return {
+        ok: false, reason: 'held',
+        holder: doc?.ownerId || 'unknown',
+        holderDeploy: doc?.deployId || null,
+        expiresAt: doc?.expiresAt,
+        updatedAt: doc?.updatedAt,
+    };
 }
 
 export async function releaseLock({ db, lockName, ownerId }) {

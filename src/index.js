@@ -186,7 +186,11 @@ import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getAggregatedStats } from './utils/stats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, saveAllActiveSessions, migrateSessionId } from './utils/mongostore.js';
-import { getInstanceOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock } from './utils/instancelock.js';
+import {
+    getInstanceOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock,
+    forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy,
+    forceTakeoverLock, getLockInfo,
+} from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
 import { extractMessageBody, resolveIsOwner } from './utils/message.js';
 
@@ -245,6 +249,19 @@ const reconnectTimerBySessionId = new Map(); // sessionId -> timeout
 let waInstanceAuthorized = false; // true seulement si cette instance détient le lock Mongo
 let lockHeartbeat = null;
 let lockContext = null; // { db, lockName, ownerId, ttlMs, hbMs }
+let lockRetryTimer = null;
+let lockRetryFailures = 0;
+
+let _deployId = null;
+function getDeployId() {
+    if (!_deployId) {
+        _deployId = process.env.RENDER_GIT_COMMIT
+            || process.env.FLY_MACHINE_VERSION
+            || process.env.INSTANCE_DEPLOY_ID
+            || `boot-${Date.now()}`;
+    }
+    return _deployId;
+}
 
 // Backoff par session pour éviter les storms (408/440)
 const reconnectBackoffBySessionId = new Map(); // sessionId -> { delayMs }
@@ -302,8 +319,7 @@ function scheduleReconnect(sessionId, delayMs = 3000, force = true) {
     const t = setTimeout(() => {
         reconnectTimerBySessionId.delete(sessionId);
         if (getMongoDb() && !waInstanceAuthorized) {
-            addLog('warn', `[${sessionId}] Reconnexion en attente du lock instance`);
-            retryWaStartIfLocked().catch(() => {});
+            scheduleLockRetry(15_000);
             return;
         }
         startSession(sessionId, null, { force });
@@ -443,16 +459,32 @@ function onInstanceLockLost(info) {
         st.connection = 'close';
         teardownSession(st);
     }
-    setTimeout(() => retryWaStartIfLocked().catch(() => {}), 30_000);
+    scheduleLockRetry(30_000);
 }
 
-async function acquireInstanceLock(db) {
+async function acquireInstanceLock(db, { forceTakeover = false } = {}) {
     const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
     const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '90000', 10);
     const ownerId = getInstanceOwnerId();
+    const deployId = getDeployId();
+
     await forceReleaseExpiredLock({ db, lockName });
-    await forceStealStaleLock({ db, lockName, ownerId, ttlMs });
-    return { ...(await tryAcquireLock({ db, lockName, ownerId, ttlMs })), lockName, ownerId, ttlMs };
+    await forceStealOlderDeploy({ db, lockName, ownerId, ttlMs, deployId });
+    await forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId });
+
+    if (forceTakeover) {
+        await forceTakeoverLock({ db, lockName, ownerId, ttlMs, deployId });
+    }
+
+    return { ...(await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId })), lockName, ownerId, ttlMs, deployId };
+}
+
+function scheduleLockRetry(delayMs = 60_000) {
+    if (lockRetryTimer) return;
+    lockRetryTimer = setTimeout(() => {
+        lockRetryTimer = null;
+        retryWaStartIfLocked().catch(() => {});
+    }, delayMs);
 }
 
 /** Relance WhatsApp si le lock était indisponible au boot */
@@ -461,12 +493,22 @@ async function retryWaStartIfLocked() {
     const db = getMongoDb();
     if (!db) return;
     const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '30000', 10);
-    const lockRes = await acquireInstanceLock(db);
+    const forceAfter = parseInt(process.env.INSTANCE_LOCK_FORCE_AFTER || '5', 10);
+    lockRetryFailures++;
+
+    const lockRes = await acquireInstanceLock(db, {
+        forceTakeover: lockRetryFailures >= forceAfter,
+    });
+
     if (!lockRes.ok) {
-        addLog('warn', `[Lock] Retry échoué (${lockRes.holder}) — nouvelle tentative dans 60s`);
-        setTimeout(() => retryWaStartIfLocked().catch(() => {}), 60_000);
+        const info = await getLockInfo({ db, lockName: lockRes.lockName });
+        const ageSec = info?.updatedAt ? Math.round((Date.now() - new Date(info.updatedAt).getTime()) / 1000) : '?';
+        addLog('warn', `[Lock] Retry ${lockRetryFailures}/${forceAfter} — holder=${lockRes.holder} deploy=${lockRes.holderDeploy || '?'} age=${ageSec}s — prochain essai 60s`);
+        scheduleLockRetry(60_000);
         return;
     }
+
+    lockRetryFailures = 0;
     waInstanceAuthorized = true;
     const { lockName, ownerId, ttlMs } = lockRes;
     lockContext = { db, lockName, ownerId, ttlMs, hbMs };
@@ -541,8 +583,7 @@ function scheduleOwnerLidResolution(sock, state) {
 // phoneNumber optionnel → active le pairing code au lieu du QR
 async function startSession(sessionId, phoneNumber = null, { force = false } = {}) {
     if (getMongoDb() && !waInstanceAuthorized) {
-        addLog('warn', `[${sessionId}] Démarrage bloqué — lock instance non acquis`);
-        setTimeout(() => retryWaStartIfLocked().catch(() => {}), 15_000);
+        scheduleLockRetry(15_000);
         return;
     }
 
@@ -1266,7 +1307,7 @@ async function loadExistingSessions() {
     // ── Démarrer les sessions ──
     if (mongoOk && !waInstanceAuthorized) {
         addLog('warn', '[Boot] WhatsApp en attente du lock — retry dans 30s');
-        setTimeout(() => retryWaStartIfLocked().catch(() => {}), 30_000);
+        scheduleLockRetry(30_000);
         return;
     }
 
