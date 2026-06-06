@@ -16,6 +16,8 @@ services:
       - key: MONGODB_URI
         sync: false
       - key: INSTANCE_LOCK_TTL_MS
+        value: "90000"
+      - key: INSTANCE_LOCK_HEARTBEAT_MS
         value: "30000"
       - key: DASHBOARD_PASSWORD
         sync: false

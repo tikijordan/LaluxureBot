@@ -35,9 +35,12 @@ export function resolveIsOwner({ fromMe, senderNumber, senderJid, OWNER, OWNER_L
 
     const senderLid = senderJid?.endsWith('@lid') ? senderJid.split('@')[0] : null;
     if (OWNER_LID && senderLid && senderLid === OWNER_LID) return true;
+    // senderNumber peut être le LID brut si non résolu
+    if (OWNER_LID && normSender && normSender === OWNER_LID) return true;
 
     const ownerLidCached = lidCache?.[normOwner];
     if (ownerLidCached && senderLid && senderLid === ownerLidCached) return true;
+    if (ownerLidCached && normSender && normSender === ownerLidCached) return true;
     if (OWNER_LID && normSender && lidCache?.[OWNER_LID] === normSender) return true;
 
     return false;

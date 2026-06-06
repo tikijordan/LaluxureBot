@@ -238,9 +238,16 @@ export async function restoreAllSessions(sessionsRoot) {
                 entries.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
                 const kept = entries[0];
                 const dups = entries.slice(1);
-                console.log(`[MongoDB] ⚠️  ${entries.length} sessions pour le numéro [${number}] — conserve [${kept.id}] (${kept.updatedAt}), ignore pour ce démarrage: ${dups.map(d => d.id).join(', ')}`);
-                console.log(`[MongoDB] ℹ️  Pour supprimer définitivement les doublons, utilisez le dashboard.`);
-                for (const dup of dups) skippedIds.add(dup.id);
+                console.log(`[MongoDB] ⚠️  ${entries.length} sessions pour [${number}] — garde [${kept.id}], supprime: ${dups.map(d => d.id).join(', ')}`);
+                for (const dup of dups) {
+                    skippedIds.add(dup.id);
+                    try {
+                        await collection.deleteOne({ _id: dup.id });
+                        memCache.delete(dup.id);
+                    } catch (e) {
+                        console.warn(`[MongoDB] Suppression doublon [${dup.id}]: ${e.message}`);
+                    }
+                }
             }
         }
 

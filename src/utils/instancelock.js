@@ -38,6 +38,16 @@ function extractDoc(result) {
  * - Si lock détenu par ownerId → renouvelé.
  * - Sinon → refusé.
  */
+/** Supprime un lock expiré avant tentative d'acquisition (redéploiement Render) */
+export async function forceReleaseExpiredLock({ db, lockName }) {
+    if (!db) return;
+    try {
+        const col = db.collection(COLLECTION);
+        const res = await col.deleteOne({ _id: lockName, expiresAt: { $lte: now() } });
+        if (res.deletedCount) console.log(`[Lock] Lock expiré "${lockName}" libéré`);
+    } catch {}
+}
+
 export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
     if (!db) return { ok: true, reason: 'no-db' }; // fail-open si pas de DB
     const col = db.collection(COLLECTION);
@@ -109,7 +119,7 @@ export function startLockHeartbeat({
     onLost,
 }) {
     let stopped = false;
-    const MAX_CONSECUTIVE_FAILURES = 3;
+    const MAX_CONSECUTIVE_FAILURES = 8;
     let consecutiveFailures = 0;
 
     const tick = async () => {
