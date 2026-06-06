@@ -185,7 +185,7 @@ import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getAggregatedStats } from './utils/stats.js';
 import { getBotMode } from './commands/security.js';
-import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves } from './utils/mongostore.js';
+import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, saveAllActiveSessions, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
 import { extractMessageBody, resolveIsOwner } from './utils/message.js';
@@ -514,6 +514,10 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                 } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
 
                 addLog('success', `Session renommée [${sessionId}] → [${num}]`);
+
+                // Migrer MongoDB : supprimer l'ancien ID (sess_xxx) → garder le numéro
+                migrateSessionId(sessionId, num, num, newPath)
+                    .catch(e => addLog('warn', `[MongoDB] Migration session: ${e.message}`));
 
                 // ── Relancer proprement pour rebrancher tous les handlers ──
                 // Le messages.upsert actuel est lié à l'ancien sessionId/socket.
@@ -918,15 +922,22 @@ async function loadExistingSessions() {
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
         const ownerId = buildOwnerId();
 
-        const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+        let lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
         if (!lockRes.ok) {
-            addLog('warn', `[Lock] Une autre instance détient le lock (${lockRes.holder}) — WhatsApp ne sera pas démarré ici.`);
-            // On laisse le dashboard/API tourner mais sans connexions WA.
-            return;
+            addLog('warn', `[Lock] Lock détenu par ${lockRes.holder} — nouvelle tentative (redéploiement Render)...`);
+            const lockDeadline = Date.now() + 90_000;
+            while (!lockRes.ok && Date.now() < lockDeadline) {
+                await new Promise(r => setTimeout(r, 5000));
+                lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+            }
         }
-        addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
+        if (!lockRes.ok) {
+            addLog('warn', `[Lock] Impossible d'acquérir le lock (${lockRes.holder}) — restauration Mongo sans WhatsApp`);
+        } else {
+            addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
+        }
 
-        const hb = startLockHeartbeat({
+        const hb = lockRes.ok ? startLockHeartbeat({
             db,
             lockName,
             ownerId,
@@ -942,18 +953,21 @@ async function loadExistingSessions() {
                     clearReconnectTimer(id);
                 }
             },
-        });
+        }) : { stop: () => {} };
 
         const shutdown = async (signal) => {
             console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
             try { hb.stop(); } catch {}
-            // Flush des sauvegardes MongoDB en attente (max 10s)
+            // Sauvegarder toutes les sessions actives + flush debounce (max 20s)
             try {
                 await Promise.race([
-                    flushAllPendingSaves(),
-                    new Promise(r => setTimeout(r, 10000))
+                    (async () => {
+                        await saveAllActiveSessions(sessions);
+                        await flushAllPendingSaves();
+                    })(),
+                    new Promise(r => setTimeout(r, 20_000))
                 ]);
-                console.log('[Process] ✅ Flush terminé');
+                console.log('[Process] ✅ Sessions MongoDB sauvegardées');
             } catch {}
             // Relâcher le lock distribué
             try { await releaseLock({ db, lockName, ownerId }); } catch {}
@@ -988,8 +1002,9 @@ async function loadExistingSessions() {
             }
         }
     } else {
+        addLog('warn', '[MongoDB] ❌ Non connecté — vérifie MONGODB_URI sur Render + IP 0.0.0.0/0 sur Atlas');
         // ── Fallback SESSION_STRING env si MongoDB indisponible ──
-        addLog('warn', '[MongoDB] Indisponible — fallback SESSION_STRING');
+        addLog('warn', '[MongoDB] Fallback SESSION_STRING si défini');
         restoreFromEnvSessionString();
         
         // Charger depuis le dossier sessions/ si MongoDB échoue
@@ -1473,6 +1488,11 @@ button:hover{background:#1fb858}
 loadExistingSessions()
     .then(() => setTimeout(superviseSessions, 45_000))
     .catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+
+// Backup MongoDB toutes les 5 min (sécurité si Render coupe brutalement)
+setInterval(() => {
+    if (sessions.size > 0) saveAllActiveSessions(sessions).catch(() => {});
+}, 5 * 60 * 1000);
 
 // ══════════════════════════════════════════════════════════════
 // SELF-PING — Empêche Render (et Railway) de mettre le service en veille

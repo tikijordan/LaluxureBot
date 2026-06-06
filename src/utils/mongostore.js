@@ -103,7 +103,8 @@ async function preloadSessionsToMemory() {
                 updatedAt: doc.updatedAt
             });
         }
-        console.log(`[MongoDB] 📌 ${docs.length} session(s) chargée(s) en cache mémoire`);
+        const ids = docs.map(d => `${d._id} (${d.number || '?'})`).join(', ');
+        console.log(`[MongoDB] 📌 ${docs.length} session(s) en cache: ${ids || '(vide)'}`);
     } catch (e) {
         console.error('[MongoDB] ❌ Erreur preloadSessions:', e.message);
         // Continuer même si le preload échoue
@@ -315,6 +316,27 @@ export function scheduleSave(sessionId, number, authPath) {
 // FLUSH — Forcer l'exécution immédiate de tous les saves en attente
 // Appelé au SIGTERM pour ne pas perdre les creds mis à jour
 // ─────────────────────────────────────────────
+/** Sauvegarde immédiate de toutes les sessions actives (SIGTERM + backup périodique) */
+export async function saveAllActiveSessions(sessionsMap) {
+    if (!connected || !collection || !sessionsMap) return 0;
+    let saved = 0;
+    for (const [, state] of sessionsMap) {
+        if (!state?.authPath) continue;
+        const id = state.id || state.connectedNumber;
+        if (!id) continue;
+        const ok = await saveSessionMongo(id, state.connectedNumber || id, state.authPath).catch(() => false);
+        if (ok) saved++;
+    }
+    if (saved > 0) console.log(`[MongoDB] 💾 ${saved} session(s) sauvegardée(s)`);
+    return saved;
+}
+
+export async function migrateSessionId(oldId, newId, number, authPath) {
+    if (!connected || !collection || !oldId || !newId || oldId === newId) return;
+    await saveSessionMongo(newId, number || newId, authPath).catch(() => {});
+    if (oldId !== newId) await deleteSessionMongo(oldId).catch(() => {});
+}
+
 export async function flushAllPendingSaves() {
     if (pushTimers.size === 0) return true;
     console.log(`[MongoDB] ⏳ Flush de ${pushTimers.size} save(s) en attente...`);
