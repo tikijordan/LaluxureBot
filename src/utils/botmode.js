@@ -16,8 +16,7 @@
  */
 // ============================================================
 // BOT MODE — Gestion du mode d'accès au bot
-// private : seul l'owner peut utiliser toutes les commandes
-// public  : tout le monde peut utiliser les commandes normales
+// Accès owner-only permanent — seul le numéro connecté peut utiliser le bot
 // ============================================================
 
 import fs from 'fs';
@@ -32,8 +31,7 @@ function loadMode() {
   try {
     return JSON.parse(fs.readFileSync(MODE_FILE, 'utf8'));
   } catch {
-    // Par défaut: mode public
-    return { mode: 'public' };
+    return { mode: 'private' };
   }
 }
 

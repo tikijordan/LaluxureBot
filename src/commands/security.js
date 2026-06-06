@@ -28,11 +28,11 @@ function getBotMode() {
   try {
     if (fs.existsSync(BOTMODE_FILE)) {
       const data = JSON.parse(fs.readFileSync(BOTMODE_FILE, 'utf-8'));
-      _botModeCache = data.mode || 'public';
+      _botModeCache = data.mode || 'private';
       return _botModeCache;
     }
   } catch {}
-  _botModeCache = 'public';
+  _botModeCache = 'private';
   return _botModeCache;
 }
 
@@ -111,81 +111,38 @@ export default {
   // ── MODE BOT ─────────────────────────────────────────────────
 
   botmode: {
-    description: 'Voir le mode actuel du bot (admin)',
-    adminOnly: true,
+    description: 'Voir le mode actuel du bot (owner)',
     execute: async ({ sock, from }) => {
-      const mode = getBotMode();
       await sock.sendMessage(from, {
-        text: `⚙️ *Mode du Bot*\n\n` +
-          `Statut actuel: ${mode === 'private' ? '🔴 *Privé* (admin seulement)' : '🟢 *Public* (tout le monde)'}\n\n` +
-          `*Changer le mode:*\n` +
-          `• !private → Réserver le bot à l'admin\n` +
-          `• !public  → Ouvrir le bot à tout le monde`,
+        text: `⚙️ *Accès au bot*\n\n` +
+          `🔒 *Owner-only* — permanent\n\n` +
+          `Seul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\n` +
+          `Les autres utilisateurs sont ignorés (aucune réponse).`,
       });
     },
   },
 
   private: {
-    description: 'Passer le bot en mode privé (admin seulement)',
-    adminOnly: true,
-    execute: async ({ sock, from, isGroup }) => {
-      const current = getBotMode();
-
-      if (current === 'private') {
-        await sock.sendMessage(from, {
-          text: `⚠️ Le bot est *déjà en mode privé*.\n\nUtilise *!public* pour l'ouvrir à tout le monde.`,
-        });
-        return;
-      }
-
+    description: 'Confirmer le mode owner-only',
+    execute: async ({ sock, from }) => {
       setBotMode('private');
-
       await sock.sendMessage(from, {
-        text: `🔴 *Mode Privé Activé*\n\n` +
-          `Le bot répond désormais *uniquement à l'administrateur*.\n\n` +
-          `Les autres utilisateurs verront un message de restriction.\n\n` +
-          `➡️ Pour revenir en mode public: *!public*`,
+        text: `🔒 *Owner-only actif*\n\n` +
+          `Seul toi (numéro connecté) peux utiliser le bot partout.\n` +
+          `Les autres sont ignorés sans réponse.`,
       });
-
-      if (isGroup) {
-        await sock.sendMessage(from, {
-          text: `🔴 *[BOT]* Ce bot est passé en *mode privé*.\nSeul l'administrateur peut l'utiliser pour le moment.`,
-        });
-      }
-
-      console.log('🔴 Bot passé en MODE PRIVÉ');
     },
   },
 
   public: {
-    description: 'Passer le bot en mode public (tout le monde)',
-    adminOnly: true,
-    execute: async ({ sock, from, isGroup }) => {
-      const current = getBotMode();
-
-      if (current === 'public') {
-        await sock.sendMessage(from, {
-          text: `⚠️ Le bot est *déjà en mode public*.\n\nUtilise *!private* pour le réserver à l'admin.`,
-        });
-        return;
-      }
-
-      setBotMode('public');
-
+    description: 'Désactivé — bot toujours owner-only',
+    execute: async ({ sock, from }) => {
+      setBotMode('private');
       await sock.sendMessage(from, {
-        text: `🟢 *Mode Public Activé*\n\n` +
-          `Le bot répond désormais à *tout le monde*.\n\n` +
-          `Les commandes réservées à l'admin restent protégées.\n\n` +
-          `➡️ Pour repasser en mode privé: *!private*`,
+        text: `🔒 *Mode public désactivé*\n\n` +
+          `Ce bot est réservé à l'owner uniquement (DM + groupes).\n` +
+          `La commande *!public* ne peut pas ouvrir l'accès aux autres.`,
       });
-
-      if (isGroup) {
-        await sock.sendMessage(from, {
-          text: `🟢 *[BOT]* Ce bot est de retour en *mode public*.\nTout le monde peut l'utiliser à nouveau !`,
-        });
-      }
-
-      console.log('🟢 Bot passé en MODE PUBLIC');
     },
   },
 };

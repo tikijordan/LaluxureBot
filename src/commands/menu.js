@@ -71,9 +71,7 @@ ${P}regex /pattern/flags [texte] — Tester une regex
 🛡️ *SÉCURITÉ*
 ${P}antispam — État anti-spam
 ${P}notag / ${P}yestag — Anti-tag on/off
-${P}botmode — Voir le mode actuel
-${P}private — 🔴 Réserver le bot à l'admin
-${P}public  — 🟢 Ouvrir le bot à tous
+${P}botmode — Accès owner-only (toi seul)
 
 💢 *SPAM (Admin)*
 ${P}spam [num] [msg] [n] — Envoyer spam

@@ -6,12 +6,12 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { getContentType } from '@whiskeysockets/baileys';
 import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
 // FIX 2 — lire le mode bot dynamiquement depuis le fichier plutôt que depuis ctx
 import { getBotMode } from './commands/security.js';
+import { extractMessageBody, resolveIsOwner } from './utils/message.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,10 +32,6 @@ const _commandsLoadPromise = loadCommands()
 
 const _defaultNoTagGroups = new Set();
 
-// FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
-//          (était définie seulement dans le bloc private, causant ReferenceError
-//          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
-const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
 
 /**
  * Traite un message entrant et exécute la commande correspondante.
@@ -77,12 +73,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     // Fallback complet si appelé sans contexte (compatibilité)
     if (body === undefined) {
-        const ct = getContentType(msg.message);
-        if (ct === 'conversation')             body = msg.message.conversation || '';
-        else if (ct === 'extendedTextMessage') body = msg.message.extendedTextMessage?.text || '';
-        else if (ct === 'imageMessage')        body = msg.message.imageMessage?.caption || '';
-        else if (ct === 'videoMessage')        body = msg.message.videoMessage?.caption || '';
-        else body = '';
+        body = extractMessageBody(msg);
 
         const rawJid = msg.key.remoteJid;
         const fromMe = msg.key.fromMe;
@@ -123,15 +114,15 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
-        const senderIsLid = sender.endsWith('@lid');
-        isOwner = fromMe
-            || (OWNER && normalize(senderNumber) === normalize(OWNER))
-            || (OWNER_LID && senderIsLid && sender.split('@')[0] === OWNER_LID);
+        isOwner = resolveIsOwner({
+            fromMe, senderNumber, senderJid: sender, OWNER, OWNER_LID,
+            lidCache: ctx.lidCache,
+        });
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
 
-    // Seul l'owner peut utiliser le bot (DM et groupes)
+    // Owner-only permanent — DM et groupes
     if (!isOwner) return;
 
     // ── Parsing de la commande ─────────────────────────────────

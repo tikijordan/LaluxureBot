@@ -18,4 +18,4 @@ services:
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: PREFIX
-        value: "!"
+        value: ":"

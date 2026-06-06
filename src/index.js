@@ -116,14 +116,13 @@ const startTime     = Date.now();
 
 fse.ensureDirSync(SESSIONS_ROOT);
 
-// Forcer le mode public au démarrage si botmode.json absent ou corrompu
-// (le filesystem Railway est éphémère — botmode.json est perdu au redéploiement)
+// botmode.json — owner-only permanent (seul le numéro connecté peut utiliser le bot)
 try {
     const botmodeFile = path.join(__dirname, '../data/botmode.json');
     if (!fs.existsSync(botmodeFile)) {
         fse.ensureDirSync(path.dirname(botmodeFile));
-        fs.writeFileSync(botmodeFile, JSON.stringify({ mode: 'public' }, null, 2));
-        console.log('[Boot] botmode.json absent — mode public par défaut');
+        fs.writeFileSync(botmodeFile, JSON.stringify({ mode: 'private', ownerOnly: true }, null, 2));
+        console.log('[Boot] botmode.json absent — accès owner-only par défaut');
     }
 } catch {}
 fse.ensureDirSync(DATA_ROOT);
@@ -189,6 +188,7 @@ import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
+import { extractMessageBody, resolveIsOwner } from './utils/message.js';
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
@@ -488,6 +488,13 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
             state.lastActivity    = Date.now();
             state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
 
+            if (state.ownerLid && num) {
+                if (!state.lidCache) state.lidCache = {};
+                const pn = (num || '').replace(/\D/g, '');
+                state.lidCache[pn] = state.ownerLid;
+                state.lidCache[state.ownerLid] = pn;
+            }
+
             // Reset backoff sur connexion OK
             reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
 
@@ -697,22 +704,12 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                     senderJid    = senderNumber + '@s.whatsapp.net';
                 }
 
-                const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 const OWNER_LID = state.ownerLid || null;
+                const isOwner = resolveIsOwner({
+                    fromMe, senderNumber, senderJid, OWNER, OWNER_LID, lidCache: state.lidCache,
+                });
 
-                const senderIsLid = senderJid.endsWith('@lid');
-
-                // isOwner = compte connecté (auto après QR/pairing), par numéro ou LID
-                const isOwner = fromMe
-                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
-                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID);
-
-                const ct = getContentType(msg.message);
-                let body = '';
-                if (ct==='conversation') body=msg.message.conversation||'';
-                else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
-                else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
-                else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
+                const body = extractMessageBody(msg);
 
                 if (isViewOnceMessage(msg)) {
                     autoSaveViewOnce(sock, msg, OWNER, {
@@ -743,7 +740,7 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                 // FIX: n'appeler handleCommand que si c'est une commande
                 if (!isCmd) continue;
 
-                // Seul l'owner peut déclencher des commandes (DM et groupes)
+                // Owner-only permanent — DM et groupes
                 if (!isOwner) continue;
 
                 await handleCommand(sock, msg, {}, {
@@ -753,6 +750,7 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                     prefix: PREFIX,
                     owner: OWNER,
                     ownerLid: state.ownerLid || null,
+                    lidCache: state.lidCache,
                     onCommand: (cmd, user) => {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);
