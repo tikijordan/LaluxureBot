@@ -1,0 +1,21 @@
+# Blueprint Render — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: laluxure-bot
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SELF_PING
+        value: "1"
+      - key: PROACTIVE_RECONNECT_HOURS
+        value: "0"
+      - key: MONGODB_URI
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: PREFIX
+        value: "!"

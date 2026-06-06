@@ -337,9 +337,9 @@ let fetchingSession = false, fetchingLogs = false;
 // ═══════════════════════════════════════════════════════════
 function startPolling() {
   stopPolling();
-  timerSidebar = setInterval(refreshSessions, 5000);
-  timerSession = setInterval(tickSession, 3000);
-  timerLog     = setInterval(tickLogs, 2000);
+  timerSidebar = setInterval(refreshSessions, 12000);
+  timerSession = setInterval(tickSession, 10000);
+  timerLog     = setInterval(tickLogs, 5000);
   refreshAll(true);
 }
 function stopPolling() {

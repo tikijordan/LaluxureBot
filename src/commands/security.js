@@ -20,18 +20,24 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BOTMODE_FILE = path.join(__dirname, '../../data/botmode.json');
 
-// ── GESTION DU BOTMODE (persistant) ──────────────────────────
+// ── GESTION DU BOTMODE (persistant + cache mémoire) ──────────
+let _botModeCache = null;
+
 function getBotMode() {
+  if (_botModeCache) return _botModeCache;
   try {
     if (fs.existsSync(BOTMODE_FILE)) {
       const data = JSON.parse(fs.readFileSync(BOTMODE_FILE, 'utf-8'));
-      return data.mode || 'public';
+      _botModeCache = data.mode || 'public';
+      return _botModeCache;
     }
   } catch {}
-  return 'public';
+  _botModeCache = 'public';
+  return _botModeCache;
 }
 
 function setBotMode(mode) {
+  _botModeCache = mode;
   try {
     const dir = path.dirname(BOTMODE_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

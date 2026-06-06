@@ -32,18 +32,6 @@ const _commandsLoadPromise = loadCommands()
 
 const _defaultNoTagGroups = new Set();
 
-// ══════════════════════════════════════════════════════════════
-// DÉDUPLICATION HANDLER — Map avec TTL (10 min par message)
-// ══════════════════════════════════════════════════════════════
-const _handledMsgIds = new Map();
-const _HANDLER_TTL   = 10 * 60 * 1000;
-setInterval(() => {
-    const now = Date.now();
-    for (const [id, ts] of _handledMsgIds) {
-        if (now - ts > _HANDLER_TTL) _handledMsgIds.delete(id);
-    }
-}, 60 * 1000);
-
 // FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
 //          (était définie seulement dans le bloc private, causant ReferenceError
 //          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
@@ -58,13 +46,6 @@ const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
  * @param {object} ctx     - Contexte pré-calculé par index.js
  */
 export async function handleCommand(sock, msg, store, ctx = {}) {
-
-    // ── Déduplication au niveau handler ───────────────────────
-    const msgId = msg?.key?.id;
-    if (msgId) {
-        if (_handledMsgIds.has(msgId)) return;
-        _handledMsgIds.set(msgId, Date.now());
-    }
 
     // ── Attendre que les commandes soient chargées (max 15s) ──
     if (!_commandsReady) {
@@ -161,9 +142,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
-    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
-    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
-    const botMode = getBotMode();
+    const botMode = ctx.botMode ?? getBotMode();
 
     const command = commands[cmdName];
     if (!command) return;

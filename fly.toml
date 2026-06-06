@@ -6,8 +6,8 @@ primary_region = "cdg"
 
 [env]
   NODE_ENV = "production"
-  SELF_PING = "1"
-  PROACTIVE_RECONNECT_HOURS = "6"
+  SELF_PING = "0"
+  PROACTIVE_RECONNECT_HOURS = "0"
 
 [http_service]
   internal_port = 3000

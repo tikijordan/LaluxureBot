@@ -104,6 +104,11 @@ const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const SESSIONS_ROOT = path.join(os.tmpdir(), 'wa-bot-sessions');
 const DATA_ROOT     = path.join(__dirname, '../data');
 const DASH_DIR      = path.join(__dirname, '../dashboard');
+let _dashboardHtml  = null;
+try {
+    const _dashPath = path.join(DASH_DIR, 'index.html');
+    if (fs.existsSync(_dashPath)) _dashboardHtml = fs.readFileSync(_dashPath);
+} catch {}
 const PREFIX        = process.env.PREFIX || '!';
 const PORT          = parseInt(process.env.PORT || '3000');
 const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
@@ -179,6 +184,7 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
+import { getAggregatedStats } from './utils/stats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
@@ -541,7 +547,7 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
             // Ping toutes les 30 secondes — maintient la connexion sans surcharger le socket
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
-            }, 30_000);
+            }, 60_000);
 
             // ── HEALTH CHECK TOUTES LES 2 MIN ──
             // Vérifie readyState=3 (CLOSED sans événement) ET zombie silencieux
@@ -716,7 +722,7 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
 
                 const isCmd = body.startsWith(PREFIX);
                 if (fromMe && !isCmd) continue;
-                if (isGroup) trackGroupMsg(from, senderJid);
+                if (isGroup) setImmediate(() => trackGroupMsg(from, senderJid));
 
                 if (isCmd) {
                     const cmd = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase()||'';
@@ -878,33 +884,26 @@ setInterval(async () => {
             addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK`);
         }
 
-        // ── 3. Ping léger pour maintenir la connexion active ──
-        try {
-            await state.sock.sendPresenceUpdate('available');
-            state.lastPing = new Date().toISOString();
-        } catch (e) {
-            addLog('warn', `[Watchdog] [${id}] sendPresence échoué: ${e.message} — reconnexion`);
-            state.connection = 'close';
-            teardownSession(state);
-            scheduleReconnect(id, 5000, true);
-        }
     }
 }, WATCHDOG_INTERVAL);
 
 // Superviseur — vérifie toutes les 3 min que chaque session est bien connectée
 setInterval(superviseSessions, 3 * 60 * 1000);
 
-// Reconnexion préventive périodique (évite les zombies après 24-48h)
-const PROACTIVE_RECONNECT_MS = Math.max(1, parseInt(process.env.PROACTIVE_RECONNECT_HOURS || '6', 10)) * 60 * 60 * 1000;
-setInterval(() => {
-    for (const [id, state] of sessions) {
-        if (state.connection !== 'open' || !state.sock) continue;
-        addLog('info', `[Maintenance] Reconnexion préventive [${id}] (toutes les ${PROACTIVE_RECONNECT_MS / 3600000}h)`);
-        state.connection = 'close';
-        teardownSession(state);
-        scheduleReconnect(id, 2000, true);
-    }
-}, PROACTIVE_RECONNECT_MS);
+// Reconnexion préventive optionnelle (PROACTIVE_RECONNECT_HOURS=0 désactivé par défaut)
+const PROACTIVE_RECONNECT_HOURS = parseInt(process.env.PROACTIVE_RECONNECT_HOURS || '0', 10);
+if (PROACTIVE_RECONNECT_HOURS > 0) {
+    const PROACTIVE_RECONNECT_MS = PROACTIVE_RECONNECT_HOURS * 60 * 60 * 1000;
+    setInterval(() => {
+        for (const [id, state] of sessions) {
+            if (state.connection !== 'open' || !state.sock) continue;
+            addLog('info', `[Maintenance] Reconnexion préventive [${id}] (toutes les ${PROACTIVE_RECONNECT_HOURS}h)`);
+            state.connection = 'close';
+            teardownSession(state);
+            scheduleReconnect(id, 2000, true);
+        }
+    }, PROACTIVE_RECONNECT_MS);
+}
 
 // Initialiser MongoDB et charger les sessions existantes
 async function loadExistingSessions() {
@@ -1026,15 +1025,37 @@ async function loadExistingSessions() {
 function readBody(req) {
     return new Promise(r => { let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{r(JSON.parse(b));}catch{r({});} }); });
 }
-function getStatsData() {
-    try { return JSON.parse(fs.readFileSync(path.join(DATA_ROOT,'stats','stats.json'),'utf8')); } catch { return {}; }
+function buildSessionDetail(s) {
+    const agg = getAggregatedStats();
+    const uptime = Math.floor((Date.now() - startTime) / 1000);
+    return {
+        id: s.id,
+        connection: s.connection,
+        connectedNumber: s.connectedNumber,
+        ownerLid: s.ownerLid || null,
+        qrCode: s.qrCode,
+        pairingCode: s.pairingCode,
+        commandsCount: s.commandsCount,
+        messagesCount: s.messagesCount,
+        createdAt: s.createdAt,
+        lastPing: s.lastPing,
+        recentCommands: (s.recentCommands || []).slice(-20),
+        uptime,
+        uptimeHuman: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+        totalUsers: agg.totalUsers,
+        totalCommands: agg.totalCmds,
+        topCommands: agg.topCmds,
+        users: agg.users,
+        prefix: PREFIX,
+        memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        node: process.version,
+    };
 }
 
 // ════════════════════════════════════════════════════════════════════
 // SÉCURITÉ DASHBOARD — Protection maximale
 // ════════════════════════════════════════════════════════════════════
 import { randomBytes, timingSafeEqual, createHash } from 'crypto';
-import admin from './commands/admin.js';
 
 const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD || 'changeme';
 const ALLOWED_ORIGIN = process.env.DASHBOARD_ORIGIN  || null;
@@ -1205,8 +1226,10 @@ http.createServer(async (req, res) => {
     // GET / — dashboard
     if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
         if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
-        const hp = path.join(DASH_DIR,'index.html');
-        if (fs.existsSync(hp)) { res.writeHead(200,{'Content-Type':'text/html; charset=utf-8',...SEC_HEADERS}); return res.end(fs.readFileSync(hp)); }
+        if (_dashboardHtml) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, max-age=300', ...SEC_HEADERS });
+            return res.end(_dashboardHtml);
+        }
         res.writeHead(302,{Location:'/login'}); return res.end();
     }
 
@@ -1344,22 +1367,7 @@ button:hover{background:#1fb858}
         if (!sid) return sendJson(res,{ error:'ID de session invalide' },400);
         const s = sessions.get(sid);
         if (!s) return sendJson(res,{ error:'Session introuvable' },404);
-        const statsData = getStatsData();
-        const totalCmds = Object.values(statsData).reduce((a,u)=>a+(u.total||0),0);
-        const topMap    = {};
-        Object.values(statsData).forEach(u => Object.entries(u.commands||{}).forEach(([c,n])=>{ topMap[c]=(topMap[c]||0)+n; }));
-        const topCmds   = Object.entries(topMap).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([cmd,count])=>({cmd,count}));
-        const users     = Object.entries(statsData).map(([n,d])=>({number:n,total:d.total,lastSeen:d.lastSeen,topCmd:Object.entries(d.commands||{}).sort((a,b)=>b[1]-a[1])[0]?.[0]})).sort((a,b)=>b.total-a.total).slice(0,50);
-        const uptime    = Math.floor((Date.now()-startTime)/1000);
-        return sendJson(res,{
-            ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
-            recentCommands:s.recentCommands.slice(-20),
-            uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
-            totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
-            topCommands:topCmds, users, prefix:PREFIX,
-            memory:Math.round(process.memoryUsage().heapUsed/1024/1024), node:process.version,
-            sessionString: s.sessionString || null,
-        });
+        return sendJson(res, buildSessionDetail(s));
     }
 
     // POST /api/sessions/:id/pair
@@ -1471,21 +1479,26 @@ loadExistingSessions()
 // ══════════════════════════════════════════════════════════════
 // SELF-PING — Empêche Render (et Railway) de mettre le service en veille
 //
-// Render Free : s'endort après 15 min sans trafic HTTP → toutes les connexions
-//               WhatsApp sont coupées → le bot ne répond plus.
-// Render Paid  : pas de sleep, MAIS le zombie WhatsApp peut quand même arriver.
-// Ce self-ping toutes les 4 minutes maintient le service actif en permanence.
+// Render Free : s'endort après 15 min sans trafic HTTP → WhatsApp coupé.
+// Activé automatiquement si RENDER_EXTERNAL_URL est présent.
 //
-// Variables d'environnement :
-//   SELF_PING=0              → désactiver (si tu utilises UptimeRobot à la place)
-//   SELF_PING_URL=https://…  → forcer une URL précise (recommandé sur Render)
-//
-// Sur Render : ajoute SELF_PING_URL=https://<ton-app>.onrender.com/api/status
+// Variables :
+//   SELF_PING=0  → désactiver (ex. UptimeRobot externe)
+//   SELF_PING=1  → forcer (utile sur Fly si besoin)
+//   SELF_PING_URL → URL personnalisée (sinon auto via RENDER_EXTERNAL_URL)
 // ══════════════════════════════════════════════════════════════
 (function startSelfPing() {
-    if (process.env.SELF_PING === '0') return;
+    const onRender  = !!process.env.RENDER_EXTERNAL_URL;
+    const onFly     = !!process.env.FLY_APP_NAME;
+    const explicit  = process.env.SELF_PING;
 
-    const PING_INTERVAL_MS = 4 * 60 * 1000; // toutes les 4 min (< 15 min = seuil Render Free)
+    if (explicit === '0') return;
+    // Fly a déjà un health check externe → off sauf SELF_PING=1
+    if (onFly && explicit !== '1') return;
+    // Render : on par défaut (évite le sleep Free après 15 min)
+    if (!onRender && !onFly && explicit !== '1' && !process.env.RAILWAY_PUBLIC_DOMAIN) return;
+
+    const PING_INTERVAL_MS = 4 * 60 * 1000; // < 15 min (seuil sleep Render Free)
 
     function getPingUrl() {
         if (process.env.SELF_PING_URL) return process.env.SELF_PING_URL;
@@ -1517,5 +1530,6 @@ loadExistingSessions()
         setInterval(doSelfPing, PING_INTERVAL_MS);
     }, 30_000);
 
-    addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
+    const host = onRender ? 'Render' : onFly ? 'Fly' : 'local';
+    addLog('info', `[SelfPing] Keep-alive ${host} (toutes les ${PING_INTERVAL_MS / 60000} min) → ${getPingUrl()}`);
 })();
