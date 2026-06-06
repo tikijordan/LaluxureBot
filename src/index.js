@@ -248,13 +248,50 @@ function clearReconnectTimer(sessionId) {
     }
 }
 
-function scheduleReconnect(sessionId, delayMs = 3000) {
+function scheduleReconnect(sessionId, delayMs = 3000, force = true) {
     clearReconnectTimer(sessionId);
     const t = setTimeout(() => {
         reconnectTimerBySessionId.delete(sessionId);
-        startSession(sessionId);
+        startSession(sessionId, null, { force });
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
+}
+
+/** Ferme proprement une session avant reconnexion */
+function teardownSession(state) {
+    if (!state) return;
+    if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+    if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+    if (state.connectingTimeout) { clearTimeout(state.connectingTimeout); state.connectingTimeout = null; }
+    if (state.sock) {
+        try { state.sock.ws?.close(); } catch {}
+        try { state.sock.end(); } catch {}
+        state.sock = null;
+    }
+}
+
+/** Supervise les sessions — relance si fermée ou bloquée */
+function superviseSessions() {
+    const now = Date.now();
+    for (const [id, state] of sessions) {
+        if (reconnectTimerBySessionId.has(id)) continue;
+
+        if (state.connection === 'close' || !state.sock) {
+            addLog('info', `[Supervisor] Session [${id}] hors ligne — reconnexion`);
+            scheduleReconnect(id, 3000, true);
+            continue;
+        }
+
+        if (state.connection === 'connecting') {
+            const since = now - (state.connectingSince || now);
+            if (since > 3 * 60 * 1000) {
+                addLog('warn', `[Supervisor] Session [${id}] bloquée en connecting (${Math.round(since / 1000)}s) — reset`);
+                state.connection = 'close';
+                teardownSession(state);
+                scheduleReconnect(id, 3000, true);
+            }
+        }
+    }
 }
 
 function ensureSingleActiveSocketForNumber(number, currentSessionId, currentSock) {
@@ -279,12 +316,14 @@ function addLog(level, msg) {
 
 // Démarrer une session
 // phoneNumber optionnel → active le pairing code au lieu du QR
-async function startSession(sessionId, phoneNumber = null) {
+async function startSession(sessionId, phoneNumber = null, { force = false } = {}) {
     const existing = sessions.get(sessionId);
-    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
-        addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
-        return; 
+    if (existing && !force && (existing.connection === 'open' || existing.connection === 'connecting')) {
+        addLog('warn', `Session ${sessionId} ignorée : ${existing.connection}`);
+        return;
     }
+
+    if (existing && force) teardownSession(existing);
 
     // Si une reconnexion est en file d'attente pour cette session, on la remplace par cet appel
     clearReconnectTimer(sessionId);
@@ -304,6 +343,7 @@ async function startSession(sessionId, phoneNumber = null) {
         sessions.set(sessionId, state);
     }
     state.connection = 'connecting';
+    state.connectingSince = Date.now();
     state.qrCode = null;
     state.pairingCode = null;
     state.authPath = authPath;
@@ -331,6 +371,17 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     state.sock = sock;
+
+    // Timeout si la connexion reste bloquée en "connecting"
+    if (state.connectingTimeout) clearTimeout(state.connectingTimeout);
+    state.connectingTimeout = setTimeout(() => {
+        if (state.connection === 'connecting') {
+            addLog('warn', `[${sessionId}] Timeout connexion (90s) — nouvelle tentative`);
+            state.connection = 'close';
+            teardownSession(state);
+            scheduleReconnect(sessionId, 5000, true);
+        }
+    }, 90_000);
 
     // ── SAFE EVENT WRAPPER — capture les erreurs non catchées dans les handlers ──
     function wrapHandler(name, handler) {
@@ -402,6 +453,8 @@ async function startSession(sessionId, phoneNumber = null) {
         }
 
         if (connection === 'open') {
+            if (state.connectingTimeout) { clearTimeout(state.connectingTimeout); state.connectingTimeout = null; }
+            state.connectingSince = null;
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
             // sock.user.lid = LID du compte connecté (format "XXXXXXX@lid")
             // Utilisé pour reconnaître l'owner dans les groupes LID
@@ -795,11 +848,9 @@ setInterval(async () => {
         const wsState = state.sock.ws?.readyState;
         if (wsState !== undefined && wsState !== 1) {
             addLog('warn', `[Watchdog] [${id}] WebSocket fermé (readyState=${wsState}) — reconnexion`);
-            if (state.pingInterval)      { clearInterval(state.pingInterval);      state.pingInterval = null; }
-            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
-            try { state.sock.end(); } catch {}
-            scheduleReconnect(id, 3000);
+            teardownSession(state);
+            scheduleReconnect(id, 3000, true);
             continue;
         }
 
@@ -811,18 +862,20 @@ setInterval(async () => {
             const alive = await wsPingCheck(state.sock);
             if (!alive) {
                 addLog('warn', `[Watchdog] [${id}] Zombie détecté (pas de pong après ${PING_TIMEOUT_MS/1000}s) — reconnexion forcée`);
-                if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
-                if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
                 state.connection = 'close';
-                try { state.sock.ws?.close(); } catch {}
-                try { state.sock.end(); } catch {}
-                scheduleReconnect(id, 5000);
+                teardownSession(state);
+                scheduleReconnect(id, 5000, true);
                 continue;
             }
-            // Pong reçu : connexion WS vivante, juste pas de messages (bot peu actif)
-            addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK, bot inactif normalement`);
-            // Forcer la mise à jour lastActivity pour éviter les checks répétés inutiles
-            state.lastActivity = now;
+            // Pong OK mais inactif > 2h : reconnexion préventive (zombie silencieux fréquent)
+            if (inactiveSince > 2 * 60 * 60 * 1000) {
+                addLog('warn', `[Watchdog] [${id}] Inactif >2h malgré pong — reconnexion préventive`);
+                state.connection = 'close';
+                teardownSession(state);
+                scheduleReconnect(id, 5000, true);
+                continue;
+            }
+            addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK`);
         }
 
         // ── 3. Ping léger pour maintenir la connexion active ──
@@ -831,15 +884,27 @@ setInterval(async () => {
             state.lastPing = new Date().toISOString();
         } catch (e) {
             addLog('warn', `[Watchdog] [${id}] sendPresence échoué: ${e.message} — reconnexion`);
-            if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
-            if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             state.connection = 'close';
-            try { state.sock.ws?.close(); } catch {}
-            try { state.sock.end(); } catch {}
-            scheduleReconnect(id, 5000);
+            teardownSession(state);
+            scheduleReconnect(id, 5000, true);
         }
     }
 }, WATCHDOG_INTERVAL);
+
+// Superviseur — vérifie toutes les 3 min que chaque session est bien connectée
+setInterval(superviseSessions, 3 * 60 * 1000);
+
+// Reconnexion préventive périodique (évite les zombies après 24-48h)
+const PROACTIVE_RECONNECT_MS = Math.max(1, parseInt(process.env.PROACTIVE_RECONNECT_HOURS || '6', 10)) * 60 * 60 * 1000;
+setInterval(() => {
+    for (const [id, state] of sessions) {
+        if (state.connection !== 'open' || !state.sock) continue;
+        addLog('info', `[Maintenance] Reconnexion préventive [${id}] (toutes les ${PROACTIVE_RECONNECT_MS / 3600000}h)`);
+        state.connection = 'close';
+        teardownSession(state);
+        scheduleReconnect(id, 2000, true);
+    }
+}, PROACTIVE_RECONNECT_MS);
 
 // Initialiser MongoDB et charger les sessions existantes
 async function loadExistingSessions() {
@@ -1399,7 +1464,9 @@ button:hover{background:#1fb858}
     }
 });
 
-loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+loadExistingSessions()
+    .then(() => setTimeout(superviseSessions, 45_000))
+    .catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
 
 // ══════════════════════════════════════════════════════════════
 // SELF-PING — Empêche Render (et Railway) de mettre le service en veille
@@ -1422,18 +1489,25 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
 
     function getPingUrl() {
         if (process.env.SELF_PING_URL) return process.env.SELF_PING_URL;
-        // Render expose RENDER_EXTERNAL_URL automatiquement
-        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/status`;
+        // Fly.io
+        if (process.env.FLY_APP_NAME) return `https://${process.env.FLY_APP_NAME}.fly.dev/api/health`;
+        // Render
+        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/health`;
         // Railway
-        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/status`;
-        // Fallback localhost
-        return `http://127.0.0.1:${PORT}/api/status`;
+        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/health`;
+        return `http://127.0.0.1:${PORT}/api/health`;
     }
 
     const doSelfPing = () => {
         const url = getPingUrl();
         axios.get(url, { timeout: 10000 })
-            .then(() => { /* ping silencieux — garder le service éveillé */ })
+            .then((res) => {
+                const connected = res.data?.connected ?? 0;
+                if (connected === 0) {
+                    addLog('warn', '[SelfPing] Aucune session connectée — supervision');
+                    superviseSessions();
+                }
+            })
             .catch(e => addLog('warn', `[SelfPing] Échec ping ${url}: ${e.message}`));
     };
 

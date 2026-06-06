@@ -16,8 +16,7 @@ RUN apt-get update && apt-get install -y \
 # yt-dlp + curl_cffi (TikTok impersonation) + dépendances merge
 RUN pip3 install --break-system-packages --upgrade \
     "yt-dlp[default]" \
-    curl_cffi \
-    && ln -sf $(which yt-dlp) /usr/local/bin/yt-dlp
+    curl_cffi
 
 # Configurer yt-dlp :
 #  - player_client : ios + android + web_creator (bypass détection bot YouTube)
