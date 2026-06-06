@@ -186,7 +186,7 @@ import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getAggregatedStats } from './utils/stats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, saveAllActiveSessions, migrateSessionId } from './utils/mongostore.js';
-import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock } from './utils/instancelock.js';
+import { getInstanceOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
 import { extractMessageBody, resolveIsOwner } from './utils/message.js';
 
@@ -301,6 +301,11 @@ function scheduleReconnect(sessionId, delayMs = 3000, force = true) {
     clearReconnectTimer(sessionId);
     const t = setTimeout(() => {
         reconnectTimerBySessionId.delete(sessionId);
+        if (getMongoDb() && !waInstanceAuthorized) {
+            addLog('warn', `[${sessionId}] Reconnexion en attente du lock instance`);
+            retryWaStartIfLocked().catch(() => {});
+            return;
+        }
         startSession(sessionId, null, { force });
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
@@ -431,13 +436,23 @@ function onInstanceLockLost(info) {
     }
     if (info?.reason !== 'held') return;
     waInstanceAuthorized = false;
-    addLog('warn', `[Lock] Autre instance active (${info?.holder || '?'}) — fermeture sockets`);
+    if (lockHeartbeat) { try { lockHeartbeat.stop(); } catch {} lockHeartbeat = null; }
+    addLog('warn', `[Lock] Autre instance active (${info?.holder || '?'}) — fermeture sockets (pas de reconnexion)`);
     for (const [id, st] of sessions) {
-        if (st.connection !== 'open') continue;
+        clearReconnectTimer(id);
         st.connection = 'close';
         teardownSession(st);
-        scheduleReconnect(id, 10_000, true);
     }
+    setTimeout(() => retryWaStartIfLocked().catch(() => {}), 30_000);
+}
+
+async function acquireInstanceLock(db) {
+    const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
+    const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '90000', 10);
+    const ownerId = getInstanceOwnerId();
+    await forceReleaseExpiredLock({ db, lockName });
+    await forceStealStaleLock({ db, lockName, ownerId, ttlMs });
+    return { ...(await tryAcquireLock({ db, lockName, ownerId, ttlMs })), lockName, ownerId, ttlMs };
 }
 
 /** Relance WhatsApp si le lock était indisponible au boot */
@@ -445,22 +460,18 @@ async function retryWaStartIfLocked() {
     if (waInstanceAuthorized) return;
     const db = getMongoDb();
     if (!db) return;
-    const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
-    const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '90000', 10);
-    await forceReleaseExpiredLock({ db, lockName });
-    const lockRes = await tryAcquireLock({ db, lockName, ownerId: buildOwnerId(), ttlMs });
+    const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '30000', 10);
+    const lockRes = await acquireInstanceLock(db);
     if (!lockRes.ok) {
         addLog('warn', `[Lock] Retry échoué (${lockRes.holder}) — nouvelle tentative dans 60s`);
         setTimeout(() => retryWaStartIfLocked().catch(() => {}), 60_000);
         return;
     }
     waInstanceAuthorized = true;
-    const ownerId = buildOwnerId();
-    const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '30000', 10);
+    const { lockName, ownerId, ttlMs } = lockRes;
     lockContext = { db, lockName, ownerId, ttlMs, hbMs };
-    if (!lockHeartbeat) {
-        lockHeartbeat = startLockHeartbeat({ db, lockName, ownerId, ttlMs, intervalMs: hbMs, onLost: onInstanceLockLost });
-    }
+    if (lockHeartbeat) { try { lockHeartbeat.stop(); } catch {} }
+    lockHeartbeat = startLockHeartbeat({ db, lockName, ownerId, ttlMs, intervalMs: hbMs, onLost: onInstanceLockLost });
     addLog('success', '[Lock] Lock acquis au retry — démarrage WhatsApp');
     let toStart = [];
     if (fs.existsSync(SESSIONS_ROOT)) {
@@ -529,6 +540,12 @@ function scheduleOwnerLidResolution(sock, state) {
 // Démarrer une session
 // phoneNumber optionnel → active le pairing code au lieu du QR
 async function startSession(sessionId, phoneNumber = null, { force = false } = {}) {
+    if (getMongoDb() && !waInstanceAuthorized) {
+        addLog('warn', `[${sessionId}] Démarrage bloqué — lock instance non acquis`);
+        setTimeout(() => retryWaStartIfLocked().catch(() => {}), 15_000);
+        return;
+    }
+
     const existing = sessions.get(sessionId);
     if (existing && !force && (existing.connection === 'open' || existing.connection === 'connecting')) {
         addLog('warn', `Session ${sessionId} ignorée : ${existing.connection}`);
@@ -704,7 +721,7 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
             // Anti multi-socket (souvent la cause des 440 / "session remplacée")
             ensureSingleActiveSocketForNumber(phoneNorm, state.id, sock);
 
-            // Renommer la session avec le numéro réel si différent
+            // Renommer la session avec le numéro réel si différent (sans couper le socket)
             if (sessionId !== phoneNorm) {
                 if (sessions.has(phoneNorm)) {
                     const dup = sessions.get(phoneNorm);
@@ -718,23 +735,24 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                 sessions.delete(sessionId);
                 state.id = phoneNorm;
                 const newPath = path.join(SESSIONS_ROOT, phoneNorm);
+                const oldPath = authPath;
                 try {
                     fse.ensureDirSync(newPath);
-                    if (authPath !== newPath) fse.copySync(authPath, newPath, { overwrite: true });
+                    if (oldPath !== newPath) fse.copySync(oldPath, newPath, { overwrite: true });
                     state.authPath = newPath;
                 } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
 
-                addLog('success', `Session renommée [${sessionId}] → [${phoneNorm}]`);
+                addLog('success', `Session renommée [${sessionId}] → [${phoneNorm}] (socket conservé)`);
                 migrateSessionId(sessionId, phoneNorm, phoneNorm, newPath)
                     .catch(e => addLog('warn', `[MongoDB] Migration session: ${e.message}`));
 
-                addLog('info', `[${phoneNorm}] Redémarrage handlers...`);
-                try { sock.end(); } catch {}
-                setTimeout(() => {
-                    try { if (authPath !== newPath) fse.removeSync(authPath); } catch {}
-                    startSession(phoneNorm, null, { force: true });
-                }, 1500);
-                return;
+                const active = activeSocketByNumber.get(phoneNorm);
+                if (active?.sock === sock) {
+                    activeSocketByNumber.set(phoneNorm, { sessionId: phoneNorm, sock });
+                }
+                if (oldPath !== newPath) {
+                    setTimeout(() => { try { fse.removeSync(oldPath); } catch {} }, 10_000);
+                }
             }
 
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
@@ -1160,21 +1178,17 @@ async function loadExistingSessions() {
         // ── LOCK DISTRIBUÉ ─────────────────────────────────────
         // Empêche plusieurs instances (Railway/PM2) de connecter WhatsApp en même temps.
         const db = getMongoDb();
-        const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
-        const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '90000'); // 90s
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '30000'); // 30s
-        const ownerId = buildOwnerId();
-
-        await forceReleaseExpiredLock({ db, lockName });
-        let lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+        let lockRes = await acquireInstanceLock(db);
         if (!lockRes.ok) {
-            addLog('warn', `[Lock] Lock détenu par ${lockRes.holder} — nouvelle tentative (redéploiement Render)...`);
-            const lockDeadline = Date.now() + 90_000;
+            addLog('warn', `[Lock] Lock détenu par ${lockRes.holder} — attente libération (redéploiement Render)...`);
+            const lockDeadline = Date.now() + 120_000;
             while (!lockRes.ok && Date.now() < lockDeadline) {
                 await new Promise(r => setTimeout(r, 5000));
-                lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+                lockRes = await acquireInstanceLock(db);
             }
         }
+        const { lockName, ownerId, ttlMs } = lockRes;
         waInstanceAuthorized = lockRes.ok;
         if (!lockRes.ok) {
             addLog('warn', `[Lock] Pas de lock (${lockRes.holder}) — WhatsApp NON démarré (évite double instance / 440)`);

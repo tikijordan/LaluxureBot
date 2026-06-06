@@ -25,6 +25,13 @@ export function buildOwnerId() {
     return `${host}:${pid}:${unique}`;
 }
 
+/** ID stable pour toute la durée du processus (évite lock acquis / heartbeat avec 2 IDs) */
+let _instanceOwnerId = null;
+export function getInstanceOwnerId() {
+    if (!_instanceOwnerId) _instanceOwnerId = buildOwnerId();
+    return _instanceOwnerId;
+}
+
 // FIX: MongoDB driver v5+ retourne le document directement (plus de .value)
 // Cette fonction normalise les deux formats pour compatibilité ascendante
 function extractDoc(result) {
@@ -46,6 +53,30 @@ export async function forceReleaseExpiredLock({ db, lockName }) {
         const res = await col.deleteOne({ _id: lockName, expiresAt: { $lte: now() } });
         if (res.deletedCount) console.log(`[Lock] Lock expiré "${lockName}" libéré`);
     } catch {}
+}
+
+/**
+ * Reprend un lock dont le heartbeat est mort (ancienne instance Render crashée).
+ * Si updatedAt > ttlMs sans renouvellement → vol légitime.
+ */
+export async function forceStealStaleLock({ db, lockName, ownerId, ttlMs }) {
+    if (!db) return false;
+    try {
+        const col = db.collection(COLLECTION);
+        const staleBefore = new Date(now().getTime() - ttlMs);
+        const stolen = extractDoc(
+            await col.findOneAndUpdate(
+                { _id: lockName, updatedAt: { $lte: staleBefore } },
+                { $set: { ownerId, updatedAt: now(), expiresAt: new Date(now().getTime() + ttlMs) } },
+                { returnDocument: 'after' }
+            )
+        );
+        if (stolen?.ownerId === ownerId) {
+            console.log(`[Lock] Lock stale "${lockName}" repris (ancienne instance morte)`);
+            return true;
+        }
+    } catch {}
+    return false;
 }
 
 export async function tryAcquireLock({ db, lockName, ownerId, ttlMs }) {
