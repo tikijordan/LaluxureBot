@@ -359,6 +359,48 @@ function addLog(level, msg) {
     console.log(`[${entry.time.slice(11,19)}] ${icon} ${msg}`);
 }
 
+// ══════════════════════════════════════════════════════════════
+// RÉSOLUTION DU LID OWNER — par session, automatique
+// Le mapping PN↔LID de WhatsApp se synchronise progressivement après la
+// connexion : on réessaie plusieurs fois jusqu'à trouver le LID du compte.
+// ══════════════════════════════════════════════════════════════
+async function tryResolveOwnerLid(sock, state) {
+    if (state.ownerLid) return state.ownerLid;
+    const num = (state.connectedNumber || '').replace(/\D/g, '');
+    if (!num) return null;
+
+    let lid = sock.user?.lid?.split('@')[0]
+        || sock.authState?.creds?.me?.lid?.split('@')[0]
+        || null;
+
+    if (!lid) {
+        try {
+            const pairs = await sock.signalRepository?.lidMapping?.getLIDsForPNs([num + '@s.whatsapp.net']);
+            if (pairs && pairs.length > 0 && pairs[0]?.lid) lid = pairs[0].lid.split('@')[0];
+        } catch {}
+    }
+
+    if (lid) {
+        state.ownerLid = lid;
+        if (!state.lidCache) state.lidCache = {};
+        state.lidCache[num] = lid;
+        state.lidCache[lid] = num;
+        addLog('info', `[${state.id}] ownerLid résolu: ${lid}`);
+    }
+    return lid;
+}
+
+function scheduleOwnerLidResolution(sock, state) {
+    const delays = [3000, 10000, 30000, 90000, 180000];
+    for (const d of delays) {
+        setTimeout(() => {
+            if (state.connection === 'open' && !state.ownerLid) {
+                tryResolveOwnerLid(sock, state).catch(() => {});
+            }
+        }, d);
+    }
+}
+
 
 // Démarrer une session
 // phoneNumber optionnel → active le pairing code au lieu du QR
@@ -502,25 +544,15 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
             if (state.connectingTimeout) { clearTimeout(state.connectingTimeout); state.connectingTimeout = null; }
             state.connectingSince = null;
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
-            // LID du compte connecté (format "XXXXXXX@lid") — reconnaître l'owner en groupe
-            // Plusieurs sources possibles selon la version de Baileys / migration LID
-            state.ownerLid = sock.user?.lid?.split('@')[0]
-                || sock.authState?.creds?.me?.lid?.split('@')[0]
-                || (process.env.OWNER_LID || '').replace(/\D/g, '')
-                || null;
+            state.connectedNumber = num.replace(/\D/g, '');
 
-            // Si ownerLid absent, tenter de le récupérer via lidMapping
-            if (!state.ownerLid && num) {
-                try {
-                    const ownerPnJid = num + '@s.whatsapp.net';
-                    const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([ownerPnJid]);
-                    if (pairs && pairs.length > 0) {
-                        state.ownerLid = pairs[0].lid.split('@')[0];
-                    }
-                } catch {}
+            // LID du compte connecté — reconnaître l'owner en groupe (résolution auto par session)
+            await tryResolveOwnerLid(sock, state);
+            // Si pas encore résolu, on réessaie en arrière-plan (le mapping se synchronise)
+            if (!state.ownerLid) {
+                addLog('info', `[${sessionId}] ownerLid en cours de résolution (auto, sera appris au 1er message en groupe)`);
+                scheduleOwnerLidResolution(sock, state);
             }
-            if (state.ownerLid) addLog('info', `[${sessionId}] ownerLid = ${state.ownerLid}`);
-            else addLog('warn', `[${sessionId}] ownerLid introuvable — défini OWNER_LID si le bot ignore tes commandes en groupe`);
 
             // Pas de suppression automatique de doublons ici —
             // l'utilisateur gère ses sessions manuellement depuis le dashboard
@@ -750,9 +782,10 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
                         } else {
                             try {
                                 let pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
-                                // 4. Fallback : métadonnées du groupe (mapping LID↔numéro fiable)
+                                // 4. Fallback : métadonnées du groupe (peuple lidCache + ownerLid)
                                 if (!pn) {
-                                    pn = await resolveLidViaGroupMeta(sock, state, from, senderJid, OWNER);
+                                    await resolveLidViaGroupMeta(sock, from, state, OWNER);
+                                    if (state.lidCache?.[lidNum]) pn = state.lidCache[lidNum] + '@s.whatsapp.net';
                                 }
                                 if (pn) {
                                     senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');

@@ -21,7 +21,3 @@ services:
         sync: false
       - key: PREFIX
         value: ":"
-      # LID de ton compte WhatsApp (si le bot ignore tes commandes en groupe)
-      # Visible dans les logs: "CMD ...menu par <CE_NUMERO>"
-      - key: OWNER_LID
-        sync: false
