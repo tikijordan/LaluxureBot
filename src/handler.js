@@ -145,15 +145,9 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             || (OWNER && normalize(senderNumber) === normalize(OWNER));
     }
 
-    if (!body || !body.startsWith(PREFIX)) return;
+    if (!isOwner) return;
 
-    // ── Anti-spam ──────────────────────────────────────────────
-    if (!isOwner) {
-        if (isSpam(senderNumber)) {
-            return await sock.sendMessage(from, { text: '⏱️ Calme-toi ! Trop de messages.' });
-        }
-        trackMessage(senderNumber);
-    }
+    if (!body || !body.startsWith(PREFIX)) return;
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);
@@ -169,20 +163,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     const command = commands[cmdName];
     if (!command) return;
-
-    // ── Vérification mode privé ────────────────────────────────
-    // FIX 3 — utiliser msg.key.fromMe comme garde absolue : si le bot envoie
-    //          lui-même le message (propriétaire sur son propre appareil), c'est
-    //          toujours autorisé, quelle que soit la correspondance des numéros.
-    if (botMode === 'private') {
-        const isActualOwner = msg?.key?.fromMe
-            || isOwner
-            || (OWNER && normalize(senderNumber) === normalize(OWNER));
-
-        if (!isActualOwner) {
-            return await sock.sendMessage(from, { text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.' });
-        }
-    }
 
     // ── Vérification accès private ────────────────────────────
     if ((command.private || command.public === false) && !isOwner) {

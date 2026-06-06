@@ -682,6 +682,8 @@ async function startSession(sessionId, phoneNumber = null) {
                     || (MASTER_OWNER && normalize(resolvedLidToPn) === normalize(MASTER_OWNER))
                     || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID);
 
+                if (!isOwner) continue;
+
                 const ct = getContentType(msg.message);
                 let body = '';
                 if (ct==='conversation') body=msg.message.conversation||'';
