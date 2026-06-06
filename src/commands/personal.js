@@ -74,7 +74,7 @@ export default {
         return;
       }
 
-      let delayMs = 0;
+      let delayMs;
       if (/^\d+m$/.test(timeStr))  delayMs = parseInt(timeStr) * 60000;
       else if (/^\d+h$/.test(timeStr)) delayMs = parseInt(timeStr) * 3600000;
       else if (/^\d+j$/.test(timeStr)) delayMs = parseInt(timeStr) * 86400000;
@@ -160,6 +160,8 @@ export default {
         d[sender] = d[sender].filter(t=>!t.done);
         saveJson('todos.json', d);
         await sock.sendMessage(from, { text: '✅ Tâches terminées supprimées.' });
+      } else {
+        await sock.sendMessage(from, { text: '❌ Action inconnue.\n\n_Commandes: list, add, done [n°], del [n°], clear, cleardone_' });
       }
     },
   },
@@ -184,7 +186,7 @@ export default {
         const content = args.slice(1).join(' ');
         if (!content) { await sock.sendMessage(from, { text: '❌ !note add [titre:] [texte]' }); return; }
         let title = '', noteText = content;
-        if (content.includes(':')) { [title, ...rest] = content.split(':'); noteText = rest.join(':').trim(); }
+        if (content.includes(':')) { let rest; [title, ...rest] = content.split(':'); noteText = rest.join(':').trim(); }
         d[sender].push({ title:title.trim()||'Note', text:noteText.trim(), date:new Date().toISOString() });
         saveJson('personalnotes.json', d);
         await sock.sendMessage(from, { text: `📓 Note ajoutée: *"${title||noteText.slice(0,30)}"*` });
@@ -271,6 +273,8 @@ export default {
         d[sender].currency = args[1]?.toUpperCase() || 'XOF';
         saveJson('budgets.json', d);
         await sock.sendMessage(from, { text: `✅ Devise changée: ${d[sender].currency}` });
+      } else {
+        await sock.sendMessage(from, { text: '❌ Action inconnue.\n\n_Commandes: status, income, add, list, reset, currency_' });
       }
     },
   },

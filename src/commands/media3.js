@@ -60,7 +60,7 @@ export default {
             timeout: 8000,
           });
           const gifs = res2.data?.data || [];
-          if (gifs.length === 0) throw new Error('No gifs');
+          if (gifs.length === 0) throw new Error('No gifs', { cause: err });
           const pick2 = gifs[Math.floor(Math.random() * gifs.length)];
           const url2 = pick2.images?.fixed_height?.url;
           await sock.sendMessage(from, { image: { url: url2 }, caption: `🎞️ ${text}` });

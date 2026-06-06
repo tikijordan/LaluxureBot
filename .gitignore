@@ -23,6 +23,12 @@ npm-debug.log*
 Thumbs.db
 #app
 yt-dlp.exe
-test4.mp4.part*.mp4
+*.mp4
 *.part
 *.zip
+# fichiers tests
+eslint.config.mjs
+lint_results.txt
+lint_results_2.txt
+scripts/
+test.js

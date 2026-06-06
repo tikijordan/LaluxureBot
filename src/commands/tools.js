@@ -170,7 +170,7 @@ export default {
       const maxLen = 280;
       const len = text.length;
       const remaining = maxLen - len;
-      const bar = Math.round((len / maxLen) * 20);
+      const bar = Math.min(20, Math.max(0, Math.round((len / maxLen) * 20)));
       const progressBar = '█'.repeat(bar) + '░'.repeat(20 - bar);
 
       const status = remaining < 0 ? '❌ Trop long!' :
@@ -310,6 +310,8 @@ export default {
         await sock.sendMessage(from, {
           text: `⏱️ *${action === 'stop' ? 'Temps final' : 'Intermédiaire'}:* ${formatted}${action === 'stop' ? '\n\nChronomètre arrêté.' : '\n_!stopwatch stop pour arrêter_'}`,
         });
+      } else {
+        await sock.sendMessage(from, { text: '❌ Action inconnue.\n\n_Commandes: start, stop, lap_' });
       }
     },
   },

@@ -45,12 +45,12 @@ const HANGMAN_STAGES = [
 ];
 
 async function callAI(prompt, temp=0.8) {
-  const gKey = process.env.GEMINI_API_KEY_1;
-  const qKey = process.env.GROQ_API_KEY_1;
+  const gKey = (process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_5);
+  const qKey = (process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY_5);
   if (gKey) {
     try {
       const r = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${gKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${gKey}`,
         { contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:temp,maxOutputTokens:600} },
         { timeout:15000 }
       );
@@ -146,7 +146,7 @@ export default {
       const action = args[0]?.toLowerCase();
 
       // Réponse à un défi en cours
-      if (global.mathChallenges.has(from) && !isNaN(args[0])) {
+      if (global.mathChallenges.has(from) && args[0]?.trim() && !isNaN(parseFloat(args[0]))) {
         const challenge = global.mathChallenges.get(from);
         if (challenge.answered?.has(sender)) {
           await sock.sendMessage(from, { text: `⚠️ Tu as déjà répondu !` });
@@ -301,7 +301,7 @@ export default {
       }
 
       // Action en cours de partie
-      if (global.rpgGames.has(sender) && action && !['new','start'].includes(action)) {
+      if (global.rpgGames.has(sender) && action?.trim() && !['new','start'].includes(action)) {
         const game = global.rpgGames.get(sender);
         const playerAction = text;
 
@@ -331,7 +331,7 @@ Rends ça épique ! Combats aléatoires, trésors, pièges.`;
         game.history.push(playerAction);
         if (game.history.length > 5) game.history.shift();
 
-        let msg = `⚔️ *${game.name}*\n${'━'.repeat(22)}\n\n${parsed.narration}\n\n`;
+        let msg = `⚔️ *${game.name}*\n${'━'.repeat(22)}\n\n${parsed.narration || 'Tu avances prudemment... rien ne se passe pour l\'instant.'}\n\n`;
         if (parsed.hpChange) msg += `${parsed.hpChange>0?'❤️ +':'💔 '}${parsed.hpChange} HP\n`;
         if (parsed.goldChange) msg += `${parsed.goldChange>0?'💰 +':'💸 '}${parsed.goldChange} or\n`;
         if (parsed.levelUp) msg += `⬆️ *NIVEAU ${game.level} !* Tes stats augmentent !\n`;
@@ -348,7 +348,11 @@ Rends ça épique ! Combats aléatoires, trésors, pièges.`;
       }
 
       // Démarrer une nouvelle aventure
-      const heroName = text.replace(/new|start/i,'').trim() || `Héros_${sender.split('@')[0].slice(-4)}`;
+      const heroName = text?.replace(/new|start/i,'').trim() || `Héros_${sender.split('@')[0].slice(-4)}`;
+      if (!text?.trim() && !['new','start'].includes(action)) {
+        await sock.sendMessage(from, { text: '⚔️ Usage: !rpg [action] ou !rpg new pour commencer\nEx: !rpg J\'explore la forêt' });
+        return;
+      }
       const universes = ['Fantasy médiévale 🏰','Science-fiction 🚀','Apocalypse zombie 🧟','Piraterie 🏴‍☠️','Japon féodal ⛩️'];
       const universe = universes[Math.floor(Math.random()*universes.length)];
 

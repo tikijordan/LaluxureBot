@@ -182,6 +182,7 @@ import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
+import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
@@ -275,32 +276,6 @@ function addLog(level, msg) {
     console.log(`[${entry.time.slice(11,19)}] ${icon} ${msg}`);
 }
 
-// AutoSaveViewOnce
-async function autoSaveViewOnce(sock, msg, OWNER, ctx) {
-    if (!OWNER) return;
-    const ownerJid = OWNER + '@s.whatsapp.net';
-    let inner = msg.message?.viewOnceMessage?.message
-             || msg.message?.viewOnceMessageV2?.message
-             || msg.message?.viewOnceMessageV2Extension?.message;
-    if (!inner) {
-        const ct2 = getContentType(msg.message);
-        if (ct2 && /^(image|video|audio)Message$/.test(ct2) && msg.message[ct2]?.viewOnce === true) inner = msg.message;
-    }
-    if (!inner) return;
-    const type = getContentType(inner);
-    if (!type || !/^(image|video|audio)Message$/.test(type)) return;
-    const obj  = inner[type];
-    const kind = type.replace('Message','');
-    try {
-        const stream = await downloadContentFromMessage(obj, kind);
-        let buf = Buffer.from([]);
-        for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
-        const cap = `*Vue unique interceptée*\nDe: @${ctx.senderNumber}\n${obj?.caption?'Légende: '+obj.caption:''}`;
-        if (kind==='image') await sock.sendMessage(ownerJid, { image:buf, caption:cap }, { mentions:[ctx.senderJid] });
-        else if (kind==='video') await sock.sendMessage(ownerJid, { video:buf, caption:cap }, { mentions:[ctx.senderJid] });
-        else { await sock.sendMessage(ownerJid, { text:cap }); await sock.sendMessage(ownerJid, { audio:buf, mimetype:'audio/mp4', ptt:false }); }
-    } catch(e) { addLog('error', 'AutoVO: '+e.message); }
-}
 
 // Démarrer une session
 // phoneNumber optionnel → active le pairing code au lieu du QR
@@ -486,7 +461,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 return; // stop — ce socket est mort, le nouveau prendra le relais
             }
 
-            addLog('success', `[${state.id}]  Connecté — Numéro: ${num} | Préfixe: ${PREFIX}`);
+            addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
 
             // SESSION_STRING — affichée complète pour copier dans Railway env vars
             try {
@@ -603,12 +578,12 @@ async function startSession(sessionId, phoneNumber = null) {
                 const fromMe  = msg.key.fromMe;
                 const isGroup = rawJid.endsWith('@g.us');
                 const isLid   = rawJid.endsWith('@lid');
-                // OWNER = numéro du compte connecté, chargé depuis sock.user.id à connection='open'
-                const rawConnected = state.connectedNumber || '';
+                // OWNER = numéro du compte connecté (auto après QR/pairing), une session = un owner
+                const rawConnected = state.connectedNumber || sock.user?.id?.split(':')[0] || '';
                 const connectedNum = rawConnected.includes(':') ? rawConnected.split(':')[0].replace(/\D/g, '') : rawConnected.replace(/\D/g, '');
-                
+
                 const OWNER = connectedNum;
-                if (!OWNER) continue; // session pas encore pleinement connectée
+                if (!OWNER) continue; // session pas encore connectée (QR/pairing en attente)
                 const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
 
                 let senderJid, senderNumber;
@@ -665,24 +640,13 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 const OWNER_LID = state.ownerLid || null;
-                const MASTER_OWNER = (process.env.OWNER || '').replace(/\D/g, '');
 
                 const senderIsLid = senderJid.endsWith('@lid');
-                let resolvedLidToPn = senderNumber;
-                if (senderIsLid) {
-                    try {
-                        const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
-                        if (pn) resolvedLidToPn = cleanPhone(pn);
-                    } catch {}
-                }
 
-                // isOwner: fromMe OU numéro résolu (via lidMapping ou suffix strip)
+                // isOwner = compte connecté (auto après QR/pairing), par numéro ou LID
                 const isOwner = fromMe
-                    || (OWNER && normalize(resolvedLidToPn) === normalize(OWNER))
-                    || (MASTER_OWNER && normalize(resolvedLidToPn) === normalize(MASTER_OWNER))
+                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
                     || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID);
-
-                if (!isOwner) continue;
 
                 const ct = getContentType(msg.message);
                 let body = '';
@@ -691,11 +655,11 @@ async function startSession(sessionId, phoneNumber = null) {
                 else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
                 else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
 
-                const isViewOnce = !fromMe && (
-                    /^viewOnceMessage/.test(ct) || msg.message?.imageMessage?.viewOnce===true ||
-                    msg.message?.videoMessage?.viewOnce===true || msg.message?.audioMessage?.viewOnce===true
-                );
-                if (isViewOnce) autoSaveViewOnce(sock, msg, OWNER, { senderNumber, senderJid, isGroup, rawJid }).catch(()=>{});
+                if (isViewOnceMessage(msg)) {
+                    autoSaveViewOnce(sock, msg, OWNER, {
+                        senderNumber, senderJid, isGroup, from, rawJid,
+                    }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+                }
 
                 const isCmd = body.startsWith(PREFIX);
                 if (fromMe && !isCmd) continue;
@@ -709,21 +673,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     addLog('info', `[${state.id}] CMD !${cmd} par ${senderNumber}`);
                 }
 
-                // ── Mode privé : bloquer les non-owners ──────────────────
                 const currentBotMode = getBotMode();
-                if (isCmd && currentBotMode === 'private') {
-                    // isOwner = fromMe || senderNumber === OWNER
-                    // On bloque uniquement si ce n'est PAS l'owner
-                    if (!isOwner) {
-                        const cmdCheck = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase() || '';
-                        if (!['public', 'private', 'botmode'].includes(cmdCheck)) {
-                            await sock.sendMessage(from, {
-                                text: '🔐 Le bot est actuellement en mode privé. Seul le propriétaire peut l\'utiliser.',
-                            });
-                            continue;
-                        }
-                    }
-                }
 
                 // ── Anti-mute : supprimer messages des mutés ─────────────
                 if (isGroup && global.mutedMembers?.has(`${from}__${senderJid}`) && !isOwner) {
@@ -733,6 +683,9 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 // FIX: n'appeler handleCommand que si c'est une commande
                 if (!isCmd) continue;
+
+                // Seul l'owner peut déclencher des commandes (DM et groupes)
+                if (!isOwner) continue;
 
                 await handleCommand(sock, msg, {}, {
                     body, from, isGroup, isOwner, senderNumber, sender: senderJid,
@@ -1299,6 +1252,7 @@ button:hover{background:#1fb858}
     if (pathname==='/api/sessions' && method==='GET') {
         const list = [...sessions.values()].map(s=>({
             id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
+            ownerNumber:s.connectedNumber, ownerLid:s.ownerLid||null,
             qrCode:s.qrCode, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
         }));
         return sendJson(res,{ sessions:list });

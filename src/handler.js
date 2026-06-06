@@ -80,8 +80,10 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     // ── Résolution du préfixe et du propriétaire ──────────────
     const PREFIX    = ctx.prefix || process.env.PREFIX || '!';
-    const OWNER     = (ctx.owner || '').replace(/\D/g, '');
-    const OWNER_LID = ctx.ownerLid || null;
+    // Owner = numéro du compte connecté (auto après QR/pairing), pas de variable d'env
+    const connectedOwner = (sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
+    const OWNER     = (ctx.owner || connectedOwner).replace(/\D/g, '');
+    const OWNER_LID = ctx.ownerLid || sock.user?.lid?.split('@')[0] || null;
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
     // ── Extraction du contexte ────────────────────────────────
@@ -140,14 +142,16 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
-        // FIX 1 — normalize est maintenant disponible ici (définie au niveau module)
+        const senderIsLid = sender.endsWith('@lid');
         isOwner = fromMe
-            || (OWNER && normalize(senderNumber) === normalize(OWNER));
+            || (OWNER && normalize(senderNumber) === normalize(OWNER))
+            || (OWNER_LID && senderIsLid && sender.split('@')[0] === OWNER_LID);
     }
 
-    if (!isOwner) return;
-
     if (!body || !body.startsWith(PREFIX)) return;
+
+    // Seul l'owner peut utiliser le bot (DM et groupes)
+    if (!isOwner) return;
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);

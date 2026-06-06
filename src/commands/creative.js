@@ -39,29 +39,48 @@ function getMentionedJid(msg, args) {
 }
 
 async function askAI(prompt) {
-  // Réutilise Gemini ou Groq selon dispo
-  const geminiKey = process.env.GEMINI_API_KEY_1;
-  const groqKey   = process.env.GROQ_API_KEY_1;
+  const geminiKeys = [
+    process.env.GEMINI_API_KEY_1, process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3, process.env.GEMINI_API_KEY_4, process.env.GEMINI_API_KEY_5
+  ].filter(Boolean);
+  
+  const model = process.env.GEMINI_MODEL || 'gemini-3-flash-preview';
 
-  if (geminiKey) {
+  for (const key of geminiKeys) {
     try {
       const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
         { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 600 } },
         { timeout: 15000 }
       );
-      return res.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    } catch {}
+      if (res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return res.data.candidates[0].content.parts[0].text;
+      }
+    } catch (e) {
+      continue;
+    }
   }
-  if (groqKey) {
+
+  const groqKeys = [
+    process.env.GROQ_API_KEY_1, process.env.GROQ_API_KEY_2, process.env.GROQ_API_KEY_3,
+    process.env.GROQ_API_KEY_4, process.env.GROQ_API_KEY_5
+  ].filter(Boolean);
+  
+  const groqModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+  for (const key of groqKeys) {
     try {
       const res = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
-        { model: 'llama-3.3-70b-versatile', messages: [{ role:'user', content: prompt }], max_tokens: 600 },
-        { headers: { Authorization: `Bearer ${groqKey}` }, timeout: 15000 }
+        { model: groqModel, messages: [{ role:'user', content: prompt }], max_tokens: 600 },
+        { headers: { Authorization: `Bearer ${key}` }, timeout: 15000 }
       );
-      return res.data?.choices?.[0]?.message?.content || null;
-    } catch {}
+      if (res.data?.choices?.[0]?.message?.content) {
+        return res.data.choices[0].message.content;
+      }
+    } catch (e) {
+      continue;
+    }
   }
   return null;
 }
@@ -444,6 +463,8 @@ export default {
         if (!snips[name] || snips[name].owner !== senderNumber) { await sock.sendMessage(from, { text: '❌ Snippet introuvable ou non autorisé.' }); return; }
         snips[name].public = true; saveSnippets(snips);
         await sock.sendMessage(from, { text: `✅ Snippet *"${name}"* partagé publiquement!\nTous les utilisateurs peuvent y accéder avec !snippet get ${name}` });
+      } else {
+        await sock.sendMessage(from, { text: '❌ Action inconnue.\n\n_Commandes: list, save, get, del, share_' });
       }
     },
   },

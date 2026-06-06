@@ -17,13 +17,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const PREFIX = process.env.PREFIX || '/';
-const OWNER = process.env.OWNER_NUMBER || '';
 
 console.log('\n╔══════════════════════════════════════╗');
 console.log('║        DEBUG BOT MINIMAL             ║');
 console.log('╠══════════════════════════════════════╣');
 console.log(`  PREFIX      : "${PREFIX}"`);
-console.log(`  OWNER       : "${OWNER || '⚠️  NON DÉFINI'}"`);
+console.log(`  OWNER       : auto (défini après QR/pairing)`);
 console.log('╚══════════════════════════════════════╝\n');
 
 async function start() {
@@ -46,10 +45,10 @@ async function start() {
       qrcodeterminal.generate(qr, { small: true });
     }
     if (connection === 'open') {
+      const ownerNum = sock.user?.id?.split(':')[0] || '';
       console.log(`\n✅ CONNECTÉ en tant que: ${sock.user?.id}`);
-      console.log(`   Numéro bot: ${sock.user?.id?.split(':')[0]}`);
-      console.log(`   OWNER dans .env: "${OWNER}"`);
-      console.log(`   Sont-ils identiques? ${sock.user?.id?.split(':')[0] === OWNER ? '✅ OUI' : '⚠️  NON — mets ton numéro dans OWNER_NUMBER'}`);
+      console.log(`   Owner auto: ${ownerNum}`);
+      console.log(`   LID: ${sock.user?.lid || 'N/A'}`);
       console.log('\n💬 Envoie un message pour tester...\n');
     }
     if (connection === 'close') {

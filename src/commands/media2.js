@@ -21,7 +21,17 @@
 
 import axios from 'axios';
 import { downloadContentFromMessage, getContentType } from '@whiskeysockets/baileys';
-import { createCanvas, loadImage, registerFont } from 'canvas';
+
+let _canvas = null;
+async function getCanvas() {
+  if (_canvas) return _canvas;
+  try {
+    _canvas = await import('canvas');
+    return _canvas;
+  } catch (err) {
+    throw new Error(`Module canvas indisponible (${err.message}). Installe les dépendances système (libcairo, libpango) puis npm rebuild canvas.`, { cause: err });
+  }
+}
 
 async function getImageBuffer(msg) {
   const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -57,8 +67,8 @@ export default {
       }
 
       try {
-        const form = new FormData();
-        form.append('image_file', new Blob([buf]), 'image.png');
+        const form = new globalThis.FormData();
+        form.append('image_file', new globalThis.Blob([buf]), 'image.png');
         form.append('size', 'auto');
 
         const res = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
@@ -96,6 +106,7 @@ export default {
       }
 
       try {
+        const { createCanvas, loadImage } = await getCanvas();
         const img = await loadImage(imgBuf);
         const padding = 60;
         const canvas = createCanvas(img.width, img.height + padding);

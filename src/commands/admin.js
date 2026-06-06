@@ -42,7 +42,7 @@ function getMentionedJid(msg, args) {
 // Vérifier que la commande est utilisée dans un groupe
 function checkGroup(sock, from, isGroup) {
   if (!isGroup) {
-    sock.sendMessage(from, { text: ' Cette commande fonctionne uniquement dans les groupes.' });
+    sock.sendMessage(from, { text: ' Cette commande fonctionne uniquement dans les groupes.' }).catch(() => {});
     return false;
   }
   return true;

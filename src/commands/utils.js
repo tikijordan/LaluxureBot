@@ -64,13 +64,13 @@ export default {
   calc: {
     description: 'Calculatrice',
     execute: async ({ sock, from, text }) => {
-      if (!text) {
+      if (!text?.trim()) {
         await sock.sendMessage(from, { text: '🔢 Usage: !calc [expression]\nExemples: !calc 5*9+2  |  !calc sqrt(144)  |  !calc sin(30 deg)' });
         return;
       }
 
       try {
-        const result = limitedEvaluate(text);
+        const result = limitedEvaluate(text.trim());
         await sock.sendMessage(from, {
           text: `🧮 *Calculatrice*\n\n📝 Expression: ${text}\n✅ Résultat: *${result}*`,
         });
@@ -173,9 +173,9 @@ export default {
 
   contact: {
     description: 'Contacter l\'équipe',
-    execute: async ({ sock, from }) => {
-      const ownerNum = process.env.OWNER_NUMBER;
-      const msg = `📞 *Contacter l\'équipe*\n\n${ownerNum ? `👑 Owner: wa.me/${ownerNum}` : 'Contact non configuré'}\n\n_Pour signaler un bug ou proposer une amélioration, contacte directement l\'owner._\n\n🛠️ Merci d\'utiliser *${process.env.BOT_NAME || 'MonBot'}*!`;
+    execute: async ({ sock, from, owner }) => {
+      const ownerNum = owner || (sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
+      const msg = `📞 *Contacter l'équipe*\n\n${ownerNum ? `👑 Owner: wa.me/${ownerNum}` : 'Owner non connecté'}\n\n_Pour signaler un bug ou proposer une amélioration, contacte directement l'owner._\n\n🛠️ Merci d'utiliser *${process.env.BOT_NAME || 'MonBot'}*!`;
       await sock.sendMessage(from, { text: msg });
     },
   },

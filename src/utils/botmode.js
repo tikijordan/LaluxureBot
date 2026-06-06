@@ -59,7 +59,5 @@ export function setPublicMode() {
 
 // Vérifier si un utilisateur peut utiliser le bot
 export function canUseBot(isOwner) {
-  const mode = getBotMode();
-  if (mode === 'private') return isOwner; // mode privé → owner seulement
-  return true; // mode public → tout le monde
+  return isOwner; // Seul l'owner peut utiliser le bot
 }

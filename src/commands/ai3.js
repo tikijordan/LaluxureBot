@@ -3,8 +3,8 @@ import axios from 'axios';
 const msgCache = new Set();
 
 async function quickAI(prompt) {
-    // Utilise gemini-1.5-flash (plus robuste pour le JSON)
-    const key = process.env.GEMINI_API_KEY_1;
+    // Utilise gemini-3-flash-preview (plus robuste pour le JSON)
+    const key = (process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_5);
     try {
         const res = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${key}`,
@@ -28,6 +28,11 @@ export default {
             
             if (result) {
                 await sock.sendMessage(from, { text: `⚖️ *DÉBAT*\n\n${result}`, edit: key });
+            } else {
+                await sock.sendMessage(from, {
+                    text: '❌ Service IA indisponible. Réessaie plus tard.',
+                    edit: key,
+                });
             }
         }
     },

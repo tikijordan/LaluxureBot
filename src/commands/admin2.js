@@ -33,7 +33,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 if (!global.botMessages) global.botMessages = new Map();
 
 function checkGroup(sock, from, isGroup) {
-  if (!isGroup) { sock.sendMessage(from, { text: ' Uniquement dans les groupes.' }); return false; }
+  if (!isGroup) { sock.sendMessage(from, { text: ' Uniquement dans les groupes.' }).catch(() => {}); return false; }
   return true;
 }
 function getMentionedJid(msg, args) {

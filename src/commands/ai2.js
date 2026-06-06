@@ -19,7 +19,7 @@ async function callAI(messages, temperature = 0.7) {
             parts: [{ text: m.content }]
         }));
         const res = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${key}`,
             { contents, generationConfig: { temperature, maxOutputTokens: 1000 } },
             { timeout: 20000 }
         );
@@ -61,6 +61,11 @@ export default {
                 session.lastActivity = Date.now();
                 chatSessions.set(sender, session);
                 await sock.sendMessage(from, { text: `🤖 *Chatbot*\n\n${reply}`, edit: key });
+            } else {
+                await sock.sendMessage(from, {
+                    text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
+                    edit: key,
+                });
             }
         }
     },
@@ -81,7 +86,7 @@ export default {
                 for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
 
                 const res = await axios.post(
-                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY_1}`,
+                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_5}`,
                     {
                         contents: [{
                             parts: [

@@ -40,7 +40,7 @@ function getMentionedJid(msg, args) {
   return null;
 }
 function checkGroup(sock, from, isGroup) {
-  if (!isGroup) { sock.sendMessage(from, { text: '❌ Uniquement dans les groupes.' }); return false; }
+  if (!isGroup) { sock.sendMessage(from, { text: '❌ Uniquement dans les groupes.' }).catch(() => {}); return false; }
   return true;
 }
 
@@ -335,7 +335,7 @@ export default {
 
       const timeStr = args[0].toLowerCase();
       const message = args.slice(1).join(' ');
-      let delayMs = 0;
+      let delayMs;
 
       if (timeStr.endsWith('min')) {
         delayMs = parseInt(timeStr) * 60 * 1000;

@@ -43,7 +43,7 @@ function getMentionedJid(msg, args) {
   return null;
 }
 function checkGroup(sock, from, isGroup) {
-  if (!isGroup) { sock.sendMessage(from, { text: '❌ Uniquement dans les groupes.' }); return false; }
+  if (!isGroup) { sock.sendMessage(from, { text: '❌ Uniquement dans les groupes.' }).catch(() => {}); return false; }
   return true;
 }
 

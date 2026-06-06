@@ -24,12 +24,12 @@ import axios from 'axios';
 import crypto from 'crypto';
 
 async function callAI(prompt) {
-  const geminiKey = process.env.GEMINI_API_KEY_1;
-  const groqKey = process.env.GROQ_API_KEY_1;
+  const geminiKey = (process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_5);
+  const groqKey = (process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY_5);
   if (geminiKey) {
     try {
       const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiKey}`,
         { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 800 } },
         { timeout: 15000 }
       );

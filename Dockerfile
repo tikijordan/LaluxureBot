@@ -13,12 +13,11 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-# Installer curl_cffi (nécessaire pour TikTok impersonation) et yt-dlp via pip
-RUN pip3 install --break-system-packages curl_cffi 
-RUN wget --no-check-certificate https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -O /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp && \
-    yt-dlp -U
+# yt-dlp + curl_cffi (TikTok impersonation) + dépendances merge
+RUN pip3 install --break-system-packages --upgrade \
+    "yt-dlp[default]" \
+    curl_cffi \
+    && ln -sf $(which yt-dlp) /usr/local/bin/yt-dlp
 
 # Configurer yt-dlp :
 #  - player_client : ios + android + web_creator (bypass détection bot YouTube)
