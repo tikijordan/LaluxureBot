@@ -625,13 +625,21 @@ async function startSession(sessionId, phoneNumber = null, { force = false } = {
     });
 
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
-        // ── FIX DOUBLE RÉPONSE #1 : ignorer tout sauf les vrais nouveaux messages ──
         // 'notify' = message reçu en temps réel
-        // 'append' = sync historique (au démarrage) → NE PAS traiter
-        if (type !== 'notify') return;
+        // 'append' = messages ajoutés au chat — inclut TES propres commandes envoyées
+        //            depuis ton téléphone (appareil principal) vers l'appareil lié (bot).
+        //            On les accepte si récents (<2 min) pour ne pas rejouer l'historique.
+        //            La déduplication (processedMsgIds) évite tout double traitement.
+        if (type !== 'notify' && type !== 'append') return;
 
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
+
+            // Pour 'append', ne traiter que les messages récents (évite le rejeu d'historique au boot)
+            if (type === 'append') {
+                const msgTsMs = Number(msg.messageTimestamp || 0) * 1000;
+                if (!msgTsMs || (Date.now() - msgTsMs) > 2 * 60 * 1000) continue;
+            }
 
             // ── Mise à jour activité (anti-zombie watchdog) ──
             state.lastActivity = Date.now();
