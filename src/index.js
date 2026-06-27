@@ -451,7 +451,8 @@ async function startSession(sessionId, phoneNumber = null) {
                 } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
 
                 // ── MongoDB : renommer l'ancien sessionId → nouveau (numéro réel) ──
-                migrateSessionId(sessionId, num, num, state.authPath).catch(e =>
+                // await obligatoire : évite la race entre migrate et le startSession suivant
+                await migrateSessionId(sessionId, num, num, state.authPath).catch(e =>
                     addLog('warn', `[MongoDB] migrateSessionId: ${e.message}`)
                 );
 

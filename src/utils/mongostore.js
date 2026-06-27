@@ -356,8 +356,36 @@ export async function saveAllActiveSessions(sessionsMap) {
 
 export async function migrateSessionId(oldId, newId, number, authPath) {
     if (!connected || !collection || !oldId || !newId || oldId === newId) return;
-    await saveSessionMongo(newId, number || newId, authPath).catch(() => {});
-    if (oldId !== newId) await deleteSessionMongo(oldId).catch(() => {});
+
+    // 1. Lire le document existant depuis MongoDB (source de vérité, pas le disque)
+    const existing = memCache.get(oldId) || null;
+    let savedOk = false;
+
+    if (existing && existing.files && Object.keys(existing.files).length > 0) {
+        // Copier le document MongoDB directement avec le nouveau _id
+        try {
+            await collection.updateOne(
+                { _id: newId },
+                { $set: { _id: newId, number, files: existing.files, updatedAt: new Date() } },
+                { upsert: true }
+            );
+            memCache.set(newId, { number, files: existing.files, updatedAt: new Date() });
+            savedOk = true;
+            console.log(`[MongoDB] ✅ Session migrée [${oldId}] → [${newId}]`);
+        } catch (e) {
+            console.error(`[MongoDB] ❌ migrateSessionId save [${newId}]:`, e.message);
+        }
+    } else {
+        // Fallback : lire depuis le disque si le cache ne contient pas l'ancien ID
+        savedOk = await saveSessionMongo(newId, number || newId, authPath).catch(() => false);
+    }
+
+    // 2. Supprimer l'ancien uniquement si le nouveau est bien en base
+    if (savedOk) {
+        await deleteSessionMongo(oldId).catch(() => {});
+    } else {
+        console.warn(`[MongoDB] ⚠️ migrateSessionId: nouveau [${newId}] non sauvegardé — ancien [${oldId}] conservé`);
+    }
 }
 
 export async function flushAllPendingSaves() {
