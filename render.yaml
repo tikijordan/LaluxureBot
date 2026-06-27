@@ -23,3 +23,5 @@ services:
         sync: false
       - key: PREFIX
         value: ":"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=400"

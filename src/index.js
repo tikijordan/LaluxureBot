@@ -166,6 +166,11 @@ setInterval(() => {
     }
 }, 60 * 1000); // check toutes les minutes
 
+// GC explicite toutes les 5 minutes pour libérer la mémoire Baileys (heap limité sur Render Starter)
+if (typeof global.gc === 'function') {
+    setInterval(() => { try { global.gc(); } catch {} }, 5 * 60 * 1000);
+}
+
 // Filtre anti-logs Baileys
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
     'MessageCounterError','Closing open session','Closing session:',
@@ -385,7 +390,7 @@ async function startSession(sessionId, phoneNumber = null) {
     sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
         if (!pn || !lid) return;
         const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
-        const lidNum = lid.split('@')[0];
+        const lidNum = lid.split('@')[0].split(':')[0];
         if (!state.lidCache) state.lidCache = {};
         state.lidCache[lidNum] = pnNum;   // LID → numéro
         state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
@@ -403,7 +408,7 @@ async function startSession(sessionId, phoneNumber = null) {
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
             // sock.user.lid = LID du compte connecté (format "XXXXXXX@lid")
             // Utilisé pour reconnaître l'owner dans les groupes LID
-            state.ownerLid = sock.user?.lid?.split('@')[0] || null;
+            state.ownerLid = sock.user?.lid ? sock.user.lid.split('@')[0].split(':')[0] : null;
 
             // Si ownerLid absent dans sock.user, tenter de le récupérer via lidMapping
             if (!state.ownerLid && num) {
@@ -411,7 +416,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     const ownerPnJid = num + '@s.whatsapp.net';
                     const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([ownerPnJid]);
                     if (pairs && pairs.length > 0) {
-                        state.ownerLid = pairs[0].lid.split('@')[0];
+                        state.ownerLid = pairs[0].lid.split('@')[0].split(':')[0];
                         addLog('info', `[${sessionId}] ownerLid résolu: ${state.ownerLid}`);
                     }
                 } catch {}
@@ -598,7 +603,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     const isParticipantLid = senderJid.endsWith('@lid');
 
                     if (isParticipantLid) {
-                        const lidNum = senderJid.split('@')[0];
+                        const lidNum = senderJid.split('@')[0].split(':')[0];
 
                         // 1. Cache lidCache peuplé via lid-mapping.update
                         if (state.lidCache?.[lidNum]) {
@@ -646,7 +651,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 // isOwner = compte connecté (auto après QR/pairing), par numéro ou LID
                 const isOwner = fromMe
                     || (OWNER && normalize(senderNumber) === normalize(OWNER))
-                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0] === OWNER_LID);
+                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0].split(':')[0] === OWNER_LID);
 
                 const ct = getContentType(msg.message);
                 let body = '';
