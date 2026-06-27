@@ -6,12 +6,12 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { getContentType } from '@whiskeysockets/baileys';
 import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
 // FIX 2 — lire le mode bot dynamiquement depuis le fichier plutôt que depuis ctx
 import { getBotMode } from './commands/security.js';
-import { extractMessageBody, resolveIsOwner } from './utils/message.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,6 +32,22 @@ const _commandsLoadPromise = loadCommands()
 
 const _defaultNoTagGroups = new Set();
 
+// ══════════════════════════════════════════════════════════════
+// DÉDUPLICATION HANDLER — Map avec TTL (10 min par message)
+// ══════════════════════════════════════════════════════════════
+const _handledMsgIds = new Map();
+const _HANDLER_TTL   = 10 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, ts] of _handledMsgIds) {
+        if (now - ts > _HANDLER_TTL) _handledMsgIds.delete(id);
+    }
+}, 60 * 1000);
+
+// FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
+//          (était définie seulement dans le bloc private, causant ReferenceError
+//          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
+const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
 
 /**
  * Traite un message entrant et exécute la commande correspondante.
@@ -42,6 +58,13 @@ const _defaultNoTagGroups = new Set();
  * @param {object} ctx     - Contexte pré-calculé par index.js
  */
 export async function handleCommand(sock, msg, store, ctx = {}) {
+
+    // ── Déduplication au niveau handler ───────────────────────
+    const msgId = msg?.key?.id;
+    if (msgId) {
+        if (_handledMsgIds.has(msgId)) return;
+        _handledMsgIds.set(msgId, Date.now());
+    }
 
     // ── Attendre que les commandes soient chargées (max 15s) ──
     if (!_commandsReady) {
@@ -73,7 +96,12 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     // Fallback complet si appelé sans contexte (compatibilité)
     if (body === undefined) {
-        body = extractMessageBody(msg);
+        const ct = getContentType(msg.message);
+        if (ct === 'conversation')             body = msg.message.conversation || '';
+        else if (ct === 'extendedTextMessage') body = msg.message.extendedTextMessage?.text || '';
+        else if (ct === 'imageMessage')        body = msg.message.imageMessage?.caption || '';
+        else if (ct === 'videoMessage')        body = msg.message.videoMessage?.caption || '';
+        else body = '';
 
         const rawJid = msg.key.remoteJid;
         const fromMe = msg.key.fromMe;
@@ -114,15 +142,15 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
-        isOwner = resolveIsOwner({
-            fromMe, senderNumber, senderJid: sender, OWNER, OWNER_LID,
-            lidCache: ctx.lidCache,
-        });
+        const senderIsLid = sender.endsWith('@lid');
+        isOwner = fromMe
+            || (OWNER && normalize(senderNumber) === normalize(OWNER))
+            || (OWNER_LID && senderIsLid && sender.split('@')[0] === OWNER_LID);
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
 
-    // Owner-only permanent — DM et groupes
+    // Seul l'owner peut utiliser le bot (DM et groupes)
     if (!isOwner) return;
 
     // ── Parsing de la commande ─────────────────────────────────
@@ -133,7 +161,9 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
-    const botMode = ctx.botMode ?? getBotMode();
+    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
+    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
+    const botMode = getBotMode();
 
     const command = commands[cmdName];
     if (!command) return;

@@ -192,6 +192,19 @@ export async function releaseLock({ db, lockName, ownerId }) {
     } catch {}
 }
 
+/** Supprime tous les locks d'instance (nettoyage complet) */
+export async function deleteAllInstanceLocks(db) {
+    if (!db) return { deleted: 0 };
+    try {
+        const res = await db.collection(COLLECTION).deleteMany({});
+        if (res.deletedCount) console.log(`[Lock] 🗑️ ${res.deletedCount} lock(s) supprimé(s)`);
+        return { deleted: res.deletedCount };
+    } catch (e) {
+        console.error('[Lock] ❌ deleteAllInstanceLocks:', e.message);
+        return { deleted: 0, error: e.message };
+    }
+}
+
 /**
  * Démarre un renouvellement périodique du lock.
  *

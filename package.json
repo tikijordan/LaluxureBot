@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "cleanup-mongo": "node scripts/cleanup-mongo.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

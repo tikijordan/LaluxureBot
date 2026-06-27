@@ -115,7 +115,7 @@ async function preloadSessionsToMemory() {
 // Lit les fichiers d'une session depuis le disque TEMPORAIRE
 // (Ne lit que ce qui est en /tmp, pas de persistance sur /app)
 // ─────────────────────────────────────────────
-function readSessionFiles(authPath) {
+export function readSessionFiles(authPath) {
     const result = {};
     if (!fs.existsSync(authPath)) return result;
 
@@ -287,6 +287,22 @@ export async function deleteSessionMongo(sessionId) {
     } catch (e) {
         console.error(`[MongoDB] ❌ deleteSession [${sessionId}]:`, e.message);
         return false;
+    }
+}
+
+/** Supprime toutes les sessions WhatsApp de MongoDB (nettoyage complet) */
+export async function deleteAllSessionsMongo() {
+    if (!collection) return { deleted: 0 };
+    try {
+        const res = await collection.deleteMany({});
+        memCache.clear();
+        for (const t of pushTimers.values()) clearTimeout(t);
+        pushTimers.clear();
+        console.log(`[MongoDB] 🗑️ ${res.deletedCount} session(s) supprimée(s) — base vidée`);
+        return { deleted: res.deletedCount };
+    } catch (e) {
+        console.error('[MongoDB] ❌ deleteAllSessions:', e.message);
+        return { deleted: 0, error: e.message };
     }
 }
 
