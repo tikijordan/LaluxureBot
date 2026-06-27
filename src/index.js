@@ -186,7 +186,7 @@ import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
-import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock } from './utils/instancelock.js';
+import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
 
 // Sessions Map + logs circulaires
@@ -866,11 +866,44 @@ async function loadExistingSessions() {
         const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000'); // 60s
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
         const ownerId = buildOwnerId();
+        const deployId = process.env.RENDER_SERVICE_ID || process.env.RAILWAY_DEPLOYMENT_ID || '';
 
-        const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
-        if (!lockRes.ok) {
-            addLog('warn', `[Lock] Une autre instance détient le lock (${lockRes.holder}) — WhatsApp ne sera pas démarré ici.`);
-            // On laisse le dashboard/API tourner mais sans connexions WA.
+        const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
+        let lockOk = lockRes.ok;
+
+        if (!lockOk) {
+            // Sur Render : une seule instance à la fois — voler le lock si l'ancienne instance
+            // est morte (heartbeat arrêté) ou appartient à un déploiement différent.
+
+            // 1. Supprimer si expiré (SIGTERM trop court pour releaseLock)
+            await forceReleaseExpiredLock({ db, lockName });
+
+            // 2. Voler si heartbeat mort (updatedAt vieux de > ttlMs)
+            lockOk = await forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId });
+
+            // 3. Voler si un autre déploiement Render détient encore le lock (rolling deploy)
+            if (!lockOk && deployId) {
+                lockOk = await forceStealOlderDeploy({ db, lockName, ownerId, ttlMs, deployId });
+            }
+
+            // 4. Dernier recours : attendre ttlMs/2 que le lock expire naturellement, puis réessayer
+            if (!lockOk) {
+                const waitMs = Math.min(ttlMs / 2, 30000);
+                addLog('warn', `[Lock] Lock détenu par ${lockRes.holder} — attente ${Math.round(waitMs/1000)}s...`);
+                await new Promise(r => setTimeout(r, waitMs));
+                const retry = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+                lockOk = retry.ok;
+                if (!lockOk) {
+                    // Forcer la prise : sur Render une seule instance tourne, le lock est orphelin
+                    await forceStealStaleLock({ db, lockName, ownerId, ttlMs: 0, deployId });
+                    lockOk = true;
+                    addLog('warn', `[Lock] Lock forcé (takeover) — ancienne instance considérée morte`);
+                }
+            }
+        }
+
+        if (!lockOk) {
+            addLog('warn', `[Lock] Impossible d'acquérir le lock — WhatsApp ne sera pas démarré ici.`);
             return;
         }
         addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
@@ -881,6 +914,7 @@ async function loadExistingSessions() {
             ownerId,
             ttlMs,
             intervalMs: hbMs,
+            deployId,
             onLost: (info) => {
                 addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
                 // Fermer toutes les sockets pour éviter les 440

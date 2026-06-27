@@ -222,6 +222,7 @@ export function startLockHeartbeat({
     ttlMs,
     intervalMs,
     onLost,
+    deployId = '',
 }) {
     let stopped = false;
     const MAX_CONSECUTIVE_FAILURES = 8;
@@ -230,7 +231,7 @@ export function startLockHeartbeat({
     const tick = async () => {
         if (stopped) return;
         try {
-            const res = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
+            const res = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
             consecutiveFailures = 0; // reset sur succès
             if (!res.ok) {
                 stopped = true;
