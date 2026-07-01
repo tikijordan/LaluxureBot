@@ -137,7 +137,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
                 senderNumber = stripSuffix(sender);
             }
         } else {
-            from         = (isLid || fromMe) ? `${OWNER}@s.whatsapp.net` : rawJid;
+            from         = rawJid;
             senderNumber = fromMe ? OWNER : stripSuffix(rawJid);
             sender       = `${senderNumber}@s.whatsapp.net`;
         }

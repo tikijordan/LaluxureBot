@@ -112,8 +112,13 @@ export default {
         return;
       }
       const number = args[0].replace(/[^0-9]/g, '');
+      const wasBanned = isBanned(from, number);
       unbanUser(from, number);
-      await sock.sendMessage(from, { text: ` *${number}* a été débanni. Il peut rejoindre le groupe.` });
+      await sock.sendMessage(from, {
+        text: wasBanned
+          ? ` *${number}* a été débanni. Il peut rejoindre le groupe.`
+          : ` *${number}* n'était pas dans la liste des bannis de ce groupe.`,
+      });
     },
   },
 
@@ -337,6 +342,7 @@ export default {
           await new Promise(r => setTimeout(r, 300));
         } catch {}
       }
+      await sock.sendMessage(from, { text: ` *${deleted}/${toDelete.length}* message(s) supprimé(s).` });
       // Vider le cache après suppression
       global.botMessages.set(from, []);
     },

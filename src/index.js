@@ -128,6 +128,14 @@ fse.ensureDirSync(DATA_ROOT);
 if (!global.noTagGroups)  global.noTagGroups  = new Set();
 if (!global.mutedMembers) global.mutedMembers  = new Set();
 if (!global.botMessages)  global.botMessages   = new Map();
+if (!global.automodGroups)    global.automodGroups    = new Set();
+if (!global.floodGroups)      global.floodGroups      = new Map();
+if (!global.floodTracker)     global.floodTracker     = new Map();
+if (!global.maxMembersGroups) global.maxMembersGroups = new Map();
+if (!global.lockdownGroups)   global.lockdownGroups   = new Set();
+if (!global.antifakeGroups)   global.antifakeGroups   = new Set();
+if (!global.slowmodeLastMsg)  global.slowmodeLastMsg  = new Map();
+if (!global.captchaPending)   global.captchaPending   = new Map();
 
 // ══════════════════════════════════════════════════════════════
 // NETTOYAGE TEMP SESSIONS — Tout va sur MongoDB, rien ne persiste
@@ -188,6 +196,17 @@ import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
+import { isAntilinkEnabled } from './utils/antilink.js';
+import { getFilters as getBadWordFilters } from './utils/filter.js';
+import { getSlowmode } from './utils/slowmode.js';
+import { isBanned } from './utils/banned.js';
+import { isFiltered as isMediaFiltered } from './utils/mediafilter.js';
+import { addWarn, resetWarns } from './utils/warns.js';
+import { isVip } from './utils/vip.js';
+import { isWhitelisted } from './utils/whitelist.js';
+import { getWelcomeConfig } from './utils/welcome.js';
+import { isCaptchaEnabled, createChallenge } from './utils/captcha.js';
+import { log as logGroupAction } from './utils/grouplogs.js';
 
 // Sessions Map + logs circulaires
 const sessions = new Map();
@@ -337,6 +356,27 @@ async function startSession(sessionId, phoneNumber = null) {
 
     state.sock = sock;
 
+    // ── TRACKING DES MESSAGES DU BOT (pour !cleanbot / !purge) ──────
+    // On wrap sendMessage une seule fois pour enregistrer chaque envoi
+    // du bot dans un groupe, sinon global.botMessages reste toujours vide.
+    if (!sock.__sendMessageWrapped) {
+        const _origSendMessage = sock.sendMessage.bind(sock);
+        sock.sendMessage = async (jid, content, options) => {
+            const result = await _origSendMessage(jid, content, options);
+            try {
+                if (jid && jid.endsWith('@g.us') && result?.key) {
+                    if (!global.botMessages.has(jid)) global.botMessages.set(jid, []);
+                    const arr = global.botMessages.get(jid);
+                    arr.push(result.key);
+                    // Limite la taille du cache pour éviter une fuite mémoire
+                    if (arr.length > 100) arr.splice(0, arr.length - 100);
+                }
+            } catch {}
+            return result;
+        };
+        sock.__sendMessageWrapped = true;
+    }
+
     // ── SAFE EVENT WRAPPER — capture les erreurs non catchées dans les handlers ──
     function wrapHandler(name, handler) {
         return async (...args) => {
@@ -395,6 +435,108 @@ async function startSession(sessionId, phoneNumber = null) {
         state.lidCache[lidNum] = pnNum;   // LID → numéro
         state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
     });
+
+    // ── ARRIVÉE / DÉPART DE MEMBRES ──────────────────────────────────
+    // welcome, goodbye, antifake et maxmembers étaient configurables via
+    // commande mais aucun listener n'existait pour cet event : ils
+    // n'avaient donc jamais d'effet réel. On les branche ici.
+    sock.ev.on('group-participants.update', wrapHandler('group-participants.update', async ({ id: from, participants, action }) => {
+        if (!from || !participants?.length) return;
+        try {
+            const meta = await sock.groupMetadata(from).catch(() => null);
+            const groupName = meta?.subject || '';
+
+            if (action === 'add') {
+                for (const jid of participants) {
+                    const number = jid.split('@')[0];
+                    const name = number;
+
+                    // Anti-fake : bloque les numéros au format suspect
+                    if (global.antifakeGroups.has(from)) {
+                        const isSuspect = !/^\d{8,15}$/.test(number) ||
+                            /^(1|0)/.test(number); // formats manifestement invalides
+                        if (isSuspect) {
+                            try {
+                                await sock.groupParticipantsUpdate(from, [jid], 'remove');
+                                logGroupAction(from, 'antifake_kick', 'system', number);
+                            } catch {}
+                            continue;
+                        }
+                    }
+
+                    // Limite de membres
+                    const max = global.maxMembersGroups.get(from);
+                    if (max && meta?.participants?.length > max) {
+                        try {
+                            await sock.groupParticipantsUpdate(from, [jid], 'remove');
+                            await sock.sendMessage(from, { text: `👥 Groupe complet (limite: ${max}), *${number}* a été refusé.` });
+                        } catch {}
+                        continue;
+                    }
+
+                    // Lockdown : personne ne devrait rejoindre pendant l'urgence
+                    if (global.lockdownGroups.has(from)) {
+                        try { await sock.groupParticipantsUpdate(from, [jid], 'remove'); } catch {}
+                        continue;
+                    }
+
+                    // Message de bienvenue
+                    try {
+                        const config = getWelcomeConfig(from);
+                        if (config?.welcome) {
+                            const text = config.welcome
+                                .replace(/{nom}/g, name)
+                                .replace(/{groupe}/g, groupName)
+                                .replace(/{date}/g, new Date().toLocaleDateString('fr-FR'));
+                            await sock.sendMessage(from, { text, mentions: [jid] });
+                        }
+                    } catch {}
+
+                    // Captcha anti-bot
+                    if (isCaptchaEnabled(from)) {
+                        try {
+                            const challenge = createChallenge(from, jid);
+                            if (challenge) {
+                                await sock.sendMessage(jid, {
+                                    text: `🔐 Vérification anti-bot pour rejoindre *${groupName}*\n\n${challenge.question}\n\n_Réponds en privé dans les 2 minutes, sinon tu seras expulsé._`,
+                                });
+                                const key = `${from}__${jid}`;
+                                if (global.captchaPending.get(key)?.timer) clearTimeout(global.captchaPending.get(key).timer);
+                                const timer = setTimeout(async () => {
+                                    if (global.captchaPending.get(key)) {
+                                        try { await sock.groupParticipantsUpdate(from, [jid], 'remove'); } catch {}
+                                        global.captchaPending.delete(key);
+                                    }
+                                }, 2 * 60 * 1000);
+                                global.captchaPending.set(key, { answer: challenge.answer, timer });
+                            }
+                        } catch {}
+                    }
+                }
+            } else if (action === 'remove') {
+                for (const jid of participants) {
+                    const number = jid.split('@')[0];
+                    try {
+                        const config = getWelcomeConfig(from);
+                        if (config?.goodbye) {
+                            const text = config.goodbye
+                                .replace(/{nom}/g, number)
+                                .replace(/{groupe}/g, groupName)
+                                .replace(/{date}/g, new Date().toLocaleDateString('fr-FR'));
+                            await sock.sendMessage(from, { text });
+                        }
+                    } catch {}
+                    const key = `${from}__${jid}`;
+                    if (global.captchaPending.has(key)) {
+                        clearTimeout(global.captchaPending.get(key).timer);
+                        global.captchaPending.delete(key);
+                    }
+                }
+            }
+        } catch (err) {
+            addLog('error', `[${state.id}] group-participants.update: ${err.message}`);
+        }
+    }));
 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
         if (qr && !phoneNumber) {
@@ -590,7 +732,9 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 const OWNER = connectedNum;
                 if (!OWNER) continue; // session pas encore connectée (QR/pairing en attente)
-                const from  = isGroup ? rawJid : ((isLid||fromMe) ? OWNER+'@s.whatsapp.net' : rawJid);
+                // Numéro perso de l'owner (distinct du numéro du bot) — configurable via env
+                const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
+                const from  = isGroup ? rawJid : rawJid;
 
                 let senderJid, senderNumber;
                 // Extraction robuste du numéro, en ignorant le suffixe d'appareil et le domaine
@@ -649,9 +793,10 @@ async function startSession(sessionId, phoneNumber = null) {
 
                 const senderIsLid = senderJid.endsWith('@lid');
 
-                // isOwner = compte connecté (auto après QR/pairing), par numéro ou LID
+                // isOwner = compte connecté (auto après QR/pairing), par numéro ou LID, ou numéro perso configuré
                 const isOwner = fromMe
                     || (OWNER && normalize(senderNumber) === normalize(OWNER))
+                    || (OWNER_PERSONAL && normalize(senderNumber) === OWNER_PERSONAL)
                     || (OWNER_LID && senderIsLid && senderJid.split('@')[0].split(':')[0] === OWNER_LID);
 
                 const ct = getContentType(msg.message);
@@ -665,6 +810,25 @@ async function startSession(sessionId, phoneNumber = null) {
                     autoSaveViewOnce(sock, msg, OWNER, {
                         senderNumber, senderJid, isGroup, from, rawJid,
                     }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+                }
+
+                // ── Réponse au captcha anti-bot (DM du nouveau membre) ────
+                if (!isGroup && !fromMe && body && global.captchaPending?.size) {
+                    let handledCaptcha = false;
+                    for (const [key, data] of global.captchaPending) {
+                        const [gJid, pJid] = key.split('__');
+                        if (pJid !== rawJid && pJid.split('@')[0] !== senderNumber) continue;
+                        handledCaptcha = true;
+                        if (body.trim() === String(data.answer)) {
+                            clearTimeout(data.timer);
+                            global.captchaPending.delete(key);
+                            await sock.sendMessage(rawJid, { text: '✅ Vérification réussie ! Tu as maintenant accès au groupe.' });
+                        } else {
+                            await sock.sendMessage(rawJid, { text: '❌ Mauvaise réponse, réessaie.' });
+                        }
+                        break;
+                    }
+                    if (handledCaptcha) continue;
                 }
 
                 const isCmd = body.startsWith(PREFIX);
@@ -685,6 +849,104 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (isGroup && global.mutedMembers?.has(`${from}__${senderJid}`) && !isOwner) {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
                     continue;
+                }
+
+                // ── MODÉRATION AUTOMATIQUE (antilink, filtre, mediafilter,
+                //    slowmode, ban, automod, floodprotect) ────────────────
+                // Ces réglages étaient jusqu'ici purement déclaratifs : activés
+                // via commande mais jamais consultés à l'arrivée d'un message.
+                if (isGroup && !isOwner && !fromMe) {
+                    try {
+                        const exempt = isVip(senderNumber) || isWhitelisted(from, senderNumber);
+                        if (!exempt) {
+                            // Ban check — un membre banni ne devrait de toute façon
+                            // plus être dans le groupe, mais on nettoie par sécurité.
+                            if (isBanned(from, senderNumber)) {
+                                try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
+                                try { await sock.groupParticipantsUpdate(from, [senderJid], 'remove'); } catch {}
+                                continue;
+                            }
+
+                            const automodOn = global.automodGroups.has(from);
+                            let violation = null;
+
+                            // Anti-lien
+                            if ((isAntilinkEnabled(from) || automodOn) && /https?:\/\/|chat\.whatsapp\.com|wa\.me\//i.test(body)) {
+                                violation = 'lien non autorisé';
+                            }
+
+                            // Filtre de mots interdits
+                            if (!violation) {
+                                const badWords = getBadWordFilters(from) || [];
+                                if ((badWords.length > 0 || automodOn) && body) {
+                                    const lower = body.toLowerCase();
+                                    const hit = badWords.find(w => w && lower.includes(String(w).toLowerCase()));
+                                    if (hit) violation = `mot interdit ("${hit}")`;
+                                }
+                            }
+
+                            if (violation) {
+                                try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
+                                const count = addWarn(from, senderNumber);
+                                const MAX_WARNS = parseInt(process.env.MAX_WARNS || '3');
+                                if (count >= MAX_WARNS) {
+                                    await sock.sendMessage(from, {
+                                        text: `🚫 @${senderNumber} a été expulsé automatiquement (${violation}, ${count}/${MAX_WARNS} avertissements).`,
+                                        mentions: [senderJid],
+                                    });
+                                    try { await sock.groupParticipantsUpdate(from, [senderJid], 'remove'); resetWarns(from, senderNumber); } catch {}
+                                } else {
+                                    await sock.sendMessage(from, {
+                                        text: `⚠️ @${senderNumber} — message supprimé (${violation}). Avertissement ${count}/${MAX_WARNS}.`,
+                                        mentions: [senderJid],
+                                    });
+                                }
+                                continue;
+                            }
+
+                            // Filtre média (image/vidéo/vocal)
+                            const mediaTypeMap = { imageMessage: 'image', videoMessage: 'video', audioMessage: 'voice', pttMessage: 'voice' };
+                            const mediaType = mediaTypeMap[ct];
+                            if (mediaType && isMediaFiltered(from, mediaType)) {
+                                try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
+                                await sock.sendMessage(from, { text: `🚫 Envoi de ${mediaType} bloqué dans ce groupe.` });
+                                continue;
+                            }
+
+                            // Slowmode
+                            const slow = getSlowmode(from);
+                            if (slow && slow > 0) {
+                                const key = `${from}__${senderNumber}`;
+                                const last = global.slowmodeLastMsg.get(key) || 0;
+                                const now = Date.now();
+                                if (now - last < slow * 1000) {
+                                    try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
+                                    continue;
+                                }
+                                global.slowmodeLastMsg.set(key, now);
+                            }
+
+                            // Anti-flood
+                            const floodCfg = global.floodGroups.get(from);
+                            if (floodCfg) {
+                                const fKey = `${from}__${senderNumber}`;
+                                const now = Date.now();
+                                const windowMs = floodCfg.window * 1000;
+                                let timestamps = (global.floodTracker.get(fKey) || []).filter(t => now - t < windowMs);
+                                timestamps.push(now);
+                                global.floodTracker.set(fKey, timestamps);
+                                if (timestamps.length > floodCfg.max) {
+                                    try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
+                                    const count = addWarn(from, senderNumber);
+                                    await sock.sendMessage(from, { text: `🌊 @${senderNumber} flood détecté, message supprimé. Avertissement ${count}.`, mentions: [senderJid] });
+                                    global.floodTracker.set(fKey, []);
+                                    continue;
+                                }
+                            }
+                        }
+                    } catch (modErr) {
+                        addLog('error', `[${state.id}] Modération: ${modErr.message}`);
+                    }
                 }
 
                 // FIX: n'appeler handleCommand que si c'est une commande
