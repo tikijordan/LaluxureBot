@@ -242,6 +242,15 @@ async function downloadTikTokApi(url, filePath) {
 
 function mapYtdlpError(stderr, isTiktok, isYoutube) {
     const lower = (stderr || '').toLowerCase();
+    if (lower.includes('enoent') || lower.includes('is not recognized') || lower.includes('command not found') || lower.includes('spawn yt-dlp')) {
+        return "❌ yt-dlp est introuvable ou inexécutable sur ce serveur (binaire absent ou hors PATH). Sur un hébergement Windows/IIS type SmarterASP.NET, il n'est en général pas possible d'installer/exécuter des binaires externes comme yt-dlp ou ffmpeg — c'est probablement la vraie cause, pas un bug du bot.";
+    }
+    if (lower.includes('eacces') || lower.includes('access is denied') || lower.includes('permission denied')) {
+        return "❌ Le serveur refuse d'exécuter yt-dlp (permissions). Sur un hébergement mutualisé, l'exécution de binaires externes est souvent bloquée.";
+    }
+    if (lower.includes('ffmpeg') && (lower.includes('not found') || lower.includes('not recognized') || lower.includes('enoent'))) {
+        return '❌ ffmpeg est introuvable sur ce serveur — nécessaire pour fusionner/convertir la vidéo ou l\'audio.';
+    }
     if (lower.includes('429') || lower.includes('too many requests')) {
         return '🚫 Plateforme temporairement bloquée. Réessaie dans quelques minutes.';
     }
