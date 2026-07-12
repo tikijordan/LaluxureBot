@@ -195,7 +195,7 @@ import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
-import { autoSaveViewOnce, isViewOnceMessage } from './utils/viewonce.js';
+import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
 import { isAntilinkEnabled } from './utils/antilink.js';
 import { getFilters as getBadWordFilters } from './utils/filter.js';
 import { getSlowmode } from './utils/slowmode.js';
@@ -434,7 +434,69 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!state.lidCache) state.lidCache = {};
         state.lidCache[lidNum] = pnNum;   // LID → numéro
         state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
+
+        // ── AUTO-CORRECTION ownerLid ──────────────────────────────
+        // La résolution tentée une seule fois à la connexion (connection.update
+        // === 'open') peut échouer silencieusement (sock.user.lid pas encore
+        // peuplé à cet instant précis, ou requête réseau qui rate) et n'était
+        // JAMAIS retentée ensuite. Résultat : state.ownerLid reste null pour
+        // toute la durée de vie de la session → l'owner n'est plus jamais
+        // reconnu comme owner dans les groupes qui exposent son LID (au lieu
+        // de son numéro), et TOUTES ses commandes en groupe sont ignorées
+        // silencieusement (isOwner=false → `if (!isOwner) continue;`).
+        // On corrige ownerLid dès qu'un mapping concernant le numéro connecté
+        // arrive, peu importe quand.
+        const ownerNum = (state.connectedNumber || sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
+        if (ownerNum && pnNum === ownerNum && state.ownerLid !== lidNum) {
+            state.ownerLid = lidNum;
+            addLog('info', `[${state.id}] ownerLid corrigé via lid-mapping.update: ${lidNum}`);
+        }
     });
+
+    // ── Déclencheur manuel (réaction) pour la récupération de vue unique ──
+    // Sert de secours : l'interception automatique (voir plus bas, sur
+    // isViewOnceMessage) tourne déjà pour TOUTE vue unique reçue. Réagir
+    // avec n'importe quel emoji à une vue unique relance la même extraction
+    // et le même envoi vers le DM personnel de l'owner — utile si l'auto
+    // a raté le message (redémarrage, erreur réseau, etc.).
+    sock.ev.on('messages.reaction', async (events) => {
+        for (const { key, reaction } of events) {
+            try {
+                if (!reaction?.text) continue;          // réaction retirée → ignorer
+                if (!reaction.key?.fromMe) continue;     // seul l'owner (toi) peut déclencher
+                if (!key?.id) continue;
+
+                const cached = state.voCache?.get(key.id);
+                if (!cached) continue; // pas une vue unique connue (ou déjà expirée du cache)
+
+                const inner = extractViewOnceInner(cached.msg.message);
+                if (!inner) continue;
+
+                const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
+                const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
+                await notifyOwnerViewOnce(sock, OWNER, { buffer, kind, obj }, {
+                    senderNumber: cached.senderNumber,
+                    senderJid: cached.senderJid,
+                    isGroup: cached.isGroup,
+                    from: cached.from,
+                    rawJid: cached.rawJid,
+                }, { filename });
+
+                addLog('info', `[${state.id}] VO récupérée via réaction manuelle (secours)`);
+            } catch (e) {
+                addLog('error', `[${state.id}] VO réaction: ${e.message}`);
+            }
+        }
+    });
+
+    // Purge du cache de vues uniques (24h max, sinon fuite mémoire)
+    setInterval(() => {
+        if (!state.voCache) return;
+        const now = Date.now();
+        for (const [id, entry] of state.voCache) {
+            if (now - entry.ts > 24 * 60 * 60 * 1000) state.voCache.delete(id);
+        }
+    }, 60 * 60 * 1000);
 
     // ── ARRIVÉE / DÉPART DE MEMBRES ──────────────────────────────────
     // welcome, goodbye, antifake et maxmembers étaient configurables via
@@ -789,7 +851,25 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
 
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
-                const OWNER_LID = state.ownerLid || null;
+                let OWNER_LID = state.ownerLid || null;
+
+                // ── AUTO-CORRECTION supplémentaire ──────────────────────
+                // Si ownerLid n'a toujours pas été résolu (ni à la connexion,
+                // ni via un lid-mapping.update reçu depuis), et qu'on est
+                // justement en train d'évaluer un message de groupe qui
+                // pourrait être une commande de l'owner, on tente une
+                // résolution à la demande plutôt que d'abandonner l'owner
+                // pour le reste de la session.
+                if (!OWNER_LID && isGroup && OWNER) {
+                    try {
+                        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
+                        if (pairs && pairs.length > 0 && pairs[0]?.lid) {
+                            OWNER_LID = pairs[0].lid.split('@')[0].split(':')[0];
+                            state.ownerLid = OWNER_LID;
+                            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${OWNER_LID}`);
+                        }
+                    } catch {}
+                }
 
                 const senderIsLid = senderJid.endsWith('@lid');
 
@@ -810,6 +890,16 @@ async function startSession(sessionId, phoneNumber = null) {
                     autoSaveViewOnce(sock, msg, OWNER, {
                         senderNumber, senderJid, isGroup, from, rawJid,
                     }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+
+                    // Mise en cache pour le déclencheur manuel par réaction (voir
+                    // messages.reaction plus bas) — l'événement de réaction ne
+                    // contient que l'id du message, pas son contenu.
+                    if (!state.voCache) state.voCache = new Map();
+                    if (msg.key?.id) {
+                        state.voCache.set(msg.key.id, {
+                            msg, senderNumber, senderJid, isGroup, from, rawJid, ts: Date.now(),
+                        });
+                    }
                 }
 
                 // ── Réponse au captcha anti-bot (DM du nouveau membre) ────
