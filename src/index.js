@@ -22,6 +22,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcodeterminal from 'qrcode-terminal';
+import NodeCache from 'node-cache';
 
 dotenv.config();
 
@@ -345,6 +346,18 @@ async function startSession(sessionId, phoneNumber = null) {
     const { version } = await fetchLatestBaileysVersion();
     const logger = pino({ level: 'silent' });
 
+    // ── Cache des métadonnées de groupe ──────────────────────────────
+    // SANS cette option, Baileys refait un aller-retour réseau vers
+    // WhatsApp à CHAQUE message de groupe pour connaître la liste des
+    // participants (nécessaire au déchiffrement sender-key). C'est très
+    // probablement la cause du délai de ~20-25 min observé après la
+    // connexion : le DM n'a pas besoin de ces métadonnées et répondait
+    // normalement, pendant que les groupes restaient en attente de ces
+    // requêtes (potentiellement ralenties/mises en file juste après la
+    // reconnexion). Avec un cache, une seule requête par groupe suffit.
+    if (!state.groupMetaCache) state.groupMetaCache = new NodeCache({ stdTTL: 5 * 60, useClones: false });
+    const groupMetaCache = state.groupMetaCache;
+
     const sock = makeWASocket({
         version, logger, printQRInTerminal: false,
         auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
@@ -352,6 +365,7 @@ async function startSession(sessionId, phoneNumber = null) {
         syncFullHistory: false, markOnlineOnConnect: true,
         connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
         retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
+        cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
     });
 
     state.sock = sock;
@@ -475,17 +489,29 @@ async function startSession(sessionId, phoneNumber = null) {
                 const inner = extractViewOnceInner(cached.msg.message);
                 if (!inner) continue;
 
-                const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
-                const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
-                await notifyOwnerViewOnce(sock, OWNER, { buffer, kind, obj }, {
-                    senderNumber: cached.senderNumber,
-                    senderJid: cached.senderJid,
-                    isGroup: cached.isGroup,
-                    from: cached.from,
-                    rawJid: cached.rawJid,
-                }, { filename });
+                // ── Même logique d'extraction que !vo, mais destination = DM
+                // uniquement (jamais le groupe/chat d'origine).
+                try {
+                    const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
+                    const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
 
-                addLog('info', `[${state.id}] VO récupérée via réaction manuelle (secours)`);
+                    await notifyOwnerViewOnce(sock, OWNER, { buffer, kind, obj }, {
+                        senderNumber: cached.senderNumber,
+                        senderJid: cached.senderJid,
+                        isGroup: cached.isGroup,
+                        from: cached.from,
+                        rawJid: cached.rawJid,
+                    }, { filename });
+
+                    addLog('info', `[${state.id}] VO récupérée via réaction manuelle (secours)`);
+                } catch (e) {
+                    console.error('[VO réaction] Erreur extraction:', e.message);
+                    try {
+                        await sock.sendMessage(`${OWNER}@s.whatsapp.net`, {
+                            text: `❌ Échec de l'extraction par réaction (média peut-être expiré).\nDe: @${cached.senderNumber}`,
+                        });
+                    } catch {}
+                }
             } catch (e) {
                 addLog('error', `[${state.id}] VO réaction: ${e.message}`);
             }
@@ -509,6 +535,7 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!from || !participants?.length) return;
         try {
             const meta = await sock.groupMetadata(from).catch(() => null);
+            if (meta) state.groupMetaCache?.set(from, meta); // garder le cache à jour après un changement de membres
             const groupName = meta?.subject || '';
 
             if (action === 'add') {
@@ -678,6 +705,26 @@ async function startSession(sessionId, phoneNumber = null) {
             }
 
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
+
+            // ── Préchauffage du cache de métadonnées de groupe ────────
+            // En arrière-plan (on ne bloque pas la connexion dessus) : récupère
+            // les métadonnées de TOUS les groupes d'un coup, pour que le
+            // premier message dans chaque groupe n'ait pas à attendre une
+            // requête réseau individuelle (c'était la cause probable du
+            // délai de ~20-25 min après connexion, propre aux groupes).
+            (async () => {
+                try {
+                    const allGroups = await sock.groupFetchAllParticipating();
+                    let count = 0;
+                    for (const [jid, meta] of Object.entries(allGroups || {})) {
+                        state.groupMetaCache.set(jid, meta);
+                        count++;
+                    }
+                    addLog('info', `[${state.id}] Cache métadonnées de groupe préchauffé (${count} groupe(s))`);
+                } catch (e) {
+                    addLog('warn', `[${state.id}] Préchauffage groupMetaCache: ${e.message}`);
+                }
+            })();
 
             // SESSION_STRING — affichée complète pour copier dans Railway env vars (lecture récursive : creds.json + keys/)
             try {
@@ -912,14 +959,27 @@ async function startSession(sessionId, phoneNumber = null) {
                 else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
                 else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
 
-                if (isViewOnceMessage(msg)) {
-                    autoSaveViewOnce(sock, msg, OWNER, {
-                        senderNumber, senderJid, isGroup, from, rawJid,
-                    }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+                // Détection élargie (contrairement à isViewOnceMessage, qui exclut
+                // volontairement fromMe) — sert uniquement à alimenter le cache pour
+                // la réaction manuelle, pour que ça marche aussi sur une vue unique
+                // que TOI tu as envoyée, pas seulement celles que tu reçois.
+                const isVOraw = /^viewOnceMessage/.test(ct)
+                    || msg.message?.imageMessage?.viewOnce === true
+                    || msg.message?.videoMessage?.viewOnce === true
+                    || msg.message?.audioMessage?.viewOnce === true;
+
+                if (isVOraw) {
+                    if (isViewOnceMessage(msg)) {
+                        // Reçue d'quelqu'un d'autre → sauvegarde auto vers le DM comme avant
+                        autoSaveViewOnce(sock, msg, OWNER, {
+                            senderNumber, senderJid, isGroup, from, rawJid,
+                        }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+                    }
 
                     // Mise en cache pour le déclencheur manuel par réaction (voir
                     // messages.reaction plus bas) — l'événement de réaction ne
-                    // contient que l'id du message, pas son contenu.
+                    // contient que l'id du message, pas son contenu. Fonctionne
+                    // maintenant que ce soit une vue unique reçue OU envoyée par toi.
                     if (!state.voCache) state.voCache = new Map();
                     if (msg.key?.id) {
                         state.voCache.set(msg.key.id, {
