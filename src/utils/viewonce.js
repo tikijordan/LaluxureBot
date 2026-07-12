@@ -44,9 +44,19 @@ export function findSessionSocket(targetNumber) {
   return null;
 }
 
+/** Démballe le conteneur ephemeralMessage (messages éphémères / qui disparaissent),
+ * qui enveloppe TOUT type de message y compris les vues uniques dès que les
+ * messages éphémères sont activés sur la conversation. Sans ce démballage,
+ * une vue unique envoyée dans une conversation avec messages éphémères actifs
+ * n'est jamais reconnue comme telle. */
+function unwrapEphemeral(message) {
+  return message?.ephemeralMessage?.message || message;
+}
+
 /** Extrait le contenu média d'un message vue unique */
 export function extractViewOnceInner(message) {
   if (!message) return null;
+  message = unwrapEphemeral(message);
 
   let inner = message.viewOnceMessage?.message
     || message.viewOnceMessageV2?.message
@@ -64,11 +74,12 @@ export function extractViewOnceInner(message) {
 /** Détecte un message entrant à vue unique */
 export function isViewOnceMessage(msg) {
   if (!msg?.message || msg.key?.fromMe) return false;
-  const ct = getContentType(msg.message);
+  const message = unwrapEphemeral(msg.message);
+  const ct = getContentType(message);
   return /^viewOnceMessage/.test(ct)
-    || msg.message?.imageMessage?.viewOnce === true
-    || msg.message?.videoMessage?.viewOnce === true
-    || msg.message?.audioMessage?.viewOnce === true;
+    || message?.imageMessage?.viewOnce === true
+    || message?.videoMessage?.viewOnce === true
+    || message?.audioMessage?.viewOnce === true;
 }
 
 /** Télécharge le buffer d'un inner message */
