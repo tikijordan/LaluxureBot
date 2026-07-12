@@ -963,10 +963,16 @@ async function startSession(sessionId, phoneNumber = null) {
                 // volontairement fromMe) — sert uniquement à alimenter le cache pour
                 // la réaction manuelle, pour que ça marche aussi sur une vue unique
                 // que TOI tu as envoyée, pas seulement celles que tu reçois.
-                const isVOraw = /^viewOnceMessage/.test(ct)
-                    || msg.message?.imageMessage?.viewOnce === true
-                    || msg.message?.videoMessage?.viewOnce === true
-                    || msg.message?.audioMessage?.viewOnce === true;
+                // On démballe d'abord ephemeralMessage (messages éphémères), qui
+                // enveloppe tout type de message quand ils sont activés sur la
+                // conversation — sans ça, une vue unique dans une conversation
+                // avec messages éphémères actifs n'est jamais détectée.
+                const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
+                const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
+                const isVOraw = /^viewOnceMessage/.test(voCt)
+                    || voMsgContent?.imageMessage?.viewOnce === true
+                    || voMsgContent?.videoMessage?.viewOnce === true
+                    || voMsgContent?.audioMessage?.viewOnce === true;
 
                 if (isVOraw) {
                     if (isViewOnceMessage(msg)) {
@@ -1748,7 +1754,7 @@ button:hover{background:#1fb858}
         const list = [...sessions.values()].map(s=>({
             id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
             ownerNumber:s.connectedNumber, ownerLid:s.ownerLid||null,
-            qrCode:s.qrCode, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
+            qrCode:s.qrCode, pairingCode:s.pairingCode||null, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
         }));
         return sendJson(res,{ sessions:list });
     }
