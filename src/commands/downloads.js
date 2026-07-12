@@ -11,6 +11,10 @@ import fs from 'fs';
 import util from 'util';
 import axios from 'axios';
 import yts from 'yt-search';
+// Fallback SANS binaire externe pour YouTube — nécessaire sur les hébergements
+// (comme SmarterASP.NET/IIS) où yt-dlp et ffmpeg ne peuvent pas être installés
+// ou exécutés (pas d'accès shell, spawn() de binaires externes bloqué).
+import ytdl from '@distube/ytdl-core';
 
 const execPromise = util.promisify(exec);
 
@@ -224,7 +228,54 @@ function buildYtdlpArgs({ filePath, isAudio, isYoutube, isTiktok, ytClient, vide
     return args;
 }
 
-/** Fallback TikTok via API publique si yt-dlp échoue */
+/** Copie un flux Node.js (stream) vers un fichier. */
+function streamToFile(stream, filePath) {
+    return new Promise((resolve, reject) => {
+        const ws = fs.createWriteStream(filePath);
+        stream.on('error', reject);
+        ws.on('error', reject);
+        ws.on('finish', resolve);
+        stream.pipe(ws);
+    });
+}
+
+/**
+ * Fallback YouTube SANS binaire externe (ni yt-dlp ni ffmpeg), via
+ * @distube/ytdl-core (pure JS, fait juste des requêtes HTTPS).
+ * Utilisé quand yt-dlp est absent/inexécutable — typiquement sur un
+ * hébergement Windows/IIS mutualisé type SmarterASP.NET, où il est en
+ * général impossible d'installer ou d'exécuter des binaires externes.
+ *
+ * Contrainte : sans ffmpeg, on ne peut ni fusionner deux pistes séparées
+ * ni transcoder. On doit donc choisir un format déjà combiné (audio+vidéo)
+ * pour la vidéo, et le flux audio natif tel quel pour l'audio (pas un vrai
+ * .mp3 — WhatsApp accepte très bien m4a/opus tant que le mimetype est correct).
+ *
+ * @returns {Promise<{mimetype: string, ext: string}>}
+ */
+async function downloadYoutubeNoBinary(url, isAudio, filePath) {
+    const info = await ytdl.getInfo(url);
+
+    if (isAudio) {
+        const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
+        if (!format) throw new Error('Aucun format audio disponible pour cette vidéo.');
+        await streamToFile(ytdl.downloadFromInfo(info, { format }), filePath);
+        const isM4a = /mp4/i.test(format.mimeType || '') || format.container === 'm4a';
+        return isM4a ? { mimetype: 'audio/mp4', ext: 'm4a' } : { mimetype: 'audio/webm', ext: 'webm' };
+    }
+
+    // Vidéo : uniquement des formats mp4 déjà fusionnés (audio+vidéo dans le
+    // même flux), sinon impossible à assembler sans ffmpeg.
+    const format = ytdl.chooseFormat(info.formats, {
+        quality: 'highest',
+        filter: f => f.hasVideo && f.hasAudio && f.container === 'mp4',
+    });
+    if (!format) throw new Error("Aucun format vidéo+audio combiné disponible sans ffmpeg pour cette vidéo (essaie une autre vidéo, ou !play pour l'audio seul).");
+    await streamToFile(ytdl.downloadFromInfo(info, { format }), filePath);
+    return { mimetype: 'video/mp4', ext: 'mp4' };
+}
+
+
 async function downloadTikTokApi(url, filePath) {
     const res = await axios.get('https://www.tikwm.com/api/', {
         params: { url, hd: 1 },
@@ -325,10 +376,28 @@ async function runYtdlp(url, isAudio, filePath) {
                 tiktokApp: strat.tiktokApp || 'tiktok_web',
             });
             await execYtdlp(args, url);
-            if (fs.existsSync(filePath)) return;
+            if (fs.existsSync(filePath)) return { mimetype: null, ext: null };
         } catch (e) {
             lastError = e;
             console.warn('[yt-dlp] Stratégie échouée:', e.stderr?.split('\n').find(l => /ERROR|WARNING/i.test(l)) || e.message);
+            // yt-dlp lui-même est absent/inexécutable (cas typique SmarterASP.NET) —
+            // inutile de retenter d'autres stratégies avec le même binaire manquant.
+            const lower = (e.stderr || e.message || '').toLowerCase();
+            const binMissing = lower.includes('enoent') || lower.includes('is not recognized')
+                || lower.includes('command not found') || lower.includes('spawn yt-dlp')
+                || lower.includes('access is denied') || lower.includes('eacces') || lower.includes('permission denied');
+            if (binMissing) break;
+        }
+    }
+
+    // Fallback SANS binaire externe pour YouTube (pas de yt-dlp/ffmpeg requis)
+    if (isYoutube) {
+        try {
+            const result = await downloadYoutubeNoBinary(url, isAudio, filePath);
+            if (fs.existsSync(filePath)) return result;
+        } catch (e) {
+            console.warn('[ytdl-core fallback]', e.message);
+            lastError = e;
         }
     }
 
@@ -336,7 +405,7 @@ async function runYtdlp(url, isAudio, filePath) {
     if (isTiktok && !isAudio) {
         try {
             await downloadTikTokApi(url, filePath);
-            if (fs.existsSync(filePath)) return;
+            if (fs.existsSync(filePath)) return { mimetype: null, ext: null };
         } catch (e) {
             console.warn('[TikTok API]', e.message);
             lastError = e;
@@ -357,7 +426,7 @@ async function downloadVideo({ sock, from, text, msg }) {
     try {
         await sock.sendMessage(from, { text: '⬇️ Téléchargement en cours...' }, { quoted: msg });
 
-        await runYtdlp(text, false, filePath);
+        const result = await runYtdlp(text, false, filePath);
 
         if (!fs.existsSync(filePath)) {
             return sock.sendMessage(from, { text: "❌ Échec : le fichier n'a pas pu être généré." });
@@ -374,7 +443,7 @@ async function downloadVideo({ sock, from, text, msg }) {
         await sock.sendMessage(from, {
             video: fs.readFileSync(filePath),
             caption: '✅ Téléchargé avec succès',
-            mimetype: 'video/mp4',
+            mimetype: result?.mimetype || 'video/mp4',
         }, { quoted: msg });
 
     } catch (err) {
@@ -420,7 +489,7 @@ const cmds = {
 
                 await sock.sendMessage(from, preview, { quoted: msg });
 
-                await runYtdlp(url, true, filePath);
+                const result = await runYtdlp(url, true, filePath);
 
                 if (!fs.existsSync(filePath)) {
                     return sock.sendMessage(from, { text: '❌ Erreur de conversion.' });
@@ -432,10 +501,11 @@ const cmds = {
                     return sock.sendMessage(from, { text: `❌ Fichier audio trop lourd (${Math.round(size / 1024 / 1024)} Mo).` });
                 }
 
+                const ext = result?.ext || 'mp3';
                 await sock.sendMessage(from, {
                     audio: fs.readFileSync(filePath),
-                    mimetype: 'audio/mpeg',
-                    fileName: `${title}.mp3`,
+                    mimetype: result?.mimetype || 'audio/mpeg',
+                    fileName: `${title}.${ext}`,
                 }, { quoted: msg });
 
             } catch (err) {
