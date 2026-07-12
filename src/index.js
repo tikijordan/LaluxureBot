@@ -462,6 +462,9 @@ async function startSession(sessionId, phoneNumber = null) {
     sock.ev.on('messages.reaction', async (events) => {
         for (const { key, reaction } of events) {
             try {
+                // DEBUG temporaire — à retirer une fois confirmé que ça marche
+                addLog('info', `[${state.id}] REACTION reçue: text="${reaction?.text}" fromMe=${reaction?.key?.fromMe} targetId=${key?.id} enCache=${!!state.voCache?.get(key?.id)}`);
+
                 if (!reaction?.text) continue;          // réaction retirée → ignorer
                 if (!reaction.key?.fromMe) continue;     // seul l'owner (toi) peut déclencher
                 if (!key?.id) continue;
@@ -767,8 +770,19 @@ async function startSession(sessionId, phoneNumber = null) {
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
         // ── FIX DOUBLE RÉPONSE #1 : ignorer tout sauf les vrais nouveaux messages ──
         // 'notify' = message reçu en temps réel
-        // 'append' = sync historique (au démarrage) → NE PAS traiter
-        if (type !== 'notify') return;
+        // 'append' = normalement la sync d'historique au démarrage → à ignorer.
+        // MAIS juste après la connexion, WhatsApp classe parfois un message tout
+        // juste envoyé en 'append' au lieu de 'notify' (chevauchement avec la
+        // sync). Ça causait un "silence" au tout début de la connexion. On
+        // traite donc les 'append' UNIQUEMENT s'ils sont réellement récents
+        // (< 20s), pour ne pas rejouer un vrai historique ancien.
+        if (type !== 'notify') {
+            const isRecentAppend = type === 'append' && messages.every(m => {
+                const ts = Number(m.messageTimestamp) * 1000;
+                return ts && (Date.now() - ts) < 20_000;
+            });
+            if (!isRecentAppend) return;
+        }
 
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
@@ -825,6 +839,13 @@ async function startSession(sessionId, phoneNumber = null) {
                             state.lidCache[lidNum] = senderNumber;
 
                         // 3. getPNForLID Baileys (mapping persisté sur disque)
+                        } else if (state.lidFailCache?.[lidNum] && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000) {
+                            // Échec récent (<5 min) pour ce LID précis : on ne
+                            // retente pas un appel réseau lent à chaque message
+                            // de cette personne — c'était la 2ème source de
+                            // lenteur sur les groupes (un lookup raté relancé
+                            // à CHAQUE message du même expéditeur non résolu).
+                            senderNumber = lidNum;
                         } else {
                             try {
                                 const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
@@ -837,9 +858,13 @@ async function startSession(sessionId, phoneNumber = null) {
                                     // LID non résolu — garder le LID brut
                                     // isOwner sera vérifié via OWNER_LID plus bas
                                     senderNumber = lidNum;
+                                    if (!state.lidFailCache) state.lidFailCache = {};
+                                    state.lidFailCache[lidNum] = Date.now();
                                 }
                             } catch {
                                 senderNumber = lidNum;
+                                if (!state.lidFailCache) state.lidFailCache = {};
+                                state.lidFailCache[lidNum] = Date.now();
                             }
                         }
                     } else {
@@ -854,13 +879,14 @@ async function startSession(sessionId, phoneNumber = null) {
                 let OWNER_LID = state.ownerLid || null;
 
                 // ── AUTO-CORRECTION supplémentaire ──────────────────────
-                // Si ownerLid n'a toujours pas été résolu (ni à la connexion,
-                // ni via un lid-mapping.update reçu depuis), et qu'on est
-                // justement en train d'évaluer un message de groupe qui
-                // pourrait être une commande de l'owner, on tente une
-                // résolution à la demande plutôt que d'abandonner l'owner
-                // pour le reste de la session.
-                if (!OWNER_LID && isGroup && OWNER) {
+                // Si ownerLid n'a toujours pas été résolu, on retente — mais
+                // avec un cooldown de 60s, pour ne pas refaire un appel réseau
+                // à CHAQUE message de groupe si l'appel échoue systématiquement
+                // (c'était une source de lenteur ajoutée par erreur : ça
+                // ralentissait TOUS les messages de groupe, pas seulement ceux
+                // de l'owner).
+                if (!OWNER_LID && isGroup && OWNER && (!state.ownerLidLastTry || Date.now() - state.ownerLidLastTry > 60_000)) {
+                    state.ownerLidLastTry = Date.now();
                     try {
                         const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
                         if (pairs && pairs.length > 0 && pairs[0]?.lid) {
@@ -922,6 +948,18 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
 
                 const isCmd = body.startsWith(PREFIX);
+
+                // ── Redirection des commandes tapées dans un DM ─────────
+                // Si tu tapes une commande dans le DM d'un contact réel (pas
+                // ton propre chat), la réponse ne doit JAMAIS apparaître dans
+                // cette conversation (visible par ton contact) — elle est
+                // redirigée vers ton propre DM personnel. Les groupes ne sont
+                // pas concernés : la réponse continue d'arriver dans le groupe.
+                let replyTo = from;
+                if (!isGroup && isCmd && isOwner && OWNER) {
+                    replyTo = `${OWNER}@s.whatsapp.net`;
+                }
+
                 if (fromMe && !isCmd) continue;
                 if (isGroup) trackGroupMsg(from, senderJid);
 
@@ -1046,7 +1084,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (!isOwner) continue;
 
                 await handleCommand(sock, msg, {}, {
-                    body, from, isGroup, isOwner, senderNumber, sender: senderJid,
+                    body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
                     botMode: currentBotMode,
                     prefix: PREFIX,
