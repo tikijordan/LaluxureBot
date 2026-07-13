@@ -1988,3 +1988,8 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
 
     // Attendre 30s après le démarrage avant le premier ping
     setTimeout(() =>
+setInterval(doSelfPing, PING_INTERVAL_MS);
+    }, 30_000);
+
+    addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
+})();
