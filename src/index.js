@@ -1368,6 +1368,7 @@ button:hover{background:#1fb858}
         const uptime    = Math.floor((Date.now()-startTime)/1000);
         return sendJson(res,{
             ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
+            groupMetaCache:undefined, voCache:undefined, lidCache:undefined, lidFailCache:undefined,
             recentCommands:(s.recentCommands || []).slice(-20),
             uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
             totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
