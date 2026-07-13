@@ -1773,6 +1773,28 @@ button:hover{background:#1fb858}
         return sendJson(res,{ ok:true, sessionId:id, message:msg });
     }
 
+    // DELETE /api/sessions — purge TOTALE (toutes les sessions, tous supports)
+    // GET /api/sessions/purge-all — même chose, mais accessible en ouvrant
+    // simplement un lien dans le navigateur (utile depuis un téléphone, sans
+    // terminal/curl) — protégé par la même authentification dashboard.
+    // Utile pour sortir d'un état où plusieurs sessions se battent pour le
+    // même compte WhatsApp (boucles de 401 en cascade).
+    // IMPORTANT : cette route doit être vérifiée AVANT le matcher générique
+    // /api/sessions/:id ci-dessous, sinon "purge-all" est interprété comme
+    // un ID de session (→ "Session introuvable").
+    if ((pathname==='/api/sessions' && method==='DELETE') || (pathname==='/api/sessions/purge-all' && method==='GET')) {
+        const ids = [...sessions.keys()];
+        for (const sid of ids) {
+            const s = sessions.get(sid);
+            try { if (s?.sock) await s.sock.end(); } catch {}
+            try { fse.removeSync(path.join(SESSIONS_ROOT, sid)); } catch {}
+            sessions.delete(sid);
+        }
+        const result = await deleteAllSessionsMongo().catch(e => ({ deleted: 0, error: e.message }));
+        addLog('info', `Purge totale : ${ids.length} session(s) locale(s), ${result.deleted||0} en MongoDB (IP: ${ip})`);
+        return sendJson(res, { ok:true, sessionsCleared: ids.length, mongoDeleted: result.deleted||0 });
+    }
+
     // GET /api/sessions/:id
     const smatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
     if (smatch && method==='GET') {
@@ -1850,25 +1872,6 @@ button:hover{background:#1fb858}
         sessions.delete(sid);
         deleteSessionMongo(sid).catch(() => {});
         return sendJson(res,{ ok:true, message:'Session supprimée.' });
-    }
-
-    // DELETE /api/sessions — purge TOTALE (toutes les sessions, tous supports)
-    // GET /api/sessions/purge-all — même chose, mais accessible en ouvrant
-    // simplement un lien dans le navigateur (utile depuis un téléphone, sans
-    // terminal/curl) — protégé par la même authentification dashboard.
-    // Utile pour sortir d'un état où plusieurs sessions se battent pour le
-    // même compte WhatsApp (boucles de 401 en cascade).
-    if ((pathname==='/api/sessions' && method==='DELETE') || (pathname==='/api/sessions/purge-all' && method==='GET')) {
-        const ids = [...sessions.keys()];
-        for (const sid of ids) {
-            const s = sessions.get(sid);
-            try { if (s?.sock) await s.sock.end(); } catch {}
-            try { fse.removeSync(path.join(SESSIONS_ROOT, sid)); } catch {}
-            sessions.delete(sid);
-        }
-        const result = await deleteAllSessionsMongo().catch(e => ({ deleted: 0, error: e.message }));
-        addLog('info', `Purge totale : ${ids.length} session(s) locale(s), ${result.deleted||0} en MongoDB (IP: ${ip})`);
-        return sendJson(res, { ok:true, sessionsCleared: ids.length, mongoDeleted: result.deleted||0 });
     }
 
     // DELETE /api/sessions/:id
