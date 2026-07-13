@@ -27,6 +27,7 @@ process.on('uncaughtException', (err) => {
         console.error('   → Stack:', err.stack);
     }
 });
+
 let _lastIgnoredRejectionLogAt = 0;
 const _IGNORED_REJECTION_LOG_COOLDOWN_MS = 10_000;
 function rejectionToString(err) {
@@ -38,8 +39,10 @@ function rejectionToString(err) {
         const stack = err?.stack || '';
         return `${msg}\n${stack}`;
     }
+
     return String(err);
 }
+
 function isExpectedConnectionCloseRejection(err) {
     const combined = rejectionToString(err);
     if (!combined) return false;
@@ -57,6 +60,7 @@ function isExpectedConnectionCloseRejection(err) {
     if (cause && cause !== err) return isExpectedConnectionCloseRejection(cause);
     return false;
 }
+
 process.on('unhandledRejection', (err) => {
     if (isExpectedConnectionCloseRejection(err)) {
         const now = Date.now();
@@ -64,16 +68,20 @@ process.on('unhandledRejection', (err) => {
             _lastIgnoredRejectionLogAt = now;
             console.warn('[Baileys] Connexion fermée (reconnexion attendue)');
         }
+
         return;
     }
+
     console.error('❌ [Processus] Rejet Non Manipulé:', err?.message || err);
     if (err && err.stack) console.error(err.stack);
 });
+
 process.on('warning', (w) => {
     if (!w.message.includes('ExperimentalWarning')) {
         console.warn('⚠️  [Process] Warning:', w.message);
     }
 });
+
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const SESSIONS_ROOT = path.join(os.tmpdir(), 'wa-bot-sessions');
 const DATA_ROOT     = path.join(__dirname, '../data');
@@ -114,6 +122,7 @@ function cleanupTempSessions() {
         console.warn('[Cleanup] ⚠️  Erreur suppression TEMP:', e.message);
     }
 }
+
 cleanupTempSessions();
 const processedMsgIds = new Map(); // msgId → timestamp
 const MSG_TTL = 10 * 60 * 1000;   // 10 minutes par message
@@ -126,6 +135,7 @@ setInterval(() => {
 if (typeof global.gc === 'function') {
     setInterval(() => { try { global.gc(); } catch {} }, 5 * 60 * 1000);
 }
+
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
     'MessageCounterError','Closing open session','Closing session:',
     'registrationId','_chains','currentRatchet','indexInfo',
@@ -167,16 +177,19 @@ function note440(sessionId) {
         e.count = 0;
         e.firstAt = now;
     }
+
     e.count++;
     recent440BySessionId.set(sessionId, e);
     return e;
 }
+
 function getCooldownAfterRepeated440Ms(sessionId) {
     const e = recent440BySessionId.get(sessionId);
     if (!e) return 0;
     if (e.count >= 3) return 5 * 60 * 1000;
     return 0;
 }
+
 function getNextBackoffMs(sessionId, reasonCode) {
     const base = 3000;
     const max = 60_000;
@@ -186,9 +199,11 @@ function getNextBackoffMs(sessionId, reasonCode) {
     } else {
         entry.delayMs = base;
     }
+
     reconnectBackoffBySessionId.set(sessionId, entry);
     return entry.delayMs;
 }
+
 function clearReconnectTimer(sessionId) {
     const t = reconnectTimerBySessionId.get(sessionId);
     if (t) {
@@ -196,6 +211,7 @@ function clearReconnectTimer(sessionId) {
         reconnectTimerBySessionId.delete(sessionId);
     }
 }
+
 function scheduleReconnect(sessionId, delayMs = 3000) {
     clearReconnectTimer(sessionId);
     const t = setTimeout(() => {
@@ -204,6 +220,7 @@ function scheduleReconnect(sessionId, delayMs = 3000) {
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
 }
+
 function ensureSingleActiveSocketForNumber(number, currentSessionId, currentSock) {
     if (!number) return;
     const prev = activeSocketByNumber.get(number);
@@ -212,8 +229,10 @@ function ensureSingleActiveSocketForNumber(number, currentSessionId, currentSock
         try { prev.sock.ws?.close(); } catch {}
         try { prev.sock.end(); } catch {}
     }
+
     activeSocketByNumber.set(number, { sessionId: currentSessionId, sock: currentSock });
 }
+
 function addLog(level, msg) {
     const entry = { level, msg, time: new Date().toISOString() };
     logs.push(entry);
@@ -221,12 +240,14 @@ function addLog(level, msg) {
     const icon = { error:'❌', warn:'⚠️', success:'✅', info:'ℹ️' }[level] || 'ℹ️';
     console.log(`[${entry.time.slice(11,19)}] ${icon} ${msg}`);
 }
+
 async function startSession(sessionId, phoneNumber = null) {
     const existing = sessions.get(sessionId);
     if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
         return; 
     }
+
     clearReconnectTimer(sessionId);
     const authPath = path.join(SESSIONS_ROOT, sessionId);
     fse.ensureDirSync(authPath); // ← crée le dossier AVANT useMultiFileAuthState
@@ -239,8 +260,10 @@ async function startSession(sessionId, phoneNumber = null) {
             lastPing: null, createdAt: new Date().toISOString(),
             authPath, // ← on stocke le chemin courant dans le state
         };
+
         sessions.set(sessionId, state);
     }
+
     state.connection = 'connecting';
     state.qrCode = null;
     state.pairingCode = null;
@@ -251,6 +274,7 @@ async function startSession(sessionId, phoneNumber = null) {
         try { fse.ensureDirSync(state.authPath); } catch {}
         return _saveCreds();
     };
+
     const { version } = await fetchLatestBaileysVersion();
     const logger = pino({ level: 'silent' });
     if (!state.groupMetaCache) state.groupMetaCache = new NodeCache({ stdTTL: 5 * 60, useClones: false });
@@ -264,6 +288,7 @@ async function startSession(sessionId, phoneNumber = null) {
         retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
     });
+
     state.sock = sock;
     if (!sock.__sendMessageWrapped) {
         const _origSendMessage = sock.sendMessage.bind(sock);
@@ -279,8 +304,10 @@ async function startSession(sessionId, phoneNumber = null) {
             } catch {}
             return result;
         };
+
         sock.__sendMessageWrapped = true;
     }
+
     function wrapHandler(name, handler) {
         return async (...args) => {
             try {
@@ -295,6 +322,7 @@ async function startSession(sessionId, phoneNumber = null) {
             }
         };
     }
+
     sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
         await saveCreds(); // Écriture disque local
         await saveSessionMongo(state.id, state.connectedNumber || state.id, state.authPath).catch(() => {});
@@ -305,6 +333,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 state.sessionString = Buffer.from(JSON.stringify(sessionData)).toString('base64');
         } catch {}
     }));
+
     if (phoneNumber && !auth.creds.registered) {
         setTimeout(async () => {
             try {
@@ -317,6 +346,7 @@ async function startSession(sessionId, phoneNumber = null) {
             }
         }, 3000);
     }
+
     sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
         if (!pn || !lid) return;
         const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
@@ -330,17 +360,18 @@ async function startSession(sessionId, phoneNumber = null) {
             addLog('info', `[${state.id}] ownerLid corrigé via lid-mapping.update: ${lidNum}`);
         }
     });
+
     sock.ev.on('messages.reaction', async (events) => {
         for (const { key, reaction } of events) {
             try {
-                addLog('info', `[${state.id}] REACTION reçue: text="${reaction?.text}" fromMe=${reaction?.key?.fromMe} participant=${reaction.key?.participant||reaction.key?.remoteJid} ownerLid=${state.ownerLid} targetId=${key?.id} enCache=${!!state.voCache?.get(key?.id)}`);
                 if (!reaction?.text) continue;          // réaction retirée → ignorer
                 const reactorJid = reaction.key?.participant || reaction.key?.remoteJid || '';
                 const reactorIsLid = reactorJid.endsWith('@lid');
                 const reactorLidNum = reactorIsLid ? reactorJid.split('@')[0].split(':')[0] : null;
                 const isOwnerReaction = !!reaction.key?.fromMe
                     || (state.ownerLid && reactorLidNum && reactorLidNum === state.ownerLid);
-                if (!isOwnerReaction) continue;          // seul l'owner (toi) peut déclencher
+                if (!isOwnerReaction) continue;          // seul l'owner (toi) peut déclencher — on ignore tout le reste AVANT de logger, pour ne pas spammer les logs avec les réactions des autres membres
+                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!state.voCache?.get(key?.id)}`);
                 if (!key?.id) continue;
                 const cached = state.voCache?.get(key.id);
                 if (!cached) continue; // pas une vue unique connue (ou déjà expirée du cache)
@@ -370,6 +401,7 @@ async function startSession(sessionId, phoneNumber = null) {
             }
         }
     });
+
     setInterval(() => {
         if (!state.voCache) return;
         const now = Date.now();
@@ -464,6 +496,7 @@ async function startSession(sessionId, phoneNumber = null) {
             addLog('error', `[${state.id}] group-participants.update: ${err.message}`);
         }
     }));
+
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
         if (qr && !phoneNumber) {
             state.qrCode = qr;
@@ -471,6 +504,7 @@ async function startSession(sessionId, phoneNumber = null) {
             qrcodeterminal.generate(qr, { small: true });
             addLog('info', `[${sessionId}] QR prêt — scannez avec WhatsApp`);
         }
+
         if (connection === 'open') {
             const num = sock.user?.id?.split(':')[0] || sock.user?.id || sessionId;
             state.ownerLid = sock.user?.lid ? sock.user.lid.split('@')[0].split(':')[0] : null;
@@ -587,6 +621,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
             }, 2 * 60 * 1000);
         }
+
         if (connection === 'close') {
             state.connection = 'close';
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
@@ -623,6 +658,7 @@ async function startSession(sessionId, phoneNumber = null) {
             }
         }
     });
+
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') {
             const isRecentAppend = type === 'append' && messages.every(m => {
@@ -631,6 +667,7 @@ async function startSession(sessionId, phoneNumber = null) {
             });
             if (!isRecentAppend) return;
         }
+
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
             state.lastActivity = Date.now();
@@ -871,6 +908,7 @@ async function startSession(sessionId, phoneNumber = null) {
         }
     }));
 }
+
 async function restoreFromEnvSessionString() {
     const vars = Object.entries(process.env)
         .filter(([k]) => k === 'SESSION_STRING' || /^SESSION_STRING_\d+$/.test(k))
@@ -908,6 +946,7 @@ async function restoreFromEnvSessionString() {
         }
     }
 }
+
 const WATCHDOG_INTERVAL   = 60 * 1000;       // check toutes les 60s
 const ZOMBIE_THRESHOLD_MS = 20 * 60 * 1000;  // 20 min sans aucun message reçu = suspect
 const PING_TIMEOUT_MS     = 10 * 1000;        // 10s pour recevoir le pong WS
@@ -927,6 +966,7 @@ function wsPingCheck(sock) {
         }
     });
 }
+
 setInterval(async () => {
     const now = Date.now();
     for (const [id, state] of sessions) {
@@ -941,6 +981,7 @@ setInterval(async () => {
             scheduleReconnect(id, 3000);
             continue;
         }
+
         const lastActivity = state.lastActivity || state.lastConnectedAt || 0;
         const inactiveSince = now - lastActivity;
         if (inactiveSince > ZOMBIE_THRESHOLD_MS) {
@@ -959,6 +1000,7 @@ setInterval(async () => {
             addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK, bot inactif normalement`);
             state.lastActivity = now;
         }
+
         try {
             await state.sock.sendPresenceUpdate('available');
             state.lastPing = new Date().toISOString();
@@ -1004,10 +1046,12 @@ async function loadExistingSessions() {
                 }
             }
         }
+
         if (!lockOk) {
             addLog('warn', `[Lock] Impossible d'acquérir le lock — WhatsApp ne sera pas démarré ici.`);
             return;
         }
+
         addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
         const hb = startLockHeartbeat({
             db,
@@ -1026,6 +1070,7 @@ async function loadExistingSessions() {
                 }
             },
         });
+
         const shutdown = async (signal) => {
             console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
             try { hb.stop(); } catch {}
@@ -1040,6 +1085,7 @@ async function loadExistingSessions() {
             cleanupTempSessions();
             process.exit(0);
         };
+
         process.on('SIGINT',  () => shutdown('SIGINT'));
         process.on('SIGTERM', () => shutdown('SIGTERM'));
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
@@ -1071,6 +1117,7 @@ async function loadExistingSessions() {
             );
         }
     }
+
     if (sessionsToStart.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
     else { 
         const startAll = process.env.START_ALL_SESSIONS === '1'; // désactivé par défaut — évite les 440 storm au démarrage
@@ -1082,12 +1129,15 @@ async function loadExistingSessions() {
         }
     }
 }
+
 function readBody(req) {
     return new Promise(r => { let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{r(JSON.parse(b));}catch{r({});} }); });
 }
+
 function getStatsData() {
     try { return JSON.parse(fs.readFileSync(path.join(DATA_ROOT,'stats','stats.json'),'utf8')); } catch { return {}; }
 }
+
 import { randomBytes, timingSafeEqual, createHash } from 'crypto';
 import admin from './commands/admin.js';
 const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD || 'changeme';
@@ -1110,11 +1160,13 @@ function loadDashSessions() {
         Object.entries(raw).forEach(([t,s]) => { if (s.expires>now) dashSessions.set(t,s); });
     } catch {}
 }
+
 function saveDashSessions() {
     const obj = {};
     dashSessions.forEach((v,k) => { obj[k]=v; });
     try { fs.writeFileSync(DASH_SESSIONS_FILE, JSON.stringify(obj)); } catch {}
 }
+
 loadDashSessions();
 const rateLimiter  = new Map();
 const loginTracker = new Map();
@@ -1131,12 +1183,14 @@ function checkPassword(input) {
         return timingSafeEqual(PASS_HASH, h);
     } catch { return false; }
 }
+
 function isRateLimited(ip) {
     const now = Date.now();
     const e = rateLimiter.get(ip);
     if (!e || now>e.reset) { rateLimiter.set(ip,{count:1,reset:now+RATE_WINDOW}); return false; }
     return ++e.count > RATE_MAX;
 }
+
 function checkLoginAttempt(ip) {
     const now = Date.now();
     const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:0 };
@@ -1149,9 +1203,11 @@ function checkLoginAttempt(ip) {
         addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
         return { blocked:true, lockoutMins:30 };
     }
+
     loginTracker.set(ip, e);
     return { blocked:false, remaining: LOGIN_MAX - e.attempts };
 }
+
 function recordLoginSuccess(ip) { loginTracker.delete(ip); }
 function isAuthenticated(req) {
     const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
@@ -1160,6 +1216,7 @@ function isAuthenticated(req) {
     if (!s || Date.now()>s.expires) { dashSessions.delete(token); return false; }
     return true;
 }
+
 function sanitizeId(raw) {
     const id = decodeURIComponent(raw||'');
     if (!/^[\w\-+]{1,50}$/.test(id)) return null;
@@ -1168,6 +1225,7 @@ function sanitizeId(raw) {
         resolved !== path.resolve(SESSIONS_ROOT)) return null;
     return id;
 }
+
 function readBodySafe(req) {
     return new Promise((resolve, reject) => {
         let b='', size=0;
@@ -1176,11 +1234,13 @@ function readBodySafe(req) {
         req.on('error', reject);
     });
 }
+
 function maskSensitive(msg) {
     return msg
         .replace(/(SESSION_STRING)[^\s,}]*/gi, '$1=[MASQUÉ]')
         .replace(/([A-Za-z0-9+/]{80,}={0,2})/g, m => m.slice(0,10)+'...[MASQUÉ]');
 }
+
 const SECURITY_HEADERS = {
     'X-Content-Type-Options':  'nosniff',
     'X-Frame-Options':         'DENY',
@@ -1189,10 +1249,12 @@ const SECURITY_HEADERS = {
     'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https://api.qrserver.com; font-src https://fonts.gstatic.com; connect-src 'self'",
     ...(IS_HTTPS ? { 'Strict-Transport-Security': 'max-age=63072000; includeSubDomains' } : {}),
 };
+
 const SEC_HEADERS = SECURITY_HEADERS;
 function getSessionToken(req) {
     return (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1] || null;
 }
+
 function recordFailedLogin(ip) {
     const now = Date.now();
     const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:now };
@@ -1203,11 +1265,14 @@ function recordFailedLogin(ip) {
         e.lockedUntil = now + LOCKOUT_TIME;
         addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
     }
+
     loginTracker.set(ip, e);
 }
+
 function clearLoginAttempts(ip) {
     loginTracker.delete(ip);
 }
+
 const _addLogOrig = addLog;
 global.addLog = function(level, msg) { _addLogOrig(level, maskSensitive(msg)); };
 http.createServer(async (req, res) => {
@@ -1219,6 +1284,7 @@ http.createServer(async (req, res) => {
         res.writeHead(429, { 'Content-Type':'application/json', 'Retry-After':'60' });
         return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
     }
+
     try {
     const origin = req.headers['origin'] || '';
     const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
@@ -1228,21 +1294,25 @@ http.createServer(async (req, res) => {
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Allow-Credentials': 'true',
     };
+
     if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
     function sendJson(r, data, status=200) {
         r.writeHead(status, { ...SECURITY_HEADERS, ...corsHeaders, 'Content-Type':'application/json' });
         r.end(JSON.stringify(data));
     }
+
     function sendHtml(r, html, status=200) {
         r.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'text/html; charset=utf-8' });
         r.end(html);
     }
+
     if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
         if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
         const hp = path.join(DASH_DIR,'index.html');
         if (fs.existsSync(hp)) { res.writeHead(200,{'Content-Type':'text/html; charset=utf-8',...SEC_HEADERS}); return res.end(fs.readFileSync(hp)); }
         res.writeHead(302,{Location:'/login'}); return res.end();
     }
+
     if (pathname==='/login' && method==='GET') {
         const errCode = url.searchParams.get('error');
         const lockMin = url.searchParams.get('min') || '30';
@@ -1272,6 +1342,7 @@ button:hover{background:#1fb858}
 </div></body></html>`;
         return sendHtml(res, html);
     }
+
     if (pathname==='/login' && method==='POST') {
         let b = '';
         await new Promise(r => { req.on('data',c=>b+=c.slice(0,500)); req.on('end',r); });
@@ -1281,6 +1352,7 @@ button:hover{background:#1fb858}
             addLog('warn', `[Auth] Échec login depuis ${ip}`);
             res.writeHead(302,{Location:'/login?error=1'}); return res.end();
         }
+
         const oldToken = getSessionToken(req);
         if (oldToken) dashSessions.delete(oldToken);
         clearLoginAttempts(ip);
@@ -1291,6 +1363,7 @@ button:hover{background:#1fb858}
         res.writeHead(302, { Location:'/', 'Set-Cookie': cookieFlags, ...SECURITY_HEADERS });
         return res.end();
     }
+
     if (pathname==='/logout' && method==='POST') {
         const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
         if (token) { dashSessions.delete(token); saveDashSessions(); }
@@ -1298,6 +1371,7 @@ button:hover{background:#1fb858}
         res.writeHead(302, { Location:'/login', 'Set-Cookie':'dash_token=; HttpOnly; Max-Age=0; Path=/', ...SECURITY_HEADERS });
         return res.end();
     }
+
     if (pathname==='/api/status') return sendJson(res,{ status:'online', sessions:sessions.size, uptime:Math.floor((Date.now()-startTime)/1000) });
     if (pathname==='/api/health' && method==='GET') {
         const sessionsList = [...sessions.values()].map(s => ({
@@ -1306,6 +1380,7 @@ button:hover{background:#1fb858}
             messagesCount: s.messagesCount,
             lastActivity: s.lastActivity
         }));
+
         const connectedCount = sessionsList.filter(s => s.status === 'open').length;
         const strict = url.searchParams.get('strict') === '1' || process.env.STRICT_HEALTH_CHECK === '1';
         const httpStatus = (strict && connectedCount === 0) ? 503 : 200;
@@ -1317,20 +1392,24 @@ button:hover{background:#1fb858}
             timestamp: new Date().toISOString()
         }, httpStatus);
     }
+
     if (!isAuthenticated(req)) return sendJson(res,{ error:'Non autorisé — connectez-vous sur /login' },401);
     if (pathname==='/api/logs' && method==='GET') {
         const since = Math.max(0, parseInt(url.searchParams.get('since')||'0'));
         const safeLogs = logs.slice(since).map(l => ({ ...l, msg: maskSensitive(l.msg) }));
         return sendJson(res,{ logs: safeLogs, total:logs.length });
     }
+
     if (pathname==='/api/sessions' && method==='GET') {
         const list = [...sessions.values()].map(s=>({
             id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
             ownerNumber:s.connectedNumber, ownerLid:s.ownerLid||null,
             qrCode:s.qrCode, pairingCode:s.pairingCode||null, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
         }));
+
         return sendJson(res,{ sessions:list });
     }
+
     if (pathname==='/api/sessions' && method==='POST') {
         if (sessions.size >= 10) return sendJson(res,{ error:'Maximum 10 sessions simultanées' },429);
         let body = {};
@@ -1341,6 +1420,7 @@ button:hover{background:#1fb858}
         const msg = phone ? 'Session créée, pairing code en cours...' : 'Session créée, QR en cours...';
         return sendJson(res,{ ok:true, sessionId:id, message:msg });
     }
+
     if ((pathname==='/api/sessions' && method==='DELETE') || (pathname==='/api/sessions/purge-all' && method==='GET')) {
         const ids = [...sessions.keys()];
         for (const sid of ids) {
@@ -1349,10 +1429,12 @@ button:hover{background:#1fb858}
             try { fse.removeSync(path.join(SESSIONS_ROOT, sid)); } catch {}
             sessions.delete(sid);
         }
+
         const result = await deleteAllSessionsMongo().catch(e => ({ deleted: 0, error: e.message }));
         addLog('info', `Purge totale : ${ids.length} session(s) locale(s), ${result.deleted||0} en MongoDB (IP: ${ip})`);
         return sendJson(res, { ok:true, sessionsCleared: ids.length, mongoDeleted: result.deleted||0 });
     }
+
     const smatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
     if (smatch && method==='GET') {
         const sid = sanitizeId(smatch[1]);
@@ -1377,6 +1459,7 @@ button:hover{background:#1fb858}
             sessionString: s.sessionString || null,
         });
     }
+
     const pairmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/pair$/);
     if (pairmatch && method==='POST') {
         const sid = sanitizeId(pairmatch[1]);
@@ -1401,6 +1484,7 @@ button:hover{background:#1fb858}
             return sendJson(res,{error:e.message},500);
         }
     }
+
     const rmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
     if (rmatch && method==='POST') {
         const sid = sanitizeId(rmatch[1]);
@@ -1412,6 +1496,7 @@ button:hover{background:#1fb858}
         setTimeout(()=>startSession(sid),1500);
         return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
     }
+
     const lmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/logout$/);
     if (lmatch && method==='POST') {
         const sid = sanitizeId(lmatch[1]);
@@ -1425,6 +1510,7 @@ button:hover{background:#1fb858}
         deleteSessionMongo(sid).catch(() => {});
         return sendJson(res,{ ok:true, message:'Session supprimée.' });
     }
+
     const dmatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
     if (dmatch && method==='DELETE') {
         const sid = sanitizeId(dmatch[1]);
@@ -1437,6 +1523,7 @@ button:hover{background:#1fb858}
         addLog('info',`Session [${sid}] supprimée (IP: ${ip})`);
         return sendJson(res,{ ok:true });
     }
+
     const sendmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/send$/);
     if (sendmatch && method==='POST') {
         const sid  = sanitizeId(sendmatch[1]);
@@ -1454,6 +1541,7 @@ button:hover{background:#1fb858}
             return sendJson(res,{ ok:true });
         } catch(e) { return sendJson(res,{error:e.message},500); }
     }
+
     sendJson(res,{ error:'Route inconnue' },404);
     } catch (e) {
         addLog('error', `[HTTP] Exception non gérée sur ${method} ${pathname}: ${e.message}`);
@@ -1471,6 +1559,7 @@ button:hover{background:#1fb858}
         addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables d\'environnement !');
     }
 });
+
 loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
 (function startSelfPing() {
     if (process.env.SELF_PING === '0') return;
@@ -1481,12 +1570,14 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
         if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/status`;
         return `http://127.0.0.1:${PORT}/api/status`;
     }
+
     const doSelfPing = () => {
         const url = getPingUrl();
         axios.get(url, { timeout: 10000 })
             .then(() => { /* ping silencieux — garder le service éveillé */ })
             .catch(e => addLog('warn', `[SelfPing] Échec ping ${url}: ${e.message}`));
     };
+
     setTimeout(() => {
         doSelfPing();
         setInterval(doSelfPing, PING_INTERVAL_MS);
