@@ -791,11 +791,22 @@ async function startSession(sessionId, phoneNumber = null) {
             } catch {}
 
             if (code === DisconnectReason.loggedOut) {
-                // WhatsApp envoie loggedOut (401) après rotation de clés, redéploiement, etc.
-                // On tente une reconnexion avec les creds existants (MongoDB les a).
-                // NE PAS supprimer /tmp — les creds sont encore valides dans la plupart des cas.
-                addLog('warn', `[${state.id}] Session loggedOut (401) — reconnexion dans 10s`);
-                scheduleReconnect(state.id, 10000);
+                // 401 = WhatsApp a explicitement déconnecté cette session (appareil
+                // retiré depuis "Appareils connectés", révocation de sécurité,
+                // conflit...). Les identifiants ne redeviendront PAS valides tout
+                // seuls — retenter en boucle ne fait que spammer WhatsApp et créer
+                // des boucles infinies de 401 (observé précédemment). On supprime
+                // donc la session complètement, comme une déconnexion manuelle
+                // depuis le dashboard.
+                addLog('warn', `[${state.id}] Session loggedOut (401) — suppression complète (local + Mongo)`);
+                try { await sock.end(); } catch {}
+                try {
+                    const n = state.connectedNumber;
+                    if (n && activeSocketByNumber.get(n)?.sock === sock) activeSocketByNumber.delete(n);
+                } catch {}
+                try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
+                sessions.delete(state.id);
+                deleteSessionMongo(state.id).catch(() => {});
             } else {
                 // Anti-loop: si 440 se répète, appliquer un cooldown long
                 let extraCooldown = 0;
@@ -1619,6 +1630,14 @@ http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
     }
 
+    // ── Filet de sécurité global ─────────────────────────────
+    // Sans ça, une exception non gérée n'importe où dans les routes plus bas
+    // (ex: accès à un champ undefined) laisse la requête sans réponse : le
+    // navigateur voit un échec réseau silencieux, et le JS du dashboard qui
+    // fait juste `catch {}` n'affiche RIEN, sans aucune erreur visible.
+    // C'était la cause probable de "cliquer sur une session n'affiche rien".
+    try {
+
     const origin = req.headers['origin'] || '';
     const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
     const corsHeaders = {
@@ -1811,7 +1830,7 @@ button:hover{background:#1fb858}
         const uptime    = Math.floor((Date.now()-startTime)/1000);
         return sendJson(res,{
             ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
-            recentCommands:s.recentCommands.slice(-20),
+            recentCommands:(s.recentCommands || []).slice(-20),
             uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
             totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
             topCommands:topCmds, users, prefix:PREFIX,
@@ -1909,6 +1928,13 @@ button:hover{background:#1fb858}
 
     sendJson(res,{ error:'Route inconnue' },404);
 
+    } catch (e) {
+        addLog('error', `[HTTP] Exception non gérée sur ${method} ${pathname}: ${e.message}`);
+        try {
+            if (!res.headersSent) return sendJson(res, { error: 'Erreur serveur interne', detail: e.message }, 500);
+        } catch {}
+    }
+
 }).listen(PORT, BIND_HOST, () => {
     const railwayUrl = process.env.RAILWAY_PUBLIC_DOMAIN
         ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -1961,10 +1987,4 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
     };
 
     // Attendre 30s après le démarrage avant le premier ping
-    setTimeout(() => {
-        doSelfPing();
-        setInterval(doSelfPing, PING_INTERVAL_MS);
-    }, 30_000);
-
-    addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
-})();
+    setTimeout(() =>
