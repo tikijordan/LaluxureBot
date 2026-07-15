@@ -624,6 +624,7 @@ async function startSession(sessionId, phoneNumber = null) {
 
         if (connection === 'close') {
             state.connection = 'close';
+            state.lastDisconnectAt = Date.now();
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -661,9 +662,19 @@ async function startSession(sessionId, phoneNumber = null) {
 
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') {
+            // 'append' = normalement la sync d'historique au démarrage → à ignorer.
+            // MAIS après une coupure (redéploiement, reconnexion réseau...),
+            // WhatsApp redélivre aussi les messages reçus PENDANT la coupure en
+            // tant que 'append' — les rejeter fait perdre de vrais messages
+            // récents (observé : messages jamais reçus par le bot après un
+            // redéploiement de 45s, alors qu'un seuil fixe de 20s les excluait).
+            // On calcule donc une fenêtre dynamique = durée réelle de la coupure
+            // (+ marge), plafonnée pour ne jamais avaler un vrai historique ancien.
+            const outageMs = state.lastDisconnectAt ? (Date.now() - state.lastDisconnectAt) : 20_000;
+            const acceptWindowMs = Math.min(Math.max(outageMs + 30_000, 30_000), 10 * 60 * 1000);
             const isRecentAppend = type === 'append' && messages.every(m => {
                 const ts = Number(m.messageTimestamp) * 1000;
-                return ts && (Date.now() - ts) < 20_000;
+                return ts && (Date.now() - ts) < acceptWindowMs;
             });
             if (!isRecentAppend) return;
         }
