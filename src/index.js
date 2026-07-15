@@ -373,7 +373,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (!isOwnerReaction) continue;          // seul l'owner (toi) peut déclencher — on ignore tout le reste AVANT de logger, pour ne pas spammer les logs avec les réactions des autres membres
                 if (!key?.id) continue;
                 const cached = state.msgCache?.get(key.id);
-                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!cached}`);
+                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!cached} dejaVu=${processedMsgIds.has(key?.id)} remoteJid=${key?.remoteJid}`);
                 if (!cached) continue; // message inconnu (pas reçu pendant cette session, ou trop ancien/évincé du cache)
                 const inner = extractViewOnceInner(cached.msg.message);
                 if (!inner) continue; // le message ciblé n'est pas une vue unique — rien à faire
