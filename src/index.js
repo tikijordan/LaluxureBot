@@ -371,12 +371,12 @@ async function startSession(sessionId, phoneNumber = null) {
                 const isOwnerReaction = !!reaction.key?.fromMe
                     || (state.ownerLid && reactorLidNum && reactorLidNum === state.ownerLid);
                 if (!isOwnerReaction) continue;          // seul l'owner (toi) peut déclencher — on ignore tout le reste AVANT de logger, pour ne pas spammer les logs avec les réactions des autres membres
-                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!state.voCache?.get(key?.id)}`);
                 if (!key?.id) continue;
-                const cached = state.voCache?.get(key.id);
-                if (!cached) continue; // pas une vue unique connue (ou déjà expirée du cache)
+                const cached = state.msgCache?.get(key.id);
+                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!cached}`);
+                if (!cached) continue; // message inconnu (pas reçu pendant cette session, ou trop ancien/évincé du cache)
                 const inner = extractViewOnceInner(cached.msg.message);
-                if (!inner) continue;
+                if (!inner) continue; // le message ciblé n'est pas une vue unique — rien à faire
                 try {
                     const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
                     const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
@@ -403,10 +403,10 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     setInterval(() => {
-        if (!state.voCache) return;
+        if (!state.msgCache) return;
         const now = Date.now();
-        for (const [id, entry] of state.voCache) {
-            if (now - entry.ts > 24 * 60 * 60 * 1000) state.voCache.delete(id);
+        for (const [id, entry] of state.msgCache) {
+            if (now - entry.ts > 24 * 60 * 60 * 1000) state.msgCache.delete(id);
         }
     }, 60 * 60 * 1000);
     sock.ev.on('group-participants.update', wrapHandler('group-participants.update', async ({ id: from, participants, action }) => {
@@ -762,17 +762,26 @@ async function startSession(sessionId, phoneNumber = null) {
                     || voMsgContent?.imageMessage?.viewOnce === true
                     || voMsgContent?.videoMessage?.viewOnce === true
                     || voMsgContent?.audioMessage?.viewOnce === true;
-                if (isVOraw) {
-                    if (isViewOnceMessage(msg)) {
-                        autoSaveViewOnce(sock, msg, OWNER, {
-                            senderNumber, senderJid, isGroup, from, rawJid,
-                        }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
-                    }
-                    if (!state.voCache) state.voCache = new Map();
-                    if (msg.key?.id) {
-                        state.voCache.set(msg.key.id, {
-                            msg, senderNumber, senderJid, isGroup, from, rawJid, ts: Date.now(),
-                        });
+                if (isVOraw && isViewOnceMessage(msg)) {
+                    autoSaveViewOnce(sock, msg, OWNER, {
+                        senderNumber, senderJid, isGroup, from, rawJid,
+                    }).catch(e => addLog('error', `[${state.id}] AutoVO: ${e.message}`));
+                }
+                // ── Cache général de messages (pas seulement les vues uniques) ──
+                // Sert au déclencheur par réaction : au lieu de pré-filtrer à
+                // l'arrivée (risque de rater un format non prévu, comme observé),
+                // on cache TOUT message et on applique extractViewOnceInner()
+                // directement au moment de la réaction — exactement la même
+                // logique que !vo avec le message cité. Taille plafonnée pour
+                // éviter une fuite mémoire (les plus anciens sont évincés).
+                if (msg.key?.id) {
+                    if (!state.msgCache) state.msgCache = new Map();
+                    state.msgCache.set(msg.key.id, {
+                        msg, senderNumber, senderJid, isGroup, from, rawJid, ts: Date.now(),
+                    });
+                    if (state.msgCache.size > 2000) {
+                        const oldestKey = state.msgCache.keys().next().value;
+                        state.msgCache.delete(oldestKey);
                     }
                 }
                 if (!isGroup && !fromMe && body && global.captchaPending?.size) {
@@ -1450,7 +1459,7 @@ button:hover{background:#1fb858}
         const uptime    = Math.floor((Date.now()-startTime)/1000);
         return sendJson(res,{
             ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
-            groupMetaCache:undefined, voCache:undefined, lidCache:undefined, lidFailCache:undefined,
+            groupMetaCache:undefined, msgCache:undefined, lidCache:undefined, lidFailCache:undefined,
             recentCommands:(s.recentCommands || []).slice(-20),
             uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
             totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
