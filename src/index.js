@@ -376,7 +376,11 @@ async function startSession(sessionId, phoneNumber = null) {
                 addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!cached} dejaVu=${processedMsgIds.has(key?.id)} remoteJid=${key?.remoteJid}`);
                 if (!cached) continue; // message inconnu (pas reçu pendant cette session, ou trop ancien/évincé du cache)
                 const inner = extractViewOnceInner(cached.msg.message);
-                if (!inner) continue; // le message ciblé n'est pas une vue unique — rien à faire
+                if (!inner) {
+                    const m = cached.msg.message || {};
+                    addLog('warn', `[${state.id}] Réaction sur un message NON reconnu comme vue unique — ct=${getContentType(m)} keys=${Object.keys(m).join(',')} hasEphemeral=${!!m.ephemeralMessage}`);
+                    continue;
+                }
                 try {
                     const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
                     const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
@@ -680,7 +684,17 @@ async function startSession(sessionId, phoneNumber = null) {
         }
 
         for (const msg of messages) {
-            if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
+            if (!msg.message) {
+                // Diagnostic ciblé : le message arrive mais sans contenu du tout
+                // (échec de déchiffrement probable — clé de session pas encore
+                // synchronisée avec l'expéditeur). Ne se déclenche jamais sur un
+                // message qui arrive normalement, donc pas de spam.
+                if (msg.key?.remoteJid !== 'status@broadcast') {
+                    addLog('warn', `[${state.id}] MSG SANS CONTENU (échec déchiffrement ?) id=${msg.key?.id} remoteJid=${msg.key?.remoteJid} messageStubType=${msg.messageStubType}`);
+                }
+                continue;
+            }
+            if (msg.key.remoteJid === 'status@broadcast') continue;
             state.lastActivity = Date.now();
             const msgId = msg.key.id;
             if (!msgId || processedMsgIds.has(msgId)) continue;
