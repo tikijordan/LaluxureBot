@@ -687,10 +687,11 @@ async function startSession(sessionId, phoneNumber = null) {
             if (!msg.message) {
                 // Diagnostic ciblé : le message arrive mais sans contenu du tout
                 // (échec de déchiffrement probable — clé de session pas encore
-                // synchronisée avec l'expéditeur). Ne se déclenche jamais sur un
-                // message qui arrive normalement, donc pas de spam.
-                if (msg.key?.remoteJid !== 'status@broadcast') {
-                    addLog('warn', `[${state.id}] MSG SANS CONTENU (échec déchiffrement ?) id=${msg.key?.id} remoteJid=${msg.key?.remoteJid} messageStubType=${msg.messageStubType}`);
+                // synchronisée avec l'expéditeur). Les messageStubType (ex: 2 =
+                // suppression/révocation) sont des notifications protocolaires
+                // normales SANS contenu par nature — pas une erreur, à ignorer.
+                if (msg.key?.remoteJid !== 'status@broadcast' && !msg.messageStubType) {
+                    addLog('warn', `[${state.id}] MSG SANS CONTENU (échec déchiffrement ?) id=${msg.key?.id} remoteJid=${msg.key?.remoteJid}`);
                 }
                 continue;
             }
@@ -1527,7 +1528,10 @@ button:hover{background:#1fb858}
         if (!s) return sendJson(res,{error:'Session introuvable'},404);
         addLog('info',`[${sid}] Redémarrage depuis le dashboard (IP: ${ip})`);
         try { if(s.sock) await s.sock.end(); } catch {}
-        setTimeout(()=>startSession(sid),1500);
+        // 1.5s était trop court : WhatsApp met parfois plus de temps à considérer
+        // l'ancienne connexion comme terminée côté serveur, causant un conflit
+        // (code 440) avec la nouvelle tentative de connexion.
+        setTimeout(()=>startSession(sid),5000);
         return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
     }
 
