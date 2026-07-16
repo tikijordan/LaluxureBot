@@ -284,7 +284,7 @@ async function startSession(sessionId, phoneNumber = null) {
         auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
         browser: ['Ubuntu','Chrome','20.0.0'],
         syncFullHistory: false, markOnlineOnConnect: true,
-        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
+        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 45000,
         retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
     });
