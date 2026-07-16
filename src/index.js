@@ -284,7 +284,7 @@ async function startSession(sessionId, phoneNumber = null) {
         auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
         browser: ['Ubuntu','Chrome','20.0.0'],
         syncFullHistory: false, markOnlineOnConnect: true,
-        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 45000,
+        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
         retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
     });
@@ -293,7 +293,16 @@ async function startSession(sessionId, phoneNumber = null) {
     if (!sock.__sendMessageWrapped) {
         const _origSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options) => {
-            const result = await _origSendMessage(jid, content, options);
+            // Timeout ciblé (45s) UNIQUEMENT sur sendMessage — sans toucher au
+            // defaultQueryTimeoutMs global (qui doit rester illimité, sinon ça
+            // casse des opérations internes de Baileys nécessaires à la
+            // réception des messages, comme observé). Si sendMessage reste
+            // bloqué (connexion dégradée), ça lève une erreur au lieu de
+            // bloquer indéfiniment la commande en cours.
+            const result = await Promise.race([
+                _origSendMessage(jid, content, options),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000)),
+            ]);
             try {
                 if (jid && jid.endsWith('@g.us') && result?.key) {
                     if (!global.botMessages.has(jid)) global.botMessages.set(jid, []);
