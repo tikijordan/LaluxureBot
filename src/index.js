@@ -434,6 +434,23 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!state.lidCache) state.lidCache = {};
         state.lidCache[lidNum] = pnNum;   // LID → numéro
         state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
+
+        // ── AUTO-CORRECTION ownerLid ──────────────────────────────
+        // La résolution tentée une seule fois à la connexion (connection.update
+        // === 'open') peut échouer silencieusement (sock.user.lid pas encore
+        // peuplé à cet instant précis, ou requête réseau qui rate) et n'était
+        // JAMAIS retentée ensuite. Résultat : state.ownerLid reste null pour
+        // toute la durée de vie de la session → l'owner n'est plus jamais
+        // reconnu comme owner dans les groupes qui exposent son LID (au lieu
+        // de son numéro), et TOUTES ses commandes en groupe sont ignorées
+        // silencieusement (isOwner=false → `if (!isOwner) continue;`).
+        // On corrige ownerLid dès qu'un mapping concernant le numéro connecté
+        // arrive, peu importe quand.
+        const ownerNum = (state.connectedNumber || sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
+        if (ownerNum && pnNum === ownerNum && state.ownerLid !== lidNum) {
+            state.ownerLid = lidNum;
+            addLog('info', `[${state.id}] ownerLid corrigé via lid-mapping.update: ${lidNum}`);
+        }
     });
 
     // ── ARRIVÉE / DÉPART DE MEMBRES ──────────────────────────────────
@@ -789,7 +806,25 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
 
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
-                const OWNER_LID = state.ownerLid || null;
+                let OWNER_LID = state.ownerLid || null;
+
+                // ── AUTO-CORRECTION supplémentaire ──────────────────────
+                // Si ownerLid n'a toujours pas été résolu (ni à la connexion,
+                // ni via un lid-mapping.update reçu depuis), et qu'on est
+                // justement en train d'évaluer un message de groupe qui
+                // pourrait être une commande de l'owner, on tente une
+                // résolution à la demande plutôt que d'abandonner l'owner
+                // pour le reste de la session.
+                if (!OWNER_LID && isGroup && OWNER) {
+                    try {
+                        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
+                        if (pairs && pairs.length > 0 && pairs[0]?.lid) {
+                            OWNER_LID = pairs[0].lid.split('@')[0].split(':')[0];
+                            state.ownerLid = OWNER_LID;
+                            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${OWNER_LID}`);
+                        }
+                    } catch {}
+                }
 
                 const senderIsLid = senderJid.endsWith('@lid');
 

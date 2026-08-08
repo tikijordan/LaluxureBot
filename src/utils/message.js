@@ -27,11 +27,13 @@ export function extractMessageBody(msg) {
     return '';
 }
 
-export function resolveIsOwner({ fromMe, senderNumber, senderJid, OWNER, OWNER_LID, lidCache }) {
+export function resolveIsOwner({ fromMe, senderNumber, senderJid, OWNER, OWNER_LID, OWNER_PERSONAL, lidCache }) {
     if (fromMe) return true;
     const normOwner = normalizePhone(OWNER);
     const normSender = normalizePhone(senderNumber);
+    const normPersonal = normalizePhone(OWNER_PERSONAL);
     if (normOwner && normSender && normOwner === normSender) return true;
+    if (normPersonal && normSender && normPersonal === normSender) return true;
 
     const senderLid = senderJid?.endsWith('@lid') ? senderJid.split('@')[0] : null;
     if (OWNER_LID && senderLid && senderLid === OWNER_LID) return true;

@@ -7,11 +7,10 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getContentType } from '@whiskeysockets/baileys';
-import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
-// FIX 2 — lire le mode bot dynamiquement depuis le fichier plutôt que depuis ctx
-import { getBotMode } from './commands/security.js';
+import { resolveIsOwner } from './utils/message.js';
+import { canUseBot, getBotMode } from './utils/botmode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,9 +43,7 @@ setInterval(() => {
     }
 }, 60 * 1000);
 
-// FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
-//          (était définie seulement dans le bloc private, causant ReferenceError
-//          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
+// FIX 1 — normalize définie au niveau module (fallback si ctx incomplet)
 const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
 
 /**
@@ -84,6 +81,8 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const connectedOwner = (sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
     const OWNER     = (ctx.owner || connectedOwner).replace(/\D/g, '');
     const OWNER_LID = ctx.ownerLid || sock.user?.lid?.split('@')[0] || null;
+    const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
+    const lidCache = ctx.lidCache || {};
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
     // ── Extraction du contexte ────────────────────────────────
@@ -143,15 +142,15 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         }
 
         const senderIsLid = sender.endsWith('@lid');
-        isOwner = fromMe
-            || (OWNER && normalize(senderNumber) === normalize(OWNER))
-            || (OWNER_LID && senderIsLid && sender.split('@')[0] === OWNER_LID);
+        isOwner = resolveIsOwner({
+            fromMe, senderNumber, senderJid: sender, OWNER, OWNER_LID, OWNER_PERSONAL, lidCache,
+        });
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
 
-    // Seul l'owner peut utiliser le bot (DM et groupes)
-    if (!isOwner) return;
+    const botMode = getBotMode();
+    if (!canUseBot(isOwner, botMode)) return;
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);
@@ -160,10 +159,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const text    = args.join(' ');
 
     if (!cmdName) return;
-
-    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
-    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
-    const botMode = getBotMode();
 
     const command = commands[cmdName];
     if (!command) return;
