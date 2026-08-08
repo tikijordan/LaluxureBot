@@ -92,10 +92,11 @@ const mediaCommands = {
       const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
       const quotedSender = msg.message?.extendedTextMessage?.contextInfo?.participant;
       const target = (mentioned && mentioned[0]) || quotedSender || sender;
+      const sendTo = sender;
 
       try {
         const ppUrl = await sock.profilePictureUrl(target, 'image');
-        await sock.sendMessage(from, { 
+        await sock.sendMessage(sendTo, { 
           image: { url: ppUrl }, 
           caption: `📸 Photo de profil de @${target.split('@')[0]}`,
           mentions: [target]
@@ -117,9 +118,9 @@ const mediaCommands = {
       if (!getContentType(innerMsg) || !/^(image|video|audio)Message$/.test(getContentType(innerMsg))) {
         return sock.sendMessage(from, { text: '❌ Ce message ne contient pas de média valide (image, vidéo ou audio).' });
       }
+      const sendTo = sender;
 
-      await sock.sendMessage(from, { text: '⏳ Extraction en cours...' });
-
+    
       try {
         const ownerNum = resolveSessionOwner(owner, sock);
         const { buffer, kind, obj } = await downloadViewOnceBuffer(innerMsg);
@@ -132,8 +133,8 @@ const mediaCommands = {
           else await targetSock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mp4' }, opts);
         };
 
-        const caption = `✅ Vue unique extraite\nLégende : ${obj?.caption || 'Aucune'}`;
-        await sendBuffer(sock, from, caption, msg);
+        const caption = ` Vue unique extraite\nLégende : ${obj?.caption || 'Aucune'}`;
+        await sendBuffer(sock, sendTo, caption, msg);
 
         await notifyOwnerViewOnce(sock, ownerNum, { buffer, kind, obj }, {
           senderNumber, senderJid: sender, isGroup, from, rawJid: from,

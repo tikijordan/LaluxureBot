@@ -148,6 +148,8 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
+import { resolveIsOwner } from './utils/message.js';
+import { canUseBot } from './utils/botmode.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
@@ -210,6 +212,26 @@ function clearReconnectTimer(sessionId) {
         clearTimeout(t);
         reconnectTimerBySessionId.delete(sessionId);
     }
+}
+
+/** Résout ownerLid dès qu'une commande groupe en a besoin (évite l'attente des events lid-mapping). */
+async function resolveOwnerLidIfNeeded(sock, state, ownerNum) {
+    if (!ownerNum || state.ownerLid) return state.ownerLid;
+    try {
+        if (sock.user?.lid) {
+            state.ownerLid = sock.user.lid.split('@')[0].split(':')[0];
+            return state.ownerLid;
+        }
+        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${ownerNum}@s.whatsapp.net`]);
+        if (pairs?.[0]?.lid) {
+            state.ownerLid = pairs[0].lid.split('@')[0].split(':')[0];
+            if (!state.lidCache) state.lidCache = {};
+            state.lidCache[ownerNum] = state.ownerLid;
+            state.lidCache[state.ownerLid] = ownerNum;
+            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${state.ownerLid}`);
+        }
+    } catch {}
+    return state.ownerLid;
 }
 
 function scheduleReconnect(sessionId, delayMs = 3000) {
@@ -363,6 +385,11 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!state.lidCache) state.lidCache = {};
         state.lidCache[lidNum] = pnNum;   // LID → numéro
         state.lidCache[pnNum]  = lidNum;  // numéro → LID (pour lookup inverse)
+        const ownerNum = (state.connectedNumber || sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
+        if (ownerNum && pnNum === ownerNum && state.ownerLid !== lidNum) {
+            state.ownerLid = lidNum;
+            addLog('info', `[${state.id}] ownerLid corrigé via lid-mapping.update: ${lidNum}`);
+        }
     });
 
     // ── ARRIVÉE / DÉPART DE MEMBRES ──────────────────────────────────
@@ -668,14 +695,22 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (!OWNER) continue; // session pas encore connectée (QR/pairing en attente)
                 const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
                 const from  = isGroup ? rawJid : rawJid;
+                const participantRaw = msg.key.participant || '';
                 let senderJid, senderNumber;
                 const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
                 if (fromMe) {
                     senderNumber = OWNER;
-                    senderJid    = isGroup ? (msg.key.participant || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
+                    senderJid    = isGroup ? (participantRaw || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
                 } else if (isGroup) {
-                    senderJid = msg.key.participant || '';
+                    senderJid = participantRaw || '';
                     const isParticipantLid = senderJid.endsWith('@lid');
+                    const ctEarly = getContentType(msg.message);
+                    let bodyEarly = '';
+                    if (ctEarly === 'conversation') bodyEarly = msg.message.conversation || '';
+                    else if (ctEarly === 'extendedTextMessage') bodyEarly = msg.message.extendedTextMessage?.text || '';
+                    else if (ctEarly === 'imageMessage') bodyEarly = msg.message.imageMessage?.caption || '';
+                    else if (ctEarly === 'videoMessage') bodyEarly = msg.message.videoMessage?.caption || '';
+                    const isCmdEarly = bodyEarly.startsWith(PREFIX);
                     if (isParticipantLid) {
                         const lidNum = senderJid.split('@')[0].split(':')[0];
                         if (state.lidCache?.[lidNum]) {
@@ -686,7 +721,11 @@ async function startSession(sessionId, phoneNumber = null) {
                             senderJid    = senderNumber + '@s.whatsapp.net';
                             if (!state.lidCache) state.lidCache = {};
                             state.lidCache[lidNum] = senderNumber;
-                        } else if (state.lidFailCache?.[lidNum] && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000) {
+                        } else if (
+                            !isCmdEarly
+                            && state.lidFailCache?.[lidNum]
+                            && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000
+                        ) {
                             senderNumber = lidNum;
                         } else {
                             try {
@@ -714,20 +753,27 @@ async function startSession(sessionId, phoneNumber = null) {
                     senderNumber = cleanPhone(rawJid);
                     senderJid    = senderNumber + '@s.whatsapp.net';
                 }
-                const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
-                const OWNER_LID = state.ownerLid || null;
-
-                const senderIsLid = senderJid.endsWith('@lid');
-                const isOwner = fromMe
-                    || (OWNER && normalize(senderNumber) === normalize(OWNER))
-                    || (OWNER_PERSONAL && normalize(senderNumber) === OWNER_PERSONAL)
-                    || (OWNER_LID && senderIsLid && senderJid.split('@')[0].split(':')[0] === OWNER_LID);
                 const ct = getContentType(msg.message);
                 let body = '';
                 if (ct==='conversation') body=msg.message.conversation||'';
                 else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
                 else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
                 else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
+                const isCmd = body.startsWith(PREFIX);
+                if (isGroup && isCmd) {
+                    await resolveOwnerLidIfNeeded(sock, state, OWNER);
+                }
+                const OWNER_LID = state.ownerLid || null;
+                const ownerCheckJid = participantRaw || senderJid;
+                const isOwner = resolveIsOwner({
+                    fromMe,
+                    senderNumber,
+                    senderJid: ownerCheckJid,
+                    OWNER,
+                    OWNER_LID,
+                    OWNER_PERSONAL,
+                    lidCache: state.lidCache || {},
+                });
                 const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
                 const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
                 const isVOraw = /^viewOnceMessage/.test(voCt)
@@ -773,7 +819,6 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                     if (handledCaptcha) continue;
                 }
-                const isCmd = body.startsWith(PREFIX);
                 let replyTo = from;
                 if (!isGroup && isCmd && isOwner && OWNER) {
                     replyTo = `${OWNER}@s.whatsapp.net`;
@@ -872,7 +917,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                 }
                 if (!isCmd) continue;
-                if (!isOwner) continue;
+                if (!canUseBot(isOwner, currentBotMode)) continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
@@ -880,6 +925,8 @@ async function startSession(sessionId, phoneNumber = null) {
                     prefix: PREFIX,
                     owner: OWNER,
                     ownerLid: state.ownerLid || null,
+                    ownerPersonal: OWNER_PERSONAL,
+                    lidCache: state.lidCache || {},
                     onCommand: (cmd, user) => {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);

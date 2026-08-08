@@ -81,7 +81,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const connectedOwner = (sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
     const OWNER     = (ctx.owner || connectedOwner).replace(/\D/g, '');
     const OWNER_LID = ctx.ownerLid || sock.user?.lid?.split('@')[0] || null;
-    const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
+    const OWNER_PERSONAL = ctx.ownerPersonal ?? (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
     const lidCache = ctx.lidCache || {};
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
@@ -92,6 +92,18 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     let isOwner      = ctx.isOwner;
     let senderNumber = ctx.senderNumber;
     let sender       = ctx.sender;
+
+    if (body !== undefined && sender !== undefined) {
+        isOwner = resolveIsOwner({
+            fromMe: !!msg.key?.fromMe,
+            senderNumber,
+            senderJid: msg.key?.participant || sender,
+            OWNER,
+            OWNER_LID,
+            OWNER_PERSONAL,
+            lidCache,
+        });
+    }
 
     // Fallback complet si appelé sans contexte (compatibilité)
     if (body === undefined) {
