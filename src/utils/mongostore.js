@@ -278,6 +278,14 @@ export async function restoreAllSessions(sessionsRoot) {
 // DELETE — Supprime une session de MongoDB
 // ─────────────────────────────────────────────
 export async function deleteSessionMongo(sessionId) {
+    // Annuler toute sauvegarde différée en attente pour cette session — sinon
+    // elle se déclenche après coup et réinsère le document qu'on vient de
+    // supprimer (c'était la cause de "la session revient après suppression").
+    if (pushTimers.has(sessionId)) {
+        clearTimeout(pushTimers.get(sessionId));
+        pushTimers.delete(sessionId);
+    }
+
     if (!connected || !collection) return false;
     try {
         await collection.deleteOne({ _id: sessionId });

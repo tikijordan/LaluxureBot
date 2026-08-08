@@ -10,6 +10,7 @@
     "cleanup-mongo": "node scripts/cleanup-mongo.js"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.9",
     "adm-zip": "^0.5.16",
