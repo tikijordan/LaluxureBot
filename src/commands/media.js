@@ -91,6 +91,7 @@ const mediaCommands = {
       // Priorité : Mentions > Message cité > Expéditeur
       const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
       const quotedSender = msg.message?.extendedTextMessage?.contextInfo?.participant;
+      const isGroup = msg.key?.remoteJid?.endsWith('@g.us');
       const target = (mentioned && mentioned[0]) || quotedSender || (isGroup?sender :from);
       const sendTo = sender;
 
