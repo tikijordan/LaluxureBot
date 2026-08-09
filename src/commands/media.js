@@ -91,7 +91,7 @@ const mediaCommands = {
       // Priorité : Mentions > Message cité > Expéditeur
       const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
       const quotedSender = msg.message?.extendedTextMessage?.contextInfo?.participant;
-      const target = (mentioned && mentioned[0]) || quotedSender || sender;
+      const target = (mentioned && mentioned[0]) || quotedSender || (isGroup?sender :from);
       const sendTo = sender;
 
       try {
@@ -102,7 +102,7 @@ const mediaCommands = {
           mentions: [target]
         }, { quoted: msg });
       } catch {
-        await sock.sendMessage(from, { text: '❌ Impossible de récupérer la photo (privée ou inexistante).' });
+        await sock.sendMessage(sendTo, { text: '❌ Impossible de récupérer la photo (privée ou inexistante).' });
       }
     },
   },
@@ -112,13 +112,14 @@ const mediaCommands = {
     description: 'Extrait un média à vue unique.',
     execute: async ({ sock, msg, from, sender, senderNumber, isGroup, owner }) => {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (!quoted) return sock.sendMessage(from, { text: '❌ Réponds à un message à vue unique.' });
+       const sendTo = sender;
+      if (!quoted) return sock.sendMessage(sendTo, { text: '❌ Réponds à un message à vue unique.' });
 
       const innerMsg = extractViewOnceInner(quoted) || quoted;
       if (!getContentType(innerMsg) || !/^(image|video|audio)Message$/.test(getContentType(innerMsg))) {
-        return sock.sendMessage(from, { text: '❌ Ce message ne contient pas de média valide (image, vidéo ou audio).' });
+        return sock.sendMessage(sendTo, { text: '❌ Ce message ne contient pas de média valide (image, vidéo ou audio).' });
       }
-      const sendTo = sender;
+      
 
     
       try {
@@ -142,7 +143,7 @@ const mediaCommands = {
 
       } catch (e) {
         console.error('[VO] Erreur extraction:', e.message);
-        await sock.sendMessage(from, { text: '❌ Échec : le média a peut-être expiré.' });
+        await sock.sendMessage(sendTo, { text: '❌ Échec : le média a peut-être expiré.' });
       }
     },
   },
