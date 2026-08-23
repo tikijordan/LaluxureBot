@@ -9,6 +9,7 @@ import os from 'os';
 import makeWASocket, {
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
     getContentType,
@@ -312,13 +313,28 @@ async function startSession(sessionId, phoneNumber = null) {
 
         let version;
         try {
-            ({ version } = await fetchLatestBaileysVersion());
-        } catch (e) {
-            // Fallback : certains hébergements (SmarterASP.NET notamment)
-            // bloquent ou coupent l'accès sortant à l'endpoint de version.
-            // Une version figée fonctionnelle vaut mieux qu'un échec total.
-            version = [2, 3000, 1015901307];
-            addLog('warn', `[${sessionId}] fetchLatestBaileysVersion échoué (${e.message}) — version figée utilisée: ${version.join('.')}`);
+            // FIX (téléphone refuse après scan QR/code) : fetchLatestBaileysVersion()
+            // renvoie parfois une version WhatsApp Web PÉRIMÉE tout en annonçant
+            // isLatest:true (bug connu de Baileys). Le socket arrive alors à
+            // générer un QR/code de jumelage, mais WhatsApp refuse ensuite de
+            // finaliser la liaison — le téléphone affiche "Impossible de lier
+            // l'appareil, une erreur s'est produite". fetchLatestWaWebVersion()
+            // interroge directement WhatsApp Web et renvoie la version réelle
+            // actuelle — c'est elle qu'il faut utiliser en priorité.
+            const wa = await fetchLatestWaWebVersion();
+            version = wa.version;
+        } catch (e1) {
+            try {
+                ({ version } = await fetchLatestBaileysVersion());
+                addLog('warn', `[${sessionId}] fetchLatestWaWebVersion échoué (${e1.message}) — fetchLatestBaileysVersion utilisé en repli`);
+            } catch (e2) {
+                // Dernier recours : certains hébergements (SmarterASP.NET
+                // notamment) bloquent l'accès sortant aux deux endpoints.
+                // Une version figée (à rafraîchir si WhatsApp change de
+                // protocole) vaut mieux qu'un échec total du démarrage.
+                version = [2, 3000, 1042466098];
+                addLog('warn', `[${sessionId}] Résolution de version WA échouée (${e1.message} / ${e2.message}) — version figée utilisée: ${version.join('.')}`);
+            }
         }
 
         await startSessionInner({ sessionId, phoneNumber, authPath, state, auth, saveCreds, version });
