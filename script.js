@@ -47,7 +47,7 @@ function renderMain(s) {
   
   const mc = document.getElementById('main-content');
   
-  let qrHTML = '';
+  let qrHTML;
   let pairHTML = '';
   
   if (s.connection === 'open' || s.status === 'open') {

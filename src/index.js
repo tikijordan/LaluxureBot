@@ -1075,33 +1075,67 @@ async function loadExistingSessions() {
             }
         }
 
+        // FIX (durée de vie du bot / ne répond plus après connexion) :
+        // avant, la perte du lock (heartbeat en échec ou lock volé par une
+        // autre instance) arrêtait TOUS les sockets WhatsApp et rien ne
+        // retentait jamais l'acquisition. Le process restait "vivant" (le
+        // dashboard répondait toujours) mais le bot ne répondait plus à
+        // aucun message, définitivement, tant qu'on ne le redémarrait pas
+        // à la main. On boucle maintenant jusqu'à récupération du lock,
+        // puis on relance automatiquement toutes les sessions connues.
+        let currentHb = null;
+        let recoveryTimer = null;
+
+        function attachHeartbeat() {
+            currentHb = startLockHeartbeat({
+                db, lockName, ownerId, ttlMs, intervalMs: hbMs, deployId,
+                onLost: (info) => {
+                    addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
+                    for (const [id, st] of sessions) {
+                        try { st.sock?.ws?.close(); } catch {}
+                        try { st.sock?.end?.(); } catch {}
+                        st.connection = 'close';
+                        clearReconnectTimer(id);
+                    }
+                    scheduleRecovery();
+                },
+            });
+        }
+
+        function scheduleRecovery() {
+            if (recoveryTimer) return; // une reprise est déjà en cours
+            const RETRY_MS = 20_000;
+            addLog('warn', `[Lock] Tentative de reprise du lock toutes les ${RETRY_MS / 1000}s...`);
+            recoveryTimer = setInterval(async () => {
+                try {
+                    const res = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
+                    if (!res.ok) return;
+                    clearInterval(recoveryTimer);
+                    recoveryTimer = null;
+                    addLog('success', `[Lock] Lock repris (${res.reason}) — redémarrage des sessions WhatsApp`);
+                    attachHeartbeat();
+                    for (const id of sessions.keys()) {
+                        startSession(id).catch(e => addLog('error', `[Lock] Redémarrage [${id}]: ${e.message}`));
+                    }
+                } catch (e) {
+                    addLog('warn', `[Lock] Reprise échouée: ${e.message}`);
+                }
+            }, RETRY_MS);
+        }
+
         if (!lockOk) {
-            addLog('warn', `[Lock] Impossible d'acquérir le lock — WhatsApp ne sera pas démarré ici.`);
+            addLog('warn', `[Lock] Impossible d'acquérir le lock — nouvelle tentative en arrière-plan (aucun redémarrage manuel requis).`);
+            scheduleRecovery();
             return;
         }
 
         addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
-        const hb = startLockHeartbeat({
-            db,
-            lockName,
-            ownerId,
-            ttlMs,
-            intervalMs: hbMs,
-            deployId,
-            onLost: (info) => {
-                addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
-                for (const [id, st] of sessions) {
-                    try { st.sock?.ws?.close(); } catch {}
-                    try { st.sock?.end?.(); } catch {}
-                    st.connection = 'close';
-                    clearReconnectTimer(id);
-                }
-            },
-        });
+        attachHeartbeat();
 
         const shutdown = async (signal) => {
             console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-            try { hb.stop(); } catch {}
+            if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
+            try { currentHb?.stop(); } catch {}
             try {
                 await Promise.race([
                     flushAllPendingSaves(),
@@ -1313,7 +1347,15 @@ http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
     }
 
-    try {
+    // FIX: sendJson/sendHtml (et corsHeaders dont elles dépendent) étaient
+    // déclarées À L'INTÉRIEUR du bloc try ci-dessous. En modules ES (strict
+    // mode), une function/const déclarée dans un bloc n'est visible que
+    // dans ce bloc — le catch (bloc frère) ne voyait donc PAS sendJson.
+    // Résultat : toute exception non prévue provoquait un "sendJson is not
+    // defined" avalé par le try/catch interne, et le client ne recevait
+    // jamais de réponse (requête qui reste en attente jusqu'au timeout).
+    // On remonte tout ça ici, avant le try, pour que ce soit utilisable
+    // partout, y compris en cas d'erreur serveur.
     const origin = req.headers['origin'] || '';
     const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
     const corsHeaders = {
@@ -1323,7 +1365,6 @@ http.createServer(async (req, res) => {
         'Access-Control-Allow-Credentials': 'true',
     };
 
-    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
     function sendJson(r, data, status=200) {
         r.writeHead(status, { ...SECURITY_HEADERS, ...corsHeaders, 'Content-Type':'application/json' });
         r.end(JSON.stringify(data));
@@ -1334,6 +1375,9 @@ http.createServer(async (req, res) => {
         r.end(html);
     }
 
+    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
+
+    try {
     if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
         if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
         const hp = path.join(DASH_DIR,'index.html');

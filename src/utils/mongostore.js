@@ -127,10 +127,16 @@ export function readSessionFiles(authPath) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
                 readDir(fullPath, relPath);
-            } else if (entry.name.endsWith('.json')) {
+            } else {
+                // Lire tous les fichiers (pas seulement les .json) car certains
+                // fichiers de clefs n'ont pas d'extension mais sont nécessaires
+                // pour restaurer correctement la session.
                 try {
                     result[relPath] = fs.readFileSync(fullPath, 'utf-8');
-                } catch {}
+                } catch (e) {
+                    // En cas d'erreur de lecture en utf-8 (rare), on ignore
+                    // pour ne pas bloquer la restauration d'autres fichiers.
+                }
             }
         }
     }
@@ -278,14 +284,6 @@ export async function restoreAllSessions(sessionsRoot) {
 // DELETE — Supprime une session de MongoDB
 // ─────────────────────────────────────────────
 export async function deleteSessionMongo(sessionId) {
-    // Annuler toute sauvegarde différée en attente pour cette session — sinon
-    // elle se déclenche après coup et réinsère le document qu'on vient de
-    // supprimer (c'était la cause de "la session revient après suppression").
-    if (pushTimers.has(sessionId)) {
-        clearTimeout(pushTimers.get(sessionId));
-        pushTimers.delete(sessionId);
-    }
-
     if (!connected || !collection) return false;
     try {
         await collection.deleteOne({ _id: sessionId });
