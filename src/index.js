@@ -238,7 +238,7 @@ function scheduleReconnect(sessionId, delayMs = 3000) {
     clearReconnectTimer(sessionId);
     const t = setTimeout(() => {
         reconnectTimerBySessionId.delete(sessionId);
-        startSession(sessionId);
+        startSession(sessionId).catch(e => addLog('error', `[Reconnect] [${sessionId}]: ${e.message}`));
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
 }
@@ -291,13 +291,46 @@ async function startSession(sessionId, phoneNumber = null) {
     state.pairingCode = null;
     state.authPath = authPath;
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
-    const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
-    const saveCreds = async () => {
-        try { fse.ensureDirSync(state.authPath); } catch {}
-        return _saveCreds();
-    };
 
-    const { version } = await fetchLatestBaileysVersion();
+    // FIX (impossible de connecter les sessions) : tout ce qui suit pouvait
+    // lever une exception (fetchLatestBaileysVersion sans réseau sortant,
+    // useMultiFileAuthState, makeWASocket...) AVANT que les listeners soient
+    // posés. Comme state.connection était déjà passé à 'connecting' juste
+    // au-dessus, et que le garde-fou en tête de fonction refuse de relancer
+    // une session déjà 'connecting', la moindre erreur laissait la session
+    // bloquée à "connexion en cours" POUR TOUJOURS — plus aucune tentative
+    // (bouton "reconnecter", nouveau pairing, redémarrage auto) ne faisait
+    // quoi que ce soit. On capture maintenant l'erreur, on remet l'état à
+    // 'close' pour débloquer les tentatives suivantes, et on log le vrai
+    // message d'erreur (visible dans les logs du dashboard).
+    try {
+        const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
+        const saveCreds = async () => {
+            try { fse.ensureDirSync(state.authPath); } catch {}
+            return _saveCreds();
+        };
+
+        let version;
+        try {
+            ({ version } = await fetchLatestBaileysVersion());
+        } catch (e) {
+            // Fallback : certains hébergements (SmarterASP.NET notamment)
+            // bloquent ou coupent l'accès sortant à l'endpoint de version.
+            // Une version figée fonctionnelle vaut mieux qu'un échec total.
+            version = [2, 3000, 1015901307];
+            addLog('warn', `[${sessionId}] fetchLatestBaileysVersion échoué (${e.message}) — version figée utilisée: ${version.join('.')}`);
+        }
+
+        await startSessionInner({ sessionId, phoneNumber, authPath, state, auth, saveCreds, version });
+    } catch (e) {
+        addLog('error', `[${sessionId}] Échec démarrage session: ${e.message}`);
+        state.connection = 'close';
+        state.sock = null;
+        scheduleReconnect(sessionId, 5000);
+    }
+}
+
+async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth, saveCreds, version }) {
     const logger = pino({ level: 'silent' });
     if (!state.groupMetaCache) state.groupMetaCache = new NodeCache({ stdTTL: 5 * 60, useClones: false });
     const groupMetaCache = state.groupMetaCache;
@@ -550,7 +583,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 try { sock.end(); } catch {}
                 setTimeout(() => {
                     try { if (authPath !== newPath) fse.removeSync(authPath); } catch {}
-                    startSession(num);
+                    startSession(num).catch(e => addLog('error', `[Rename→${num}]: ${e.message}`));
                 }, 1500);
                 return; // stop — ce socket est mort, le nouveau prendra le relais
             }
@@ -1187,7 +1220,9 @@ async function loadExistingSessions() {
         const selected = startAll ? list : [list[list.length - 1]];
         addLog('info', `${selected.length}/${list.length} session(s) lancée(s): ${selected.join(', ')}${startAll ? '' : ' (START_ALL_SESSIONS=1 pour tout lancer)'}`);
         for (const [i, id] of selected.entries()) {
-            setTimeout(() => startSession(id), i * 1500);
+            setTimeout(() => {
+                startSession(id).catch(e => addLog('error', `[Boot] Démarrage [${id}] échoué: ${e.message}`));
+            }, i * 1500);
         }
     }
 }
@@ -1568,7 +1603,7 @@ button:hover{background:#1fb858}
         // 1.5s était trop court : WhatsApp met parfois plus de temps à considérer
         // l'ancienne connexion comme terminée côté serveur, causant un conflit
         // (code 440) avec la nouvelle tentative de connexion.
-        setTimeout(()=>startSession(sid),5000);
+        setTimeout(()=>startSession(sid).catch(e => addLog('error', `[Restart] [${sid}]: ${e.message}`)),5000);
         return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
     }
 
