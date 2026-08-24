@@ -477,24 +477,35 @@ export default {
     execute: async ({ sock, from, isGroup, args }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       const count = Math.min(parseInt(args[0]) || 5, 50);
-      const msgs = global.botMessages?.get(from) || [];
+      // FIX: !purge ne regardait que global.botMessages (messages envoyés
+      // par le bot lui-même), qui est vide la plupart du temps — d'où
+      // l'impression que la commande "ne donne rien". WhatsApp autorise un
+      // admin à supprimer les messages de N'IMPORTE QUI dans le groupe ;
+      // on utilise maintenant l'historique complet du groupe.
+      const msgs = global.groupMsgHistory?.get(from) || [];
+
+      if (msgs.length === 0) {
+        await sock.sendMessage(from, { text: ' Aucun message récent à supprimer (historique vide, redémarre le bot ou attends de nouveaux messages).' });
+        return;
+      }
 
       await sock.sendMessage(from, { text: ` Suppression de ${count} message(s) en cours...` });
 
-      let deleted = 0;
-      // Supprimer les messages du bot d'abord (les seuls qu'on peut supprimer)
+      let deleted = 0, failed = 0;
       const toDelete = msgs.slice(-count);
       for (const key of toDelete) {
         try {
           await sock.sendMessage(from, { delete: key });
           deleted++;
-          await new Promise(r => setTimeout(r, 200));
-        } catch {}
+          await new Promise(r => setTimeout(r, 250));
+        } catch { failed++; }
       }
 
-      // Vider le cache
-      global.botMessages.set(from, msgs.slice(0, -count));
-      await sock.sendMessage(from, { text: ` *${deleted} message(s) supprimé(s).*\n\n_Note: WhatsApp ne permet de supprimer que les messages du bot._` });
+      global.groupMsgHistory.set(from, msgs.slice(0, -count));
+      const note = failed > 0
+        ? `\n\n_${failed} message(s) trop ancien(s) ou déjà supprimé(s) — WhatsApp limite la suppression dans le temps._`
+        : '';
+      await sock.sendMessage(from, { text: ` *${deleted} message(s) supprimé(s).*${note}` });
     },
   },
 

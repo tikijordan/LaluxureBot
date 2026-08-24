@@ -92,7 +92,7 @@ export default {
     },
   },
 
-  meme: {
+  randommeme: {
     description: 'Mème aléatoire',
     execute: async ({ sock, from }) => {
       try {

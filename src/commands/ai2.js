@@ -30,43 +30,75 @@ async function callAI(messages, temperature = 0.7) {
     }
 }
 
+export async function runChatbotTurn({ sock, from, sender, text }) {
+    let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
+    if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
+
+    const { key } = await sock.sendMessage(from, { text: '🤖 _En train d\'écrire..._' });
+
+    const messages = [
+        { role: 'system', content: 'Tu es un assistant WhatsApp concis.' },
+        ...session.history.slice(-10),
+        { role: 'user', content: text }
+    ];
+
+    const reply = await callAI(messages);
+    if (reply) {
+        session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
+        session.lastActivity = Date.now();
+        chatSessions.set(sender, session);
+        await sock.sendMessage(from, { text: `🤖 ${reply}`, edit: key });
+    } else {
+        await sock.sendMessage(from, {
+            text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
+            edit: key,
+        });
+    }
+}
+
 export default {
     chatbot: {
-        description: 'Mode conversation continue',
+        description: 'Mode conversation continue — une fois activé, plus besoin de retaper la commande, écris directement',
+        // FIX (chatbot doit permettre de causer sans retaper la commande) :
+        // avant, il fallait préfixer CHAQUE message par "!chatbot". On active
+        // maintenant un "mode conversation libre" par utilisateur — après un
+        // premier "!chatbot", ses messages sans préfixe sont automatiquement
+        // envoyés à l'IA (voir handleFreeformChatbot dans handler.js et le
+        // branchement dans index.js), jusqu'à "!chatbot off".
         execute: async ({ sock, from, sender, text, args, msg }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
             setTimeout(() => msgCache.delete(msgId), 30000);
 
-            let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
-            if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
+            const sub = args[0]?.toLowerCase();
 
-            if (!text || args[0] === 'reset') {
-                chatSessions.delete(sender);
-                return sock.sendMessage(from, { text: '🔄 Mémoire effacée. Nouvelle conversation !' });
+            if (sub === 'off') {
+                global.activeChatbotSessions?.delete(sender);
+                return sock.sendMessage(from, { text: '🔕 Mode conversation libre désactivé. Retape !chatbot pour reprendre.' });
             }
 
-            const { key } = await sock.sendMessage(from, { text: '🤖 _En train d\'écrire..._' });
+            if (sub === 'reset') {
+                chatSessions.delete(sender);
+                global.activeChatbotSessions?.delete(sender);
+                return sock.sendMessage(from, { text: '🔄 Mémoire effacée. Retape !chatbot pour reprendre.' });
+            }
 
-            const messages = [
-                { role: 'system', content: 'Tu es un assistant WhatsApp concis.' },
-                ...session.history.slice(-10),
-                { role: 'user', content: text }
-            ];
+            // Active le mode conversation libre : les prochains messages de
+            // cet utilisateur sans préfixe seront envoyés à l'IA directement.
+            if (!global.activeChatbotSessions) global.activeChatbotSessions = new Set();
+            const alreadyActive = global.activeChatbotSessions.has(sender);
+            global.activeChatbotSessions.add(sender);
 
-            const reply = await callAI(messages);
-            if (reply) {
-                session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
-                session.lastActivity = Date.now();
-                chatSessions.set(sender, session);
-                await sock.sendMessage(from, { text: `🤖 *Chatbot*\n\n${reply}`, edit: key });
-            } else {
-                await sock.sendMessage(from, {
-                    text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
-                    edit: key,
+            if (!text) {
+                return sock.sendMessage(from, {
+                    text: alreadyActive
+                        ? '🤖 Le mode conversation libre est déjà actif — écris directement, sans !chatbot.'
+                        : '🤖 *Mode conversation libre activé !*\n\nÉcris directement, plus besoin de retaper !chatbot avant chaque message.\n\n_!chatbot off pour arrêter, !chatbot reset pour effacer la mémoire._',
                 });
             }
+
+            await runChatbotTurn({ sock, from, sender, text });
         }
     },
 

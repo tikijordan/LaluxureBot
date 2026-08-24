@@ -166,8 +166,8 @@ export default {
     },
   },
 
-  note: {
-    description: 'Bloc-notes personnel',
+  notebook: {
+    description: 'Bloc-notes personnel (multi-notes avec titres)',
     execute: async ({ sock, from, sender, args, text }) => {
       const action = args[0]?.toLowerCase();
       const d = loadJson('personalnotes.json');

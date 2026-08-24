@@ -183,8 +183,8 @@ export default {
     },
   },
 
-  regex: {
-    description: 'Tester une expression régulière',
+  regextest: {
+    description: 'Tester une expression régulière (syntaxe: pattern | texte)',
     execute: async ({ sock, from, text, args }) => {
       // Format: !regex [pattern] | [texte à tester]
       const parts = text?.split('|');

@@ -33,13 +33,35 @@ ${P}ship @m1 @m2 — Compatibilité amoureuse 💕
 ${P}roast @membre — Vanne IA amusante 🔥
 ${P}story [thème] — Histoire générée par IA 📖
 ${P}meme [texte haut] | [texte bas] — Créer mème
+${P}randommeme — Mème aléatoire
+${P}advice — Conseil de vie aléatoire ou sur un thème
+${P}anime [titre] — Infos sur un anime ou manga
+${P}color [hex ou nom] — Infos sur une couleur
+${P}fact — Fait aléatoire insolite
+${P}horoscope [signe] — Horoscope du jour
+${P}tongue — Virelangue dans différentes langues
+${P}rap [sujet] — Rap ou poème généré par IA
+${P}poem [thème] — Poème généré par IA
+${P}akinator — Jeu Akinator, l'IA devine ton personnage
+${P}battle @m1 @m2 — Duel aléatoire entre deux membres
+${P}hangman — Jeu du Pendu
+${P}math — Défi de calcul mental rapide
+${P}rpg — Mini RPG textuel généré par IA
+${P}scramble — Reconstituer un mot mélangé
+${P}trivia — Quiz multijoueur dans le groupe
+${P}wordle — Devine le mot en 6 essais
 
 📷 *MÉDIAS & IMAGES*
 ${P}imagine [style?] [texte] — Génération image IA avancée
 ${P}imagine styles — Voir les styles disponibles
-${P}sticker — Créer sticker
-${P}vo — Extraire vue unique
+${P}sticker (alias ${P}s) — Créer sticker
+${P}vo (alias ${P}jolie) — Extraire vue unique
 ${P}pp [@quelqu'un] — Photo de profil
+${P}avatar [nom] — Générer un avatar unique basé sur un nom
+${P}caption [texte] — Ajouter un texte stylisé sur une image
+${P}collage — Créer un collage (envoie 2-4 images)
+${P}gif [terme] — Envoyer un GIF animé
+${P}removebg — Supprimer le fond d'une image
 
 🎵 *MUSIQUE*
 ${P}play [titre ou lien] — Recherche YouTube + MP3
@@ -55,6 +77,9 @@ ${P}dl [lien ou titre] — Universel : lien→vidéo, texte→MP3
 ${P}ia [question] — Intelligence artificielle
 ${P}translate [texte] — Traduire texte
 ${P}resume [lien] — Résumer article web
+${P}chatbot — Mode conversation continue
+${P}ocr — Extraire le texte d'une image
+${P}debate [sujet] — Débat IA pour/contre sur un sujet
 
 🔍 *RECHERCHE*
 ${P}wiki [sujet] — Résumé Wikipedia
@@ -62,16 +87,28 @@ ${P}define [mot] — Définition + synonymes
 ${P}movie [titre] — Infos film
 ${P}crypto [coin] — Prix crypto en temps réel
 ${P}github [username] — Profil GitHub
+${P}lyrics [chanson] — Trouver les paroles d'une chanson
+${P}google [recherche] — Recherche web rapide
 
 💻 *PROGRAMMATION*
 ${P}code [lang] [code] — Exécuter du code
 ${P}snippet save/get/del/share — Gérer snippets
 ${P}regex /pattern/flags [texte] — Tester une regex
+${P}regextest [pattern] | [texte] — Tester une regex (syntaxe alternative)
+${P}codeai [question] — IA spécialisée en programmation
+${P}runcode [lang] [code] — Exécuter du code en ligne
+${P}base64 encode/decode [texte] — Encoder/décoder en Base64
+${P}hash [texte] — Générer un hash MD5/SHA1/SHA256
+${P}ipinfo [ip] — Infos sur une adresse IP
+${P}timestamp [date] — Convertir date ↔ timestamp
+${P}uuid — Générer des UUID uniques
 
 🛡️ *SÉCURITÉ*
 ${P}antispam — État anti-spam
 ${P}notag / ${P}yestag — Anti-tag on/off
 ${P}botmode — Accès owner-only (toi seul)
+${P}private — Confirmer le mode owner-only
+${P}public — Info (bot toujours owner-only)
 
 💢 *SPAM (Admin)*
 ${P}spam [num] [msg] [n] — Envoyer spam
@@ -79,6 +116,7 @@ ${P}stopspam — Arrêter le spam
 
 👥 *GROUPE*
 ${P}tagall [msg] — Taguer tout le monde
+${P}everyone [msg] — Alias de tagall
 ${P}tagadmins — Taguer les admins
 ${P}groupinfo — Infos du groupe
 
@@ -120,6 +158,10 @@ ${P}report @membre [raison] — Signaler à l'admin
 ${P}reports — Voir les signalements
 ${P}history @membre — Historique sanctions
 ${P}purge [n] — Supprimer N derniers messages
+${P}clearhistory @membre — Effacer l'historique d'un membre
+${P}clearreports — Effacer tous les signalements
+${P}unban [numéro] — Débannir de la liste de sécurité (antifake/blacklist)
+${P}aistatus — Statut des clés IA (Gemini)
 
 📊 *SONDAGES & PLANIFICATION*
 ${P}poll [Question] | [Op1] | [Op2] — Sondage
@@ -176,8 +218,20 @@ ${P}agenda add [JJ/MM/AAAA] [HH:MM] [titre] | [desc]
 ${P}qrcode [texte] — Générer QR code
 ${P}calc [expression] — Calculatrice
 ${P}reminder [min] [msg] — Rappel
+${P}remind [texte] — Créer un rappel personnel
 ${P}note [texte] — Sauvegarder note
+${P}notebook — Bloc-notes complet (titres, recherche)
 ${P}mynotes — Voir mes notes
+${P}todo — Liste de tâches personnelle
+${P}budget — Suivi de dépenses et budget personnel
+${P}password [longueur] — Générer un mot de passe sécurisé
+${P}pomodoro — Timer Pomodoro (travail + pause)
+${P}stopwatch — Chronomètre
+${P}shortlink [url] — Raccourcir un lien
+${P}whois [domaine] — Infos WHOIS et DNS d'un domaine
+${P}ytinfo [lien] — Infos détaillées sur une vidéo YouTube
+${P}currency [montant] [de] [vers] — Convertisseur de devises
+${P}tweet [texte] — Formater un texte en tweet stylisé avec stats
 
 📊 *STATISTIQUES*
 ${P}stats — Mes statistiques

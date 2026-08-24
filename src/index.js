@@ -105,6 +105,8 @@ fse.ensureDirSync(DATA_ROOT);
 if (!global.noTagGroups)  global.noTagGroups  = new Set();
 if (!global.mutedMembers) global.mutedMembers  = new Set();
 if (!global.botMessages)  global.botMessages   = new Map();
+if (!global.groupMsgHistory)  global.groupMsgHistory  = new Map();
+if (!global.activeChatbotSessions) global.activeChatbotSessions = new Set();
 if (!global.automodGroups)    global.automodGroups    = new Set();
 if (!global.floodGroups)      global.floodGroups      = new Map();
 if (!global.floodTracker)     global.floodTracker     = new Map();
@@ -146,7 +148,7 @@ const _sw = process.stderr.write.bind(process.stderr);
 process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.includes(n))) return true; return _sw(d,...a); };
 const _ce = console.error.bind(console);
 console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
-import { handleCommand } from './handler.js';
+import { handleCommand, handleFreeformChatbot } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { resolveIsOwner } from './utils/message.js';
@@ -386,6 +388,32 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
         };
 
         sock.__sendMessageWrapped = true;
+    }
+
+    if (!sock.__gpuWrapped) {
+        // FIX (!add reste bloqué indéfiniment sans jamais répondre) :
+        // defaultQueryTimeoutMs est volontairement à 0 (illimité) car un
+        // timeout global casse la réception des messages (cf. commentaire
+        // ci-dessus). Mais groupParticipantsUpdate('add') en hérite aussi —
+        // et WhatsApp, par anti-abus, se contente souvent de NE JAMAIS
+        // répondre à une demande d'ajout plutôt que de renvoyer une erreur
+        // (contrairement à 'remove'/'promote'/'demote', généralement plus
+        // fiables). Sans timeout dédié, la commande reste en attente pour
+        // toujours : ni réponse, ni erreur, ni log — silence total. On
+        // applique ici le même principe que pour sendMessage : un timeout
+        // ciblé (30s) uniquement sur cet appel, qui lève une erreur claire
+        // au lieu de bloquer la commande indéfiniment.
+        const _origGPU = sock.groupParticipantsUpdate.bind(sock);
+        sock.groupParticipantsUpdate = async (jid, participants, action) => {
+            return await Promise.race([
+                _origGPU(jid, participants, action),
+                new Promise((_, reject) => setTimeout(
+                    () => reject(new Error(`groupParticipantsUpdate(${action}): délai dépassé (30s) — WhatsApp n'a pas répondu (fréquent pour "add", souvent lié à l'anti-abus WhatsApp)`)),
+                    30_000
+                )),
+            ]);
+        };
+        sock.__gpuWrapped = true;
     }
 
     function wrapHandler(name, handler) {
@@ -808,6 +836,21 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                 else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
                 else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
                 else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
+                // FIX (!purge ne supprime rien) : seul global.botMessages (les
+                // messages envoyés PAR le bot) était suivi. Or WhatsApp autorise
+                // un admin (le bot l'est, condition des commandes adminOnly) à
+                // supprimer N'IMPORTE QUEL message du groupe, pas seulement les
+                // siens. Sans historique des messages des AUTRES membres, !purge
+                // n'avait tout simplement rien à supprimer dans l'immense
+                // majorité des cas. On garde ici un historique récent (200
+                // derniers messages) de TOUT le groupe pour que !purge puisse
+                // réellement fonctionner.
+                if (isGroup && msg.key?.id) {
+                    if (!global.groupMsgHistory.has(from)) global.groupMsgHistory.set(from, []);
+                    const hist = global.groupMsgHistory.get(from);
+                    hist.push(msg.key);
+                    if (hist.length > 200) hist.splice(0, hist.length - 200);
+                }
                 const isCmd = body.startsWith(PREFIX);
                 if (isGroup && isCmd) {
                     await resolveOwnerLidIfNeeded(sock, state, OWNER);
@@ -895,14 +938,27 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                                 try { await sock.groupParticipantsUpdate(from, [senderJid], 'remove'); } catch {}
                                 continue;
                             }
+                            // FIX (commandes de groupe qui échouent en silence) :
+                            // antilink/mots interdits/filtre média/slowmode/flood
+                            // s'appliquaient à TOUT message d'un non-owner, commandes
+                            // comprises. Un admin de groupe (qui n'est pas forcément
+                            // l'owner du bot) tapant une commande admin (!kick, !filter,
+                            // !setdesc avec un lien, ou juste deux commandes trop
+                            // rapprochées avec le slowmode actif) se faisait supprimer
+                            // son message avant même que la commande soit exécutée —
+                            // le slowmode en particulier supprime sans AUCUN message,
+                            // donc perçu comme une commande qui "ne répond pas". On
+                            // exempte maintenant les messages de commande (isCmd) de
+                            // ces vérifications de modération — seul le ban actif
+                            // reste appliqué même aux commandes, ce qui est voulu.
                             const automodOn = global.automodGroups.has(from);
                             let violation = null;
-                            if ((isAntilinkEnabled(from) || automodOn) && /https?:\/\/|chat\.whatsapp\.com|wa\.me\//i.test(body)) {
+                            if ((isAntilinkEnabled(from) || automodOn) && !isCmd && /https?:\/\/|chat\.whatsapp\.com|wa\.me\//i.test(body)) {
                                 violation = 'lien non autorisé';
                             }
                             if (!violation) {
                                 const badWords = getBadWordFilters(from) || [];
-                                if ((badWords.length > 0 || automodOn) && body) {
+                                if ((badWords.length > 0 || automodOn) && !isCmd && body) {
                                     const lower = body.toLowerCase();
                                     const hit = badWords.find(w => w && lower.includes(String(w).toLowerCase()));
                                     if (hit) violation = `mot interdit ("${hit}")`;
@@ -928,13 +984,13 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                             }
                             const mediaTypeMap = { imageMessage: 'image', videoMessage: 'video', audioMessage: 'voice', pttMessage: 'voice' };
                             const mediaType = mediaTypeMap[ct];
-                            if (mediaType && isMediaFiltered(from, mediaType)) {
+                            if (mediaType && !isCmd && isMediaFiltered(from, mediaType)) {
                                 try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
                                 await sock.sendMessage(from, { text: `🚫 Envoi de ${mediaType} bloqué dans ce groupe.` });
                                 continue;
                             }
                             const slow = getSlowmode(from);
-                            if (slow && slow > 0) {
+                            if (slow && slow > 0 && !isCmd) {
                                 const key = `${from}__${senderNumber}`;
                                 const last = global.slowmodeLastMsg.get(key) || 0;
                                 const now = Date.now();
@@ -945,7 +1001,7 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                                 global.slowmodeLastMsg.set(key, now);
                             }
                             const floodCfg = global.floodGroups.get(from);
-                            if (floodCfg) {
+                            if (floodCfg && !isCmd) {
                                 const fKey = `${from}__${senderNumber}`;
                                 const now = Date.now();
                                 const windowMs = floodCfg.window * 1000;
@@ -965,7 +1021,18 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                         addLog('error', `[${state.id}] Modération: ${modErr.message}`);
                     }
                 }
-                if (!isCmd) continue;
+                if (!isCmd) {
+                    // FIX (chatbot sans avoir à retaper la commande) : si cet
+                    // expéditeur a activé le mode conversation libre via
+                    // "!chatbot", on route son message brut (sans préfixe)
+                    // directement vers l'IA au lieu de l'ignorer. On respecte
+                    // toujours canUseBot (owner-only) et on ignore les
+                    // messages vides/médias sans légende.
+                    if (body && global.activeChatbotSessions?.has(senderJid) && canUseBot(isOwner, currentBotMode)) {
+                        await handleFreeformChatbot(sock, msg, { from: replyTo, sender: senderJid, body });
+                    }
+                    continue;
+                }
                 if (!canUseBot(isOwner, currentBotMode)) continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
@@ -1687,6 +1754,38 @@ button:hover{background:#1fb858}
 });
 
 loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+
+// DIAGNOSTIC (échec de liaison WhatsApp identique QR + code, 0 appareil lié) :
+// deux causes plausibles restent en dehors du code applicatif et invisibles
+// sans mesure — une horloge serveur décalée (la crypto de liaison WA est
+// sensible au temps) et une IP d'hébergement déjà mal réputée auprès de
+// WhatsApp (fréquent sur l'hébergement mutualisé). On log les deux au
+// démarrage pour pouvoir les vérifier sans avoir à deviner.
+(async function runBootDiagnostics() {
+    try {
+        const t0 = Date.now();
+        const res = await axios.head('https://www.google.com', { timeout: 8000 });
+        const serverDate = res.headers?.date ? new Date(res.headers.date).getTime() : null;
+        if (serverDate) {
+            const driftMs = Date.now() - serverDate - (Date.now() - t0) / 2; // compense la latence réseau
+            if (Math.abs(driftMs) > 30_000) {
+                addLog('warn', `[Diagnostic] Horloge serveur décalée d'environ ${Math.round(driftMs / 1000)}s par rapport au temps réel — peut faire échouer la liaison WhatsApp (QR/code). Vérifie la synchronisation NTP de l'hébergeur.`);
+            } else {
+                addLog('info', `[Diagnostic] Horloge serveur OK (écart ~${Math.round(driftMs / 1000)}s)`);
+            }
+        }
+    } catch (e) {
+        addLog('warn', `[Diagnostic] Vérification horloge impossible: ${e.message}`);
+    }
+    try {
+        const res = await axios.get('https://api.ipify.org?format=json', { timeout: 8000 });
+        const ip = res.data?.ip;
+        if (ip) addLog('info', `[Diagnostic] IP sortante du serveur: ${ip} — vérifie sa réputation si la liaison WhatsApp continue d'échouer (ex: ipqualityscore.com, ou demande à l'hébergeur si l'IP est partagée/datacenter connue)`);
+    } catch (e) {
+        addLog('warn', `[Diagnostic] Récupération IP sortante impossible: ${e.message}`);
+    }
+})();
+
 (function startSelfPing() {
     if (process.env.SELF_PING === '0') return;
     const PING_INTERVAL_MS = 4 * 60 * 1000; // toutes les 4 min (< 15 min = seuil Render Free)

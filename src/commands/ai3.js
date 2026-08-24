@@ -37,7 +37,13 @@ export default {
         }
     },
 
-    quiz: {
+    // NOTE: cette commande "quiz" IA était inachevée (branche vide quand un
+    // quiz est déjà actif : aucune réponse, aucune suite) et rentrait de
+    // toute façon en collision silencieuse avec le vrai !quiz de
+    // divertissement.js, qui l'écrasait. Renommée pour éviter la collision
+    // et désactivée tant qu'elle n'est pas terminée (pas de gestion des
+    // réponses A/B/C/D ni de state machine réelle).
+    _quiz_ia_incomplete: {
         execute: async ({ sock, from, sender, text, msg }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
