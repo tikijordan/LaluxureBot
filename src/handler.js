@@ -11,6 +11,7 @@ import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
 import { resolveIsOwner } from './utils/message.js';
 import { canUseBot, getBotMode } from './utils/botmode.js';
+import { runChatbotTurn } from './commands/ai2.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -227,6 +228,29 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         });
     } catch (err) {
         console.error(`❌ Erreur ${cmdName}:`, err.message);
+        await sock.sendMessage(from, { text: `❌ Erreur : ${err.message}` }).catch(() => {});
+    }
+}
+
+/**
+ * Route un message SANS préfixe vers le chatbot IA, pour les utilisateurs
+ * ayant activé le mode conversation libre via "!chatbot" (voir
+ * global.activeChatbotSessions, géré dans src/commands/ai2.js).
+ * Appelée depuis index.js quand isCmd est faux mais qu'une session
+ * chatbot est active pour cet expéditeur.
+ */
+export async function handleFreeformChatbot(sock, msg, ctx = {}) {
+    const msgId = msg?.key?.id;
+    if (msgId) {
+        if (_handledMsgIds.has(msgId)) return;
+        _handledMsgIds.set(msgId, Date.now());
+    }
+    const { from, sender, body } = ctx;
+    if (!from || !sender || !body) return;
+    try {
+        await runChatbotTurn({ sock, from, sender, text: body });
+    } catch (err) {
+        console.error('❌ Erreur chatbot (mode libre):', err.message);
         await sock.sendMessage(from, { text: `❌ Erreur : ${err.message}` }).catch(() => {});
     }
 }
