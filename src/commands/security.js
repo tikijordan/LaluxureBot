@@ -113,17 +113,19 @@ export default {
   botmode: {
     description: 'Voir le mode actuel du bot (owner)',
     execute: async ({ sock, from }) => {
+      const mode = getBotMode();
       await sock.sendMessage(from, {
         text: `⚙️ *Accès au bot*\n\n` +
-          `🔒 *Owner-only* — permanent\n\n` +
-          `Seul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\n` +
-          `Les autres utilisateurs sont ignorés (aucune réponse).`,
+          (mode === 'public'
+            ? `🌍 *Public* — tout le monde peut utiliser le bot, en DM comme en groupe.\n\n_Tape !private pour repasser en mode owner-only._`
+            : `🔒 *Owner-only*\n\nSeul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\nLes autres utilisateurs sont ignorés (aucune réponse).\n\n_Tape !public pour ouvrir l'accès à tout le monde._`),
       });
     },
   },
 
   private: {
-    description: 'Confirmer le mode owner-only',
+    description: 'Passer en mode owner-only (toi seul)',
+    private: true,
     execute: async ({ sock, from }) => {
       setBotMode('private');
       await sock.sendMessage(from, {
@@ -135,13 +137,22 @@ export default {
   },
 
   public: {
-    description: 'Désactivé — bot toujours owner-only',
+    description: 'Passer en mode public (tout le monde peut utiliser le bot)',
+    private: true,
     execute: async ({ sock, from }) => {
-      setBotMode('private');
+      // FIX: cette commande forçait 'private' quoi qu'il arrive, alors que
+      // le mécanisme de mode public (canUseBot / setBotMode) fonctionne
+      // parfaitement — il était juste verrouillé ici. On l'active pour de
+      // vrai maintenant, avec un avertissement clair car les commandes
+      // adminOnly restent réservées aux vrais admins du groupe, mais TOUTES
+      // les autres commandes deviennent accessibles à quiconque écrit au
+      // bot, dans n'importe quel groupe ou en DM.
+      setBotMode('public');
       await sock.sendMessage(from, {
-        text: `🔒 *Mode public désactivé*\n\n` +
-          `Ce bot est réservé à l'owner uniquement (DM + groupes).\n` +
-          `La commande *!public* ne peut pas ouvrir l'accès aux autres.`,
+        text: `🌍 *Mode public activé*\n\n` +
+          `N'importe qui peut désormais utiliser le bot (DM + groupes).\n` +
+          `⚠️ Les commandes admin restent réservées aux vrais admins des groupes, mais toutes les autres commandes sont ouvertes à tous.\n\n` +
+          `_Tape !private à tout moment pour revenir en owner-only._`,
       });
     },
   },
