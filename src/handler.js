@@ -189,14 +189,34 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         if (isGroup) {
             const metadata = await sock.groupMetadata(from).catch(() => null);
             if (metadata) {
-                isUserAdmin = !!metadata.participants.find(
-                    p => p.id === sender && (p.admin || p.isSuperAdmin)
-                );
-                const botNumId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
-                const botLidId = sock.user?.lid || null;
+                // FIX (le bot n'arrivait pas à différencier owner/admins des
+                // autres membres dans les groupes) : metadata.participants[].id
+                // est soit un JID numéro (@s.whatsapp.net) soit un LID (@lid)
+                // selon le "addressingMode" du groupe — de plus en plus
+                // souvent LID avec le déploiement de la confidentialité
+                // WhatsApp. Comparer seulement p.id === sender (une chaîne
+                // brute) échouait dès qu'un des deux était sous une forme
+                // différente de l'autre, ce qui faisait rejeter à tort de
+                // vrais admins (et empêchait les commandes adminOnly comme
+                // !spam/!broadcast de fonctionner). Baileys expose aussi
+                // p.jid (forme numéro) et p.lid (forme LID) séparément sur
+                // chaque participant — on compare maintenant sur le numéro
+                // normalisé plutôt que sur la chaîne brute.
+                const stripDigits = j => (j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                const participantNumber = p => stripDigits(p.jid) || (String(p.id || '').endsWith('@s.whatsapp.net') ? stripDigits(p.id) : '');
+
+                const senderNum = stripDigits(senderNumber) || stripDigits(sender);
+                isUserAdmin = !!metadata.participants.find(p => {
+                    if (!(p.admin || p.isSuperAdmin)) return false;
+                    const pNum = participantNumber(p);
+                    return pNum && pNum === senderNum;
+                });
+
+                const botNum = stripDigits(sock.user?.id);
                 isBotAdmin = !!metadata.participants.find(p => {
                     if (!(p.admin || p.isSuperAdmin)) return false;
-                    return p.id === botNumId || p.id === sock.user?.id || (botLidId && p.id === botLidId);
+                    const pNum = participantNumber(p);
+                    return pNum && pNum === botNum;
                 });
             }
         }
