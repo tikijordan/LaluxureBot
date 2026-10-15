@@ -9,7 +9,6 @@ import os from 'os';
 import makeWASocket, {
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
-    fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
     getContentType,
@@ -93,20 +92,13 @@ const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
 const startTime     = Date.now();
 fse.ensureDirSync(SESSIONS_ROOT);
 try {
-    const botmodeFile = path.join(__dirname, '../data/botmode.json');
-    if (!fs.existsSync(botmodeFile)) {
-        fse.ensureDirSync(path.dirname(botmodeFile));
-        fs.writeFileSync(botmodeFile, JSON.stringify({ mode: 'public' }, null, 2));
-        console.log('[Boot] botmode.json absent — mode public par défaut');
-    }
+    ensureBotModeFile();
 } catch {}
 fse.ensureDirSync(DATA_ROOT);
 ['stats','notes','banned'].forEach(d => fse.ensureDirSync(path.join(DATA_ROOT, d)));
 if (!global.noTagGroups)  global.noTagGroups  = new Set();
 if (!global.mutedMembers) global.mutedMembers  = new Set();
 if (!global.botMessages)  global.botMessages   = new Map();
-if (!global.groupMsgHistory)  global.groupMsgHistory  = new Map();
-if (!global.activeChatbotSessions) global.activeChatbotSessions = new Set();
 if (!global.automodGroups)    global.automodGroups    = new Set();
 if (!global.floodGroups)      global.floodGroups      = new Map();
 if (!global.floodTracker)     global.floodTracker     = new Map();
@@ -148,13 +140,12 @@ const _sw = process.stderr.write.bind(process.stderr);
 process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.includes(n))) return true; return _sw(d,...a); };
 const _ce = console.error.bind(console);
 console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
-import { handleCommand, handleFreeformChatbot } from './handler.js';
+import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { resolveIsOwner } from './utils/message.js';
-import { canUseBot } from './utils/botmode.js';
 import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
+import { isOwnerSender, ensureBotModeFile } from './utils/botmode.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
 import { isAntilinkEnabled } from './utils/antilink.js';
 import { getFilters as getBadWordFilters } from './utils/filter.js';
@@ -217,31 +208,11 @@ function clearReconnectTimer(sessionId) {
     }
 }
 
-/** Résout ownerLid dès qu'une commande groupe en a besoin (évite l'attente des events lid-mapping). */
-async function resolveOwnerLidIfNeeded(sock, state, ownerNum) {
-    if (!ownerNum || state.ownerLid) return state.ownerLid;
-    try {
-        if (sock.user?.lid) {
-            state.ownerLid = sock.user.lid.split('@')[0].split(':')[0];
-            return state.ownerLid;
-        }
-        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${ownerNum}@s.whatsapp.net`]);
-        if (pairs?.[0]?.lid) {
-            state.ownerLid = pairs[0].lid.split('@')[0].split(':')[0];
-            if (!state.lidCache) state.lidCache = {};
-            state.lidCache[ownerNum] = state.ownerLid;
-            state.lidCache[state.ownerLid] = ownerNum;
-            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${state.ownerLid}`);
-        }
-    } catch {}
-    return state.ownerLid;
-}
-
 function scheduleReconnect(sessionId, delayMs = 3000) {
     clearReconnectTimer(sessionId);
     const t = setTimeout(() => {
         reconnectTimerBySessionId.delete(sessionId);
-        startSession(sessionId).catch(e => addLog('error', `[Reconnect] [${sessionId}]: ${e.message}`));
+        startSession(sessionId);
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
 }
@@ -294,61 +265,13 @@ async function startSession(sessionId, phoneNumber = null) {
     state.pairingCode = null;
     state.authPath = authPath;
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
+    const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
+    const saveCreds = async () => {
+        try { fse.ensureDirSync(state.authPath); } catch {}
+        return _saveCreds();
+    };
 
-    // FIX (impossible de connecter les sessions) : tout ce qui suit pouvait
-    // lever une exception (fetchLatestBaileysVersion sans réseau sortant,
-    // useMultiFileAuthState, makeWASocket...) AVANT que les listeners soient
-    // posés. Comme state.connection était déjà passé à 'connecting' juste
-    // au-dessus, et que le garde-fou en tête de fonction refuse de relancer
-    // une session déjà 'connecting', la moindre erreur laissait la session
-    // bloquée à "connexion en cours" POUR TOUJOURS — plus aucune tentative
-    // (bouton "reconnecter", nouveau pairing, redémarrage auto) ne faisait
-    // quoi que ce soit. On capture maintenant l'erreur, on remet l'état à
-    // 'close' pour débloquer les tentatives suivantes, et on log le vrai
-    // message d'erreur (visible dans les logs du dashboard).
-    try {
-        const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
-        const saveCreds = async () => {
-            try { fse.ensureDirSync(state.authPath); } catch {}
-            return _saveCreds();
-        };
-
-        let version;
-        try {
-            // FIX (téléphone refuse après scan QR/code) : fetchLatestBaileysVersion()
-            // renvoie parfois une version WhatsApp Web PÉRIMÉE tout en annonçant
-            // isLatest:true (bug connu de Baileys). Le socket arrive alors à
-            // générer un QR/code de jumelage, mais WhatsApp refuse ensuite de
-            // finaliser la liaison — le téléphone affiche "Impossible de lier
-            // l'appareil, une erreur s'est produite". fetchLatestWaWebVersion()
-            // interroge directement WhatsApp Web et renvoie la version réelle
-            // actuelle — c'est elle qu'il faut utiliser en priorité.
-            const wa = await fetchLatestWaWebVersion();
-            version = wa.version;
-        } catch (e1) {
-            try {
-                ({ version } = await fetchLatestBaileysVersion());
-                addLog('warn', `[${sessionId}] fetchLatestWaWebVersion échoué (${e1.message}) — fetchLatestBaileysVersion utilisé en repli`);
-            } catch (e2) {
-                // Dernier recours : certains hébergements (SmarterASP.NET
-                // notamment) bloquent l'accès sortant aux deux endpoints.
-                // Une version figée (à rafraîchir si WhatsApp change de
-                // protocole) vaut mieux qu'un échec total du démarrage.
-                version = [2, 3000, 1042466098];
-                addLog('warn', `[${sessionId}] Résolution de version WA échouée (${e1.message} / ${e2.message}) — version figée utilisée: ${version.join('.')}`);
-            }
-        }
-
-        await startSessionInner({ sessionId, phoneNumber, authPath, state, auth, saveCreds, version });
-    } catch (e) {
-        addLog('error', `[${sessionId}] Échec démarrage session: ${e.message}`);
-        state.connection = 'close';
-        state.sock = null;
-        scheduleReconnect(sessionId, 5000);
-    }
-}
-
-async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth, saveCreds, version }) {
+    const { version } = await fetchLatestBaileysVersion();
     const logger = pino({ level: 'silent' });
     if (!state.groupMetaCache) state.groupMetaCache = new NodeCache({ stdTTL: 5 * 60, useClones: false });
     const groupMetaCache = state.groupMetaCache;
@@ -388,32 +311,6 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
         };
 
         sock.__sendMessageWrapped = true;
-    }
-
-    if (!sock.__gpuWrapped) {
-        // FIX (!add reste bloqué indéfiniment sans jamais répondre) :
-        // defaultQueryTimeoutMs est volontairement à 0 (illimité) car un
-        // timeout global casse la réception des messages (cf. commentaire
-        // ci-dessus). Mais groupParticipantsUpdate('add') en hérite aussi —
-        // et WhatsApp, par anti-abus, se contente souvent de NE JAMAIS
-        // répondre à une demande d'ajout plutôt que de renvoyer une erreur
-        // (contrairement à 'remove'/'promote'/'demote', généralement plus
-        // fiables). Sans timeout dédié, la commande reste en attente pour
-        // toujours : ni réponse, ni erreur, ni log — silence total. On
-        // applique ici le même principe que pour sendMessage : un timeout
-        // ciblé (30s) uniquement sur cet appel, qui lève une erreur claire
-        // au lieu de bloquer la commande indéfiniment.
-        const _origGPU = sock.groupParticipantsUpdate.bind(sock);
-        sock.groupParticipantsUpdate = async (jid, participants, action) => {
-            return await Promise.race([
-                _origGPU(jid, participants, action),
-                new Promise((_, reject) => setTimeout(
-                    () => reject(new Error(`groupParticipantsUpdate(${action}): délai dépassé (30s) — WhatsApp n'a pas répondu (fréquent pour "add", souvent lié à l'anti-abus WhatsApp)`)),
-                    30_000
-                )),
-            ]);
-        };
-        sock.__gpuWrapped = true;
     }
 
     function wrapHandler(name, handler) {
@@ -469,10 +366,58 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
         }
     });
 
-    // ── ARRIVÉE / DÉPART DE MEMBRES ──────────────────────────────────
-    // welcome, goodbye, antifake et maxmembers étaient configurables via
-    // commande mais aucun listener n'existait pour cet event : ils
-    // n'avaient donc jamais d'effet réel. On les branche ici.
+    sock.ev.on('messages.reaction', async (events) => {
+        for (const { key, reaction } of events) {
+            try {
+                if (!reaction?.text) continue;          // réaction retirée → ignorer
+                const reactorJid = reaction.key?.participant || reaction.key?.remoteJid || '';
+                const reactorIsLid = reactorJid.endsWith('@lid');
+                const reactorLidNum = reactorIsLid ? reactorJid.split('@')[0].split(':')[0] : null;
+                const isOwnerReaction = !!reaction.key?.fromMe
+                    || (state.ownerLid && reactorLidNum && reactorLidNum === state.ownerLid);
+                if (!isOwnerReaction) continue;          // seul l'owner (toi) peut déclencher — on ignore tout le reste AVANT de logger, pour ne pas spammer les logs avec les réactions des autres membres
+                if (!key?.id) continue;
+                const cached = state.msgCache?.get(key.id);
+                addLog('info', `[${state.id}] REACTION (owner) reçue: text="${reaction?.text}" targetId=${key?.id} enCache=${!!cached} dejaVu=${processedMsgIds.has(key?.id)} remoteJid=${key?.remoteJid}`);
+                if (!cached) continue; // message inconnu (pas reçu pendant cette session, ou trop ancien/évincé du cache)
+                const inner = extractViewOnceInner(cached.msg.message);
+                if (!inner) {
+                    const m = cached.msg.message || {};
+                    addLog('warn', `[${state.id}] Réaction sur un message NON reconnu comme vue unique — ct=${getContentType(m)} keys=${Object.keys(m).join(',')} hasEphemeral=${!!m.ephemeralMessage}`);
+                    continue;
+                }
+                try {
+                    const { buffer, kind, obj } = await downloadViewOnceBuffer(inner);
+                    const { filename } = persistViewOnce(OWNER, cached.senderNumber, kind, buffer);
+                    await notifyOwnerViewOnce(sock, OWNER, { buffer, kind, obj }, {
+                        senderNumber: cached.senderNumber,
+                        senderJid: cached.senderJid,
+                        isGroup: cached.isGroup,
+                        from: cached.from,
+                        rawJid: cached.rawJid,
+                    }, { filename });
+                    addLog('info', `[${state.id}] VO récupérée via réaction manuelle (secours)`);
+                } catch (e) {
+                    console.error('[VO réaction] Erreur extraction:', e.message);
+                    try {
+                        await sock.sendMessage(`${OWNER}@s.whatsapp.net`, {
+                            text: `❌ Échec de l'extraction par réaction (média peut-être expiré).\nDe: @${cached.senderNumber}`,
+                        });
+                    } catch {}
+                }
+            } catch (e) {
+                addLog('error', `[${state.id}] VO réaction: ${e.message}`);
+            }
+        }
+    });
+
+    setInterval(() => {
+        if (!state.msgCache) return;
+        const now = Date.now();
+        for (const [id, entry] of state.msgCache) {
+            if (now - entry.ts > 24 * 60 * 60 * 1000) state.msgCache.delete(id);
+        }
+    }, 60 * 60 * 1000);
     sock.ev.on('group-participants.update', wrapHandler('group-participants.update', async ({ id: from, participants, action }) => {
         if (!from || !participants?.length) return;
         try {
@@ -627,7 +572,7 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                 try { sock.end(); } catch {}
                 setTimeout(() => {
                     try { if (authPath !== newPath) fse.removeSync(authPath); } catch {}
-                    startSession(num).catch(e => addLog('error', `[Rename→${num}]: ${e.message}`));
+                    startSession(num);
                 }, 1500);
                 return; // stop — ce socket est mort, le nouveau prendra le relais
             }
@@ -772,22 +717,14 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                 if (!OWNER) continue; // session pas encore connectée (QR/pairing en attente)
                 const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
                 const from  = isGroup ? rawJid : rawJid;
-                const participantRaw = msg.key.participant || '';
                 let senderJid, senderNumber;
                 const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
                 if (fromMe) {
                     senderNumber = OWNER;
-                    senderJid    = isGroup ? (participantRaw || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
+                    senderJid    = isGroup ? (msg.key.participant || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
                 } else if (isGroup) {
-                    senderJid = participantRaw || '';
+                    senderJid = msg.key.participant || '';
                     const isParticipantLid = senderJid.endsWith('@lid');
-                    const ctEarly = getContentType(msg.message);
-                    let bodyEarly = '';
-                    if (ctEarly === 'conversation') bodyEarly = msg.message.conversation || '';
-                    else if (ctEarly === 'extendedTextMessage') bodyEarly = msg.message.extendedTextMessage?.text || '';
-                    else if (ctEarly === 'imageMessage') bodyEarly = msg.message.imageMessage?.caption || '';
-                    else if (ctEarly === 'videoMessage') bodyEarly = msg.message.videoMessage?.caption || '';
-                    const isCmdEarly = bodyEarly.startsWith(PREFIX);
                     if (isParticipantLid) {
                         const lidNum = senderJid.split('@')[0].split(':')[0];
                         if (state.lidCache?.[lidNum]) {
@@ -798,11 +735,7 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                             senderJid    = senderNumber + '@s.whatsapp.net';
                             if (!state.lidCache) state.lidCache = {};
                             state.lidCache[lidNum] = senderNumber;
-                        } else if (
-                            !isCmdEarly
-                            && state.lidFailCache?.[lidNum]
-                            && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000
-                        ) {
+                        } else if (state.lidFailCache?.[lidNum] && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000) {
                             senderNumber = lidNum;
                         } else {
                             try {
@@ -830,42 +763,40 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                     senderNumber = cleanPhone(rawJid);
                     senderJid    = senderNumber + '@s.whatsapp.net';
                 }
+                const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
+                let OWNER_LID = state.ownerLid || null;
+                if (!OWNER_LID && isGroup && OWNER && (!state.ownerLidLastTry || Date.now() - state.ownerLidLastTry > 60_000)) {
+                    state.ownerLidLastTry = Date.now();
+                    try {
+                        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
+                        if (pairs && pairs.length > 0 && pairs[0]?.lid) {
+                            OWNER_LID = pairs[0].lid.split('@')[0].split(':')[0];
+                            state.ownerLid = OWNER_LID;
+                            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${OWNER_LID}`);
+                        }
+                    } catch {}
+                }
+                const senderIsLid = senderJid.endsWith('@lid');
+                const senderLidNum = senderIsLid ? senderJid.split('@')[0].split(':')[0] : null;
+                const isOwner = isOwnerSender({
+                    fromMe, senderNumber, senderLid: senderLidNum,
+                    owner: OWNER, ownerLid: OWNER_LID, ownerPersonal: OWNER_PERSONAL,
+                });
+                // Identité canonique du propriétaire : son message peut arriver avec
+                // son LID (34347558133923) au lieu de son numéro. Si la résolution
+                // LID→numéro a échoué, senderNumber restait le LID : ses notes,
+                // snippets, stats et l'envoi privé (ex: backup) partaient alors sous
+                // une autre identité. On force toujours le numéro connecté.
+                if (isOwner) {
+                    senderNumber = OWNER;
+                    senderJid    = OWNER + '@s.whatsapp.net';
+                }
                 const ct = getContentType(msg.message);
                 let body = '';
                 if (ct==='conversation') body=msg.message.conversation||'';
                 else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
                 else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
                 else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
-                // FIX (!purge ne supprime rien) : seul global.botMessages (les
-                // messages envoyés PAR le bot) était suivi. Or WhatsApp autorise
-                // un admin (le bot l'est, condition des commandes adminOnly) à
-                // supprimer N'IMPORTE QUEL message du groupe, pas seulement les
-                // siens. Sans historique des messages des AUTRES membres, !purge
-                // n'avait tout simplement rien à supprimer dans l'immense
-                // majorité des cas. On garde ici un historique récent (200
-                // derniers messages) de TOUT le groupe pour que !purge puisse
-                // réellement fonctionner.
-                if (isGroup && msg.key?.id) {
-                    if (!global.groupMsgHistory.has(from)) global.groupMsgHistory.set(from, []);
-                    const hist = global.groupMsgHistory.get(from);
-                    hist.push(msg.key);
-                    if (hist.length > 200) hist.splice(0, hist.length - 200);
-                }
-                const isCmd = body.startsWith(PREFIX);
-                if (isGroup && isCmd) {
-                    await resolveOwnerLidIfNeeded(sock, state, OWNER);
-                }
-                const OWNER_LID = state.ownerLid || null;
-                const ownerCheckJid = participantRaw || senderJid;
-                const isOwner = resolveIsOwner({
-                    fromMe,
-                    senderNumber,
-                    senderJid: ownerCheckJid,
-                    OWNER,
-                    OWNER_LID,
-                    OWNER_PERSONAL,
-                    lidCache: state.lidCache || {},
-                });
                 const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
                 const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
                 const isVOraw = /^viewOnceMessage/.test(voCt)
@@ -911,6 +842,7 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                     }
                     if (handledCaptcha) continue;
                 }
+                const isCmd = body.startsWith(PREFIX);
                 let replyTo = from;
                 if (!isGroup && isCmd && isOwner && OWNER) {
                     replyTo = `${OWNER}@s.whatsapp.net`;
@@ -938,27 +870,14 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                                 try { await sock.groupParticipantsUpdate(from, [senderJid], 'remove'); } catch {}
                                 continue;
                             }
-                            // FIX (commandes de groupe qui échouent en silence) :
-                            // antilink/mots interdits/filtre média/slowmode/flood
-                            // s'appliquaient à TOUT message d'un non-owner, commandes
-                            // comprises. Un admin de groupe (qui n'est pas forcément
-                            // l'owner du bot) tapant une commande admin (!kick, !filter,
-                            // !setdesc avec un lien, ou juste deux commandes trop
-                            // rapprochées avec le slowmode actif) se faisait supprimer
-                            // son message avant même que la commande soit exécutée —
-                            // le slowmode en particulier supprime sans AUCUN message,
-                            // donc perçu comme une commande qui "ne répond pas". On
-                            // exempte maintenant les messages de commande (isCmd) de
-                            // ces vérifications de modération — seul le ban actif
-                            // reste appliqué même aux commandes, ce qui est voulu.
                             const automodOn = global.automodGroups.has(from);
                             let violation = null;
-                            if ((isAntilinkEnabled(from) || automodOn) && !isCmd && /https?:\/\/|chat\.whatsapp\.com|wa\.me\//i.test(body)) {
+                            if ((isAntilinkEnabled(from) || automodOn) && /https?:\/\/|chat\.whatsapp\.com|wa\.me\//i.test(body)) {
                                 violation = 'lien non autorisé';
                             }
                             if (!violation) {
                                 const badWords = getBadWordFilters(from) || [];
-                                if ((badWords.length > 0 || automodOn) && !isCmd && body) {
+                                if ((badWords.length > 0 || automodOn) && body) {
                                     const lower = body.toLowerCase();
                                     const hit = badWords.find(w => w && lower.includes(String(w).toLowerCase()));
                                     if (hit) violation = `mot interdit ("${hit}")`;
@@ -984,13 +903,13 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                             }
                             const mediaTypeMap = { imageMessage: 'image', videoMessage: 'video', audioMessage: 'voice', pttMessage: 'voice' };
                             const mediaType = mediaTypeMap[ct];
-                            if (mediaType && !isCmd && isMediaFiltered(from, mediaType)) {
+                            if (mediaType && isMediaFiltered(from, mediaType)) {
                                 try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
                                 await sock.sendMessage(from, { text: `🚫 Envoi de ${mediaType} bloqué dans ce groupe.` });
                                 continue;
                             }
                             const slow = getSlowmode(from);
-                            if (slow && slow > 0 && !isCmd) {
+                            if (slow && slow > 0) {
                                 const key = `${from}__${senderNumber}`;
                                 const last = global.slowmodeLastMsg.get(key) || 0;
                                 const now = Date.now();
@@ -1001,7 +920,7 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                                 global.slowmodeLastMsg.set(key, now);
                             }
                             const floodCfg = global.floodGroups.get(from);
-                            if (floodCfg && !isCmd) {
+                            if (floodCfg) {
                                 const fKey = `${from}__${senderNumber}`;
                                 const now = Date.now();
                                 const windowMs = floodCfg.window * 1000;
@@ -1021,19 +940,8 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                         addLog('error', `[${state.id}] Modération: ${modErr.message}`);
                     }
                 }
-                if (!isCmd) {
-                    // FIX (chatbot sans avoir à retaper la commande) : si cet
-                    // expéditeur a activé le mode conversation libre via
-                    // "!chatbot", on route son message brut (sans préfixe)
-                    // directement vers l'IA au lieu de l'ignorer. On respecte
-                    // toujours canUseBot (owner-only) et on ignore les
-                    // messages vides/médias sans légende.
-                    if (body && global.activeChatbotSessions?.has(senderJid) && canUseBot(isOwner, currentBotMode)) {
-                        await handleFreeformChatbot(sock, msg, { from: replyTo, sender: senderJid, body });
-                    }
-                    continue;
-                }
-                if (!canUseBot(isOwner, currentBotMode)) continue;
+                if (!isCmd) continue;
+                if (!isOwner) continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
@@ -1041,8 +949,6 @@ async function startSessionInner({ sessionId, phoneNumber, authPath, state, auth
                     prefix: PREFIX,
                     owner: OWNER,
                     ownerLid: state.ownerLid || null,
-                    ownerPersonal: OWNER_PERSONAL,
-                    lidCache: state.lidCache || {},
                     onCommand: (cmd, user) => {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);
@@ -1191,67 +1097,33 @@ async function loadExistingSessions() {
             }
         }
 
-        // FIX (durée de vie du bot / ne répond plus après connexion) :
-        // avant, la perte du lock (heartbeat en échec ou lock volé par une
-        // autre instance) arrêtait TOUS les sockets WhatsApp et rien ne
-        // retentait jamais l'acquisition. Le process restait "vivant" (le
-        // dashboard répondait toujours) mais le bot ne répondait plus à
-        // aucun message, définitivement, tant qu'on ne le redémarrait pas
-        // à la main. On boucle maintenant jusqu'à récupération du lock,
-        // puis on relance automatiquement toutes les sessions connues.
-        let currentHb = null;
-        let recoveryTimer = null;
-
-        function attachHeartbeat() {
-            currentHb = startLockHeartbeat({
-                db, lockName, ownerId, ttlMs, intervalMs: hbMs, deployId,
-                onLost: (info) => {
-                    addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
-                    for (const [id, st] of sessions) {
-                        try { st.sock?.ws?.close(); } catch {}
-                        try { st.sock?.end?.(); } catch {}
-                        st.connection = 'close';
-                        clearReconnectTimer(id);
-                    }
-                    scheduleRecovery();
-                },
-            });
-        }
-
-        function scheduleRecovery() {
-            if (recoveryTimer) return; // une reprise est déjà en cours
-            const RETRY_MS = 20_000;
-            addLog('warn', `[Lock] Tentative de reprise du lock toutes les ${RETRY_MS / 1000}s...`);
-            recoveryTimer = setInterval(async () => {
-                try {
-                    const res = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
-                    if (!res.ok) return;
-                    clearInterval(recoveryTimer);
-                    recoveryTimer = null;
-                    addLog('success', `[Lock] Lock repris (${res.reason}) — redémarrage des sessions WhatsApp`);
-                    attachHeartbeat();
-                    for (const id of sessions.keys()) {
-                        startSession(id).catch(e => addLog('error', `[Lock] Redémarrage [${id}]: ${e.message}`));
-                    }
-                } catch (e) {
-                    addLog('warn', `[Lock] Reprise échouée: ${e.message}`);
-                }
-            }, RETRY_MS);
-        }
-
         if (!lockOk) {
-            addLog('warn', `[Lock] Impossible d'acquérir le lock — nouvelle tentative en arrière-plan (aucun redémarrage manuel requis).`);
-            scheduleRecovery();
+            addLog('warn', `[Lock] Impossible d'acquérir le lock — WhatsApp ne sera pas démarré ici.`);
             return;
         }
 
         addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
-        attachHeartbeat();
+        const hb = startLockHeartbeat({
+            db,
+            lockName,
+            ownerId,
+            ttlMs,
+            intervalMs: hbMs,
+            deployId,
+            onLost: (info) => {
+                addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
+                for (const [id, st] of sessions) {
+                    try { st.sock?.ws?.close(); } catch {}
+                    try { st.sock?.end?.(); } catch {}
+                    st.connection = 'close';
+                    clearReconnectTimer(id);
+                }
+            },
+        });
 
         const shutdown = async (signal) => {
             console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-            if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
-            try { currentHb?.stop(); } catch {}
+            try { hb.stop(); } catch {}
             try {
                 await Promise.race([
                     flushAllPendingSaves(),
@@ -1303,9 +1175,7 @@ async function loadExistingSessions() {
         const selected = startAll ? list : [list[list.length - 1]];
         addLog('info', `${selected.length}/${list.length} session(s) lancée(s): ${selected.join(', ')}${startAll ? '' : ' (START_ALL_SESSIONS=1 pour tout lancer)'}`);
         for (const [i, id] of selected.entries()) {
-            setTimeout(() => {
-                startSession(id).catch(e => addLog('error', `[Boot] Démarrage [${id}] échoué: ${e.message}`));
-            }, i * 1500);
+            setTimeout(() => startSession(id), i * 1500);
         }
     }
 }
@@ -1465,15 +1335,7 @@ http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
     }
 
-    // FIX: sendJson/sendHtml (et corsHeaders dont elles dépendent) étaient
-    // déclarées À L'INTÉRIEUR du bloc try ci-dessous. En modules ES (strict
-    // mode), une function/const déclarée dans un bloc n'est visible que
-    // dans ce bloc — le catch (bloc frère) ne voyait donc PAS sendJson.
-    // Résultat : toute exception non prévue provoquait un "sendJson is not
-    // defined" avalé par le try/catch interne, et le client ne recevait
-    // jamais de réponse (requête qui reste en attente jusqu'au timeout).
-    // On remonte tout ça ici, avant le try, pour que ce soit utilisable
-    // partout, y compris en cas d'erreur serveur.
+    try {
     const origin = req.headers['origin'] || '';
     const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
     const corsHeaders = {
@@ -1483,6 +1345,7 @@ http.createServer(async (req, res) => {
         'Access-Control-Allow-Credentials': 'true',
     };
 
+    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
     function sendJson(r, data, status=200) {
         r.writeHead(status, { ...SECURITY_HEADERS, ...corsHeaders, 'Content-Type':'application/json' });
         r.end(JSON.stringify(data));
@@ -1493,9 +1356,6 @@ http.createServer(async (req, res) => {
         r.end(html);
     }
 
-    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
-
-    try {
     if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
         if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
         const hp = path.join(DASH_DIR,'index.html');
@@ -1686,7 +1546,7 @@ button:hover{background:#1fb858}
         // 1.5s était trop court : WhatsApp met parfois plus de temps à considérer
         // l'ancienne connexion comme terminée côté serveur, causant un conflit
         // (code 440) avec la nouvelle tentative de connexion.
-        setTimeout(()=>startSession(sid).catch(e => addLog('error', `[Restart] [${sid}]: ${e.message}`)),5000);
+        setTimeout(()=>startSession(sid),5000);
         return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
     }
 
@@ -1754,38 +1614,6 @@ button:hover{background:#1fb858}
 });
 
 loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
-
-// DIAGNOSTIC (échec de liaison WhatsApp identique QR + code, 0 appareil lié) :
-// deux causes plausibles restent en dehors du code applicatif et invisibles
-// sans mesure — une horloge serveur décalée (la crypto de liaison WA est
-// sensible au temps) et une IP d'hébergement déjà mal réputée auprès de
-// WhatsApp (fréquent sur l'hébergement mutualisé). On log les deux au
-// démarrage pour pouvoir les vérifier sans avoir à deviner.
-(async function runBootDiagnostics() {
-    try {
-        const t0 = Date.now();
-        const res = await axios.head('https://www.google.com', { timeout: 8000 });
-        const serverDate = res.headers?.date ? new Date(res.headers.date).getTime() : null;
-        if (serverDate) {
-            const driftMs = Date.now() - serverDate - (Date.now() - t0) / 2; // compense la latence réseau
-            if (Math.abs(driftMs) > 30_000) {
-                addLog('warn', `[Diagnostic] Horloge serveur décalée d'environ ${Math.round(driftMs / 1000)}s par rapport au temps réel — peut faire échouer la liaison WhatsApp (QR/code). Vérifie la synchronisation NTP de l'hébergeur.`);
-            } else {
-                addLog('info', `[Diagnostic] Horloge serveur OK (écart ~${Math.round(driftMs / 1000)}s)`);
-            }
-        }
-    } catch (e) {
-        addLog('warn', `[Diagnostic] Vérification horloge impossible: ${e.message}`);
-    }
-    try {
-        const res = await axios.get('https://api.ipify.org?format=json', { timeout: 8000 });
-        const ip = res.data?.ip;
-        if (ip) addLog('info', `[Diagnostic] IP sortante du serveur: ${ip} — vérifie sa réputation si la liaison WhatsApp continue d'échouer (ex: ipqualityscore.com, ou demande à l'hébergeur si l'IP est partagée/datacenter connue)`);
-    } catch (e) {
-        addLog('warn', `[Diagnostic] Récupération IP sortante impossible: ${e.message}`);
-    }
-})();
-
 (function startSelfPing() {
     if (process.env.SELF_PING === '0') return;
     const PING_INTERVAL_MS = 4 * 60 * 1000; // toutes les 4 min (< 15 min = seuil Render Free)

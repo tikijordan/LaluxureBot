@@ -18,38 +18,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BOTMODE_FILE = path.join(__dirname, '../../data/botmode.json');
 
-// ── GESTION DU BOTMODE (persistant + cache mémoire) ──────────
-let _botModeCache = null;
-
-function getBotMode() {
-  if (_botModeCache) return _botModeCache;
-  try {
-    if (fs.existsSync(BOTMODE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(BOTMODE_FILE, 'utf-8'));
-      _botModeCache = data.mode || 'private';
-      return _botModeCache;
-    }
-  } catch {}
-  _botModeCache = 'private';
-  return _botModeCache;
-}
-
-function setBotMode(mode) {
-  _botModeCache = mode;
-  try {
-    const dir = path.dirname(BOTMODE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(BOTMODE_FILE, JSON.stringify({ mode }, null, 2));
-  } catch (e) {
-    console.error('❌ Erreur écriture botmode:', e.message);
-  }
-}
-
-// ── GESTION DU NO-TAG (global en mémoire) ────────────────────
-// On utilise global.noTagGroups pour que ce soit partagé avec le handler principal
-if (!global.noTagGroups) global.noTagGroups = new Set();
+// Mode du bot : géré uniquement par utils/botmode.js
+import { getBotMode, setBotMode } from '../utils/botmode.js';
 
 export default {
 
@@ -113,19 +84,17 @@ export default {
   botmode: {
     description: 'Voir le mode actuel du bot (owner)',
     execute: async ({ sock, from }) => {
-      const mode = getBotMode();
       await sock.sendMessage(from, {
         text: `⚙️ *Accès au bot*\n\n` +
-          (mode === 'public'
-            ? `🌍 *Public* — tout le monde peut utiliser le bot, en DM comme en groupe.\n\n_Tape !private pour repasser en mode owner-only._`
-            : `🔒 *Owner-only*\n\nSeul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\nLes autres utilisateurs sont ignorés (aucune réponse).\n\n_Tape !public pour ouvrir l'accès à tout le monde._`),
+          `🔒 *Owner-only* — permanent\n\n` +
+          `Seul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\n` +
+          `Les autres utilisateurs sont ignorés (aucune réponse).`,
       });
     },
   },
 
   private: {
-    description: 'Passer en mode owner-only (toi seul)',
-    private: true,
+    description: 'Confirmer le mode owner-only',
     execute: async ({ sock, from }) => {
       setBotMode('private');
       await sock.sendMessage(from, {
@@ -137,22 +106,13 @@ export default {
   },
 
   public: {
-    description: 'Passer en mode public (tout le monde peut utiliser le bot)',
-    private: true,
+    description: 'Désactivé — bot toujours owner-only',
     execute: async ({ sock, from }) => {
-      // FIX: cette commande forçait 'private' quoi qu'il arrive, alors que
-      // le mécanisme de mode public (canUseBot / setBotMode) fonctionne
-      // parfaitement — il était juste verrouillé ici. On l'active pour de
-      // vrai maintenant, avec un avertissement clair car les commandes
-      // adminOnly restent réservées aux vrais admins du groupe, mais TOUTES
-      // les autres commandes deviennent accessibles à quiconque écrit au
-      // bot, dans n'importe quel groupe ou en DM.
-      setBotMode('public');
+      setBotMode('private');
       await sock.sendMessage(from, {
-        text: `🌍 *Mode public activé*\n\n` +
-          `N'importe qui peut désormais utiliser le bot (DM + groupes).\n` +
-          `⚠️ Les commandes admin restent réservées aux vrais admins des groupes, mais toutes les autres commandes sont ouvertes à tous.\n\n` +
-          `_Tape !private à tout moment pour revenir en owner-only._`,
+        text: `🔒 *Mode public désactivé*\n\n` +
+          `Ce bot est réservé à l'owner uniquement (DM + groupes).\n` +
+          `La commande *!public* ne peut pas ouvrir l'accès aux autres.`,
       });
     },
   },
@@ -160,4 +120,4 @@ export default {
 
 // ── EXPORT des helpers pour le handler principal ──────────────
 // Importe ces fonctions dans index.js pour lire le mode bot
-export { getBotMode };
+export { getBotMode, setBotMode };

@@ -7,11 +7,11 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getContentType } from '@whiskeysockets/baileys';
+import { isSpam, trackMessage } from './utils/antispam.js';
 import { loadCommands } from './loader.js';
 import { addStat } from './utils/stats.js';
-import { resolveIsOwner } from './utils/message.js';
-import { canUseBot, getBotMode } from './utils/botmode.js';
-import { runChatbotTurn } from './commands/ai2.js';
+// FIX 2 — lire le mode bot dynamiquement depuis le fichier plutôt que depuis ctx
+import { getBotMode, canUseBot, checkCommandAccess, isOwnerSender } from './utils/botmode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,7 +44,9 @@ setInterval(() => {
     }
 }, 60 * 1000);
 
-// FIX 1 — normalize définie au niveau module (fallback si ctx incomplet)
+// FIX 1 — normalize définie au niveau module, utilisable partout dans handleCommand
+//          (était définie seulement dans le bloc private, causant ReferenceError
+//          à la ligne isOwner = fromMe || normalize(...) → isOwner toujours undefined)
 const normalize = n => (n || '').replace(/[^0-9]/g, '').replace(/^0+/, '');
 
 /**
@@ -82,8 +84,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const connectedOwner = (sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
     const OWNER     = (ctx.owner || connectedOwner).replace(/\D/g, '');
     const OWNER_LID = ctx.ownerLid || sock.user?.lid?.split('@')[0] || null;
-    const OWNER_PERSONAL = ctx.ownerPersonal ?? (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
-    const lidCache = ctx.lidCache || {};
     const noTagGroups = ctx.noTagGroups || _defaultNoTagGroups;
 
     // ── Extraction du contexte ────────────────────────────────
@@ -93,18 +93,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     let isOwner      = ctx.isOwner;
     let senderNumber = ctx.senderNumber;
     let sender       = ctx.sender;
-
-    if (body !== undefined && sender !== undefined) {
-        isOwner = resolveIsOwner({
-            fromMe: !!msg.key?.fromMe,
-            senderNumber,
-            senderJid: msg.key?.participant || sender,
-            OWNER,
-            OWNER_LID,
-            OWNER_PERSONAL,
-            lidCache,
-        });
-    }
 
     // Fallback complet si appelé sans contexte (compatibilité)
     if (body === undefined) {
@@ -154,16 +142,16 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
             sender       = `${senderNumber}@s.whatsapp.net`;
         }
 
-        const senderIsLid = sender.endsWith('@lid');
-        isOwner = resolveIsOwner({
-            fromMe, senderNumber, senderJid: sender, OWNER, OWNER_LID, OWNER_PERSONAL, lidCache,
+        isOwner = isOwnerSender({
+            fromMe, senderNumber, senderLid: sender.endsWith('@lid') ? sender.split('@')[0] : null,
+            owner: OWNER, ownerLid: OWNER_LID, ownerPersonal: process.env.OWNER_NUMBER,
         });
     }
 
     if (!body || !body.startsWith(PREFIX)) return;
 
-    const botMode = getBotMode();
-    if (!canUseBot(isOwner, botMode)) return;
+    // Qui peut lancer une commande : décidé dans utils/botmode.js
+    if (!canUseBot(isOwner, isGroup)) return;
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);
@@ -173,62 +161,16 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!cmdName) return;
 
+    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
+    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
+    const botMode = getBotMode();
+
     const command = commands[cmdName];
     if (!command) return;
 
-    // ── Vérification accès private ────────────────────────────
-    if ((command.private || command.public === false) && !isOwner) {
-        return await sock.sendMessage(from, { text: '🔐 Cette commande est privée et réservée au propriétaire.' });
-    }
-
-    // ── Vérification admin ────────────────────────────────────
-    if (command.adminOnly && !isOwner) {
-        let isUserAdmin = false;
-        let isBotAdmin = false;
-
-        if (isGroup) {
-            const metadata = await sock.groupMetadata(from).catch(() => null);
-            if (metadata) {
-                // FIX (le bot n'arrivait pas à différencier owner/admins des
-                // autres membres dans les groupes) : metadata.participants[].id
-                // est soit un JID numéro (@s.whatsapp.net) soit un LID (@lid)
-                // selon le "addressingMode" du groupe — de plus en plus
-                // souvent LID avec le déploiement de la confidentialité
-                // WhatsApp. Comparer seulement p.id === sender (une chaîne
-                // brute) échouait dès qu'un des deux était sous une forme
-                // différente de l'autre, ce qui faisait rejeter à tort de
-                // vrais admins (et empêchait les commandes adminOnly comme
-                // !spam/!broadcast de fonctionner). Baileys expose aussi
-                // p.jid (forme numéro) et p.lid (forme LID) séparément sur
-                // chaque participant — on compare maintenant sur le numéro
-                // normalisé plutôt que sur la chaîne brute.
-                const stripDigits = j => (j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-                const participantNumber = p => stripDigits(p.jid) || (String(p.id || '').endsWith('@s.whatsapp.net') ? stripDigits(p.id) : '');
-
-                const senderNum = stripDigits(senderNumber) || stripDigits(sender);
-                isUserAdmin = !!metadata.participants.find(p => {
-                    if (!(p.admin || p.isSuperAdmin)) return false;
-                    const pNum = participantNumber(p);
-                    return pNum && pNum === senderNum;
-                });
-
-                const botNum = stripDigits(sock.user?.id);
-                isBotAdmin = !!metadata.participants.find(p => {
-                    if (!(p.admin || p.isSuperAdmin)) return false;
-                    const pNum = participantNumber(p);
-                    return pNum && pNum === botNum;
-                });
-            }
-        }
-
-        if (isGroup && !isBotAdmin) {
-            return await sock.sendMessage(from, { text: '⚠️ Je ne suis pas administrateur du groupe.' });
-        }
-
-        if (!isUserAdmin) {
-            return await sock.sendMessage(from, { text: '🔒 Cette commande est réservée aux administrateurs.' });
-        }
-    }
+    // ── Droits sur la commande (décidés dans utils/botmode.js) ──────
+    const access = await checkCommandAccess({ sock, command, from, sender, isGroup, isOwner });
+    if (!access.allowed) return await sock.sendMessage(from, { text: access.message });
 
     // ── Exécution ─────────────────────────────────────────────
     try {
@@ -248,29 +190,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
         });
     } catch (err) {
         console.error(`❌ Erreur ${cmdName}:`, err.message);
-        await sock.sendMessage(from, { text: `❌ Erreur : ${err.message}` }).catch(() => {});
-    }
-}
-
-/**
- * Route un message SANS préfixe vers le chatbot IA, pour les utilisateurs
- * ayant activé le mode conversation libre via "!chatbot" (voir
- * global.activeChatbotSessions, géré dans src/commands/ai2.js).
- * Appelée depuis index.js quand isCmd est faux mais qu'une session
- * chatbot est active pour cet expéditeur.
- */
-export async function handleFreeformChatbot(sock, msg, ctx = {}) {
-    const msgId = msg?.key?.id;
-    if (msgId) {
-        if (_handledMsgIds.has(msgId)) return;
-        _handledMsgIds.set(msgId, Date.now());
-    }
-    const { from, sender, body } = ctx;
-    if (!from || !sender || !body) return;
-    try {
-        await runChatbotTurn({ sock, from, sender, text: body });
-    } catch (err) {
-        console.error('❌ Erreur chatbot (mode libre):', err.message);
         await sock.sendMessage(from, { text: `❌ Erreur : ${err.message}` }).catch(() => {});
     }
 }

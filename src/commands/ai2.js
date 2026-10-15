@@ -34,10 +34,10 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
     let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
-    const { key } = await sock.sendMessage(from, { text: '🤖 _En train d\'écrire..._' });
+    const { key } = await sock.sendMessage(from, { text: ' En train d\'écrire..._' });
 
     const messages = [
-        { role: 'system', content: 'Tu es un assistant WhatsApp concis.' },
+        { role: 'system', content: 'Tu es un assistant WhatsApp concis et bref .' },
         ...session.history.slice(-10),
         { role: 'user', content: text }
     ];
@@ -47,7 +47,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
         chatSessions.set(sender, session);
-        await sock.sendMessage(from, { text: `🤖 ${reply}`, edit: key });
+        await sock.sendMessage(from, { text: ` ${reply}`, edit: key });
     } else {
         await sock.sendMessage(from, {
             text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
