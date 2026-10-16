@@ -8,7 +8,8 @@ async function quickAI(prompt) {
     try {
         const res = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${key}`,
-            { contents: [{ parts: [{ text: prompt }] }] }
+            { contents: [{ parts: [{ text: prompt }] }] },
+            { timeout: 20000 }
         );
         return res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     } catch { return null; }
@@ -20,6 +21,7 @@ export default {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
+            setTimeout(() => msgCache.delete(msgId), 30000);
 
             if (!text) return sock.sendMessage(from, { text: '⚖️ Sujet manquant.' });
             
@@ -48,6 +50,7 @@ export default {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
+            setTimeout(() => msgCache.delete(msgId), 30000);
             
             // Logique de quiz corrigée pour éviter le spam
             if (global.activeQuizzes?.has(`${from}_${sender}`)) {

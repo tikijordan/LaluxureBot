@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { KeyManager } from './ai.js';
 
 // Utilisation du cache global ou local pour éviter les doublons
 const msgCache = new Set();
@@ -9,9 +10,13 @@ const CHATBOT_TIMEOUT = 30 * 60 * 1000;
 // (Ou copier/coller la classe KeyManager ici si les fichiers sont isolés)
 // Pour l'exemple, j'utilise une fonction simplifiée qui respecte tes clés GEMINI_API_KEY_1, 2, 3...
 
+const geminiKeys2 = new KeyManager(
+  [process.env.GEMINI_API_KEY_1, process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY_3].filter(Boolean),
+  'Gemini2'
+);
 async function callAI(messages, temperature = 0.7) {
-    const keys = [process.env.GEMINI_API_KEY_1, process.env.GEMINI_API_KEY_2].filter(Boolean);
-    const key = keys[0]; // À perfectionner avec KeyManager pour la rotation réelle
+    let key = geminiKeys2.getKey();
+    if (!key) return null;
 
     try {
         const contents = messages.map(m => ({
@@ -25,7 +30,9 @@ async function callAI(messages, temperature = 0.7) {
         );
         return res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     } catch (e) {
+        const status = e.response?.status;
         console.error("Erreur IA:", e.message);
+        if (status === 429 || status === 400 || status === 403) geminiKeys2.markExhausted();
         return null;
     }
 }

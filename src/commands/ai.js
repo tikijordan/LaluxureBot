@@ -22,7 +22,7 @@ const GEMINI_MODEL = 'gemini-3-flash-preview';
 // Cache anti-doublon
 const msgCache = new Set();
 
-class KeyManager {
+export class KeyManager {
   constructor(keys, name) {
     this.keys = keys;
     this.name = name;
@@ -70,7 +70,7 @@ async function callGemini(prompt) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.7, maxOutputTokens: 1000 },
       },
-      { timeout: 300000 }
+      { timeout: 30000 }
     );
 
     const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
