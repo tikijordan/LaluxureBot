@@ -63,3 +63,30 @@ export function checkGroupActionResult(result, actionLabel = 'Action') {
   if (status === '408') return { ok: false, message: `${actionLabel} échouée — délai dépassé (408).` };
   return { ok: false, message: `${actionLabel} échouée (statut ${status || 'inconnu'}).` };
 }
+
+/** Rôle normalisé d'un participant : 'superadmin' | 'admin' | 'member'. */
+export function participantRole(participant) {
+  if (!participant) return 'member';
+  if (participant.isSuperAdmin || participant.admin === 'superadmin') return 'superadmin';
+  if (participant.admin === 'admin' || participant.admin === true) return 'admin';
+  return 'member';
+}
+
+/** Résume les membres d'un groupe par rôle. */
+export function summarizeGroupMembers(participants = []) {
+  const summary = { superadmin: 0, admin: 0, member: 0, total: participants.length };
+  for (const p of participants) summary[participantRole(p)]++;
+  return summary;
+}
+
+/** Identifie si un participant correspond au propriétaire du bot (PN ou LID). */
+export function isOwnerInGroup(participant, ownerNumber, ownerLid, lidCache = {}) {
+  const ownerNum = (ownerNumber || '').replace(/\D/g, '').replace(/^0+/, '');
+  const bases = new Set();
+  if (ownerNum) bases.add(ownerNum);
+  if (ownerLid) bases.add(String(ownerLid).replace(/\D/g, ''));
+  return participantIds(participant).some(pid => {
+    const pb = jidBase(pid).replace(/\D/g, '');
+    return bases.has(pb);
+  });
+}

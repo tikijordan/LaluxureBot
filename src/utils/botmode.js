@@ -22,6 +22,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { participantMatches, participantIds } from './groupadmin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODE_FILE = path.join(__dirname, '../../data/botmode.json');
@@ -32,7 +33,7 @@ const MODE_FILE = path.join(__dirname, '../../data/botmode.json');
  * true  : les admins du groupe peuvent lancer les commandes marquées adminOnly
  *         (le bot doit aussi être admin du groupe).
  */
-export const ALLOW_GROUP_ADMINS = false;
+export const ALLOW_GROUP_ADMINS = true;
 
 const DEFAULT_MODE = 'private';
 
@@ -68,12 +69,19 @@ export async function checkCommandAccess({ sock, command, from, sender, isGroup,
     const metadata = await sock.groupMetadata(from).catch(() => null);
     if (!metadata) return { allowed: false, message: '⚠️ Impossible de vérifier les droits du groupe.' };
 
-    const isUserAdmin = !!metadata.participants.find(p => p.id === sender && (p.admin || p.isSuperAdmin));
-    const botNumId = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
-    const botLidId = sock.user?.lid || null;
+    const senderNumber = (sender || '').replace(/\D/g, '').replace(/^0+/, '');
+    const senderIsLid = String(sender || '').endsWith('@lid');
+    const senderLidNum = senderIsLid ? String(sender).split('@')[0].split(':')[0] : (sock.state?.ownerLid || null);
+    const isUserAdmin = !!metadata.participants.find(p =>
+      participantMatches(p, sender, senderNumber, sock.state?.lidCache || {}) && (p.admin || p.isSuperAdmin)
+    );
+
+    const botNum = (sock.user?.id || '').split(':')[0].replace(/\D/g, '');
+    const botLid = sock.user?.lid ? String(sock.user.lid).split('@')[0].split(':')[0] : null;
     const isBotAdmin = !!metadata.participants.find(p => {
       if (!(p.admin || p.isSuperAdmin)) return false;
-      return p.id === botNumId || p.id === sock.user?.id || (botLidId && p.id === botLidId);
+      return participantMatches(p, sock.user?.id || '', botNum, sock.state?.lidCache || {}) ||
+             (botLid && participantIds(p).some(id => String(id).split('@')[0].split(':')[0] === botLid));
     });
 
     if (!isBotAdmin) return { allowed: false, message: '⚠️ Je ne suis pas administrateur du groupe.' };

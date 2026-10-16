@@ -555,26 +555,32 @@ async function startSession(sessionId, phoneNumber = null) {
             reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
             ensureSingleActiveSocketForNumber(num, state.id, sock);
             if (sessionId !== num && !sessions.has(num)) {
+                // Renommage à la volée (sans redémarrer le socket) pour supprimer le
+                // délai à la première connexion : le socket est déjà fonctionnel, on
+                // ne le recrée donc pas → le bot répond tout de suite après appairage.
                 sessions.set(num, state);
                 sessions.delete(sessionId);
                 state.id = num;
+                state.connectedNumber = num;
+                const oldPath = state.authPath;
                 const newPath = path.join(SESSIONS_ROOT, num);
-                try {
-                    fse.ensureDirSync(newPath);
-                    if (authPath !== newPath) fse.copySync(authPath, newPath, { overwrite: true });
-                    state.authPath = newPath;
-                } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
-                await migrateSessionId(sessionId, num, num, state.authPath).catch(e =>
+                if (oldPath !== newPath) {
+                    try {
+                        fse.ensureDirSync(newPath);
+                        if (oldPath && fse.pathExistsSync(oldPath)) {
+                            fse.copySync(oldPath, newPath, { overwrite: true });
+                        }
+                        state.authPath = newPath;
+                        // nettoyage asynchrone de l'ancien dossier, non bloquant
+                        setTimeout(() => { try { if (oldPath !== newPath) fse.removeSync(oldPath); } catch {} }, 1000);
+                    } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
+                }
+                // Migration MongoDB en arrière-plan (non bloquante)
+                migrateSessionId(sessionId, num, num, state.authPath).catch(e =>
                     addLog('warn', `[MongoDB] migrateSessionId: ${e.message}`)
                 );
-                addLog('success', `Session renommée [${sessionId}] → [${num}]`);
-                addLog('info', `[${num}] Redémarrage automatique des handlers...`);
-                try { sock.end(); } catch {}
-                setTimeout(() => {
-                    try { if (authPath !== newPath) fse.removeSync(authPath); } catch {}
-                    startSession(num);
-                }, 1500);
-                return; // stop — ce socket est mort, le nouveau prendra le relais
+                addLog('success', `Session renommée [${sessionId}] → [${num}] (sans redémarrage)`);
+                // on ne quitte PAS: continuation sur le même socket → réponse immédiate
             }
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
             (async () => {
