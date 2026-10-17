@@ -1642,4 +1642,62 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
         setInterval(doSelfPing, PING_INTERVAL_MS);
     }, 30_000);
     addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
+
+////////////////////
+// PING_SESSION — Garde la session active comme si un message était reçu
+////////////////////
+const PING_SESSION_INTERVAL = 15 * 60 * 1000; // toutes les 15 min pour reset le zombie
+let pingSessionTimer = null;
+
+function startPingSession() {
+    if (pingSessionTimer) clearTimeout(pingSessionTimer);
+    // Simule une activité : met à jour lastActivity pour éviter la déconnexion zombie
+    pingSessionTimer = setInterval(() => {
+        const now = Date.now();
+        for (const [id, state] of sessions) {
+            if (state.connection !== 'open' || !state.sock) continue;
+            // Met à jour lastActivity sans envoyer de message visible
+            state.lastActivity = now;
+        }
+    }, PING_SESSION_INTERVAL);
+}
+
+function stopPingSession() {
+    if (pingSessionTimer) {
+        clearInterval(pingSessionTimer);
+        pingSessionTimer = null;
+    }
+}
+
+////////////////////
+// restartSession — Comme Ctrl+C : arrêt propre + redémarrage immédiat
+////////////////////
+function restartSession() {
+    const currentSessionId = Object.keys(sessions).find(
+        id => sessions[id].connectedNumber
+    ) || 'sess_main';
+    const currentState = sessions.get(currentSessionId);
+    if (!currentState) {
+        addLog('warn', '[restart] Aucune session active à redémarrer');
+        return;
+    }
+    addLog('info', `[restart] Arrêt propre de la session [${currentState.id}]`);
+    try {
+        if (currentState.sock?.ws) currentState.sock.ws.close();
+        if (currentState.sock?.end) currentState.sock.end();
+    } catch (e) {
+        addLog('warn', `[restart] Erreur arrêt socket: ${e.message}`);
+    }
+    // Petit délai pour que WhatsApp considère l'ancienne connexion terminée
+    setTimeout(() => {
+        try { startSession(currentSessionId); } catch (e) {
+            addLog('error', `[restart] Échec redémarrage: ${e.message}`);
+        }
+    }, 3000);
+    addLog('success', `[restart] Session [${currentSessionId}] relancée (Ctrl+C) — dernière activité préservée`);
+}
+
+// Démarrage automatique du PING_SESSION au startup
+startPingSession();
+
 })();
