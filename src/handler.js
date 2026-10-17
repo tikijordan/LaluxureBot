@@ -151,7 +151,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     if (!body || !body.startsWith(PREFIX)) return;
 
     // Qui peut lancer une commande : décidé dans utils/botmode.js
-    if (!canUseBot(isOwner, isGroup)) return;
+    if (!canUseBot(isOwner, isGroup, senderNumber)) return;
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);

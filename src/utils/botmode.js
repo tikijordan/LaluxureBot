@@ -44,15 +44,22 @@ export function normalizeNumber(n) {
 /** Décide si un expéditeur est le propriétaire. Retourne toujours un booléen strict. */
 export function isOwnerSender({ fromMe, senderNumber, senderLid, owner, ownerLid, ownerPersonal }) {
   if (fromMe) return true;
-  if (owner && normalizeNumber(senderNumber) === normalizeNumber(owner)) return true;
-  if (ownerPersonal && normalizeNumber(senderNumber) === normalizeNumber(ownerPersonal)) return true;
+  // 1. Vérification par numéro normalisé (fonctionne en privé ET en groupe)
+  if (normalizeNumber(senderNumber) === normalizeNumber(owner)) return true;
+  // 2. Vérification par LID (format WhatsApp ID, ex: 34347558133923)
   if (ownerLid && senderLid && senderLid === ownerLid) return true;
+  // 3. Vérification par ownerPersonal (numéro propriétaire alternatif depuis .env)
+  if (ownerPersonal && normalizeNumber(senderNumber) === normalizeNumber(ownerPersonal)) return true;
+  // 4. Fallback : si owner et senderNumber sont identiques
+  if (senderNumber === owner) return true;
   return false;
 }
 
 /** Peut-on traiter les commandes de cet expéditeur ? */
-export function canUseBot(isOwner, isGroup = false) {
+export function canUseBot(isOwner, isGroup = false, senderNumber) {
   if (isOwner === true) return true;
+  // 2e chance : si le numéro de l'expéditeur match le propriétaire directement
+  if (senderNumber && normalizeNumber(senderNumber) === normalizeNumber(process.env.OWNER_NUMBER)) return true;
   return ALLOW_GROUP_ADMINS && isGroup === true;
 }
 
