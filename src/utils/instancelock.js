@@ -241,10 +241,12 @@ export function startLockHeartbeat({
             // DB instable : on ne coupe pas immédiatement, mais on compte les échecs
             consecutiveFailures++;
             console.warn(`[Lock] Heartbeat erreur (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${e.message}`);
-            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                stopped = true;
-                console.error('[Lock] Trop d\'erreurs consécutives — lock considéré perdu (DB instable)');
-                onLost?.({ ok: false, reason: 'db-unavailable' });
+            // Une base injoignable ne doit PAS couper WhatsApp : ça provoquait des
+            // déconnexions 408 en boucle. On garde la connexion et on réessaie au
+            // prochain tick. Seul un verrou réellement pris par une autre instance
+            // (res.ok === false, plus haut) arrête les sockets.
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && consecutiveFailures % MAX_CONSECUTIVE_FAILURES === 0) {
+                console.warn(`[Lock] Base injoignable depuis ${consecutiveFailures} tentatives — connexion WhatsApp conservée`);
             }
         }
     };

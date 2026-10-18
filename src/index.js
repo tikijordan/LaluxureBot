@@ -83,7 +83,10 @@ process.on('warning', (w) => {
 });
 
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
-const SESSIONS_ROOT = path.join(os.tmpdir(), 'wa-bot-sessions');
+// Sessions stockées localement (dossier du projet, persistant). Mongo = sauvegarde seulement.
+const SESSIONS_ROOT = process.env.SESSIONS_DIR
+    ? path.resolve(process.env.SESSIONS_DIR)
+    : path.join(__dirname, '../data/sessions');
 const DATA_ROOT     = path.join(__dirname, '../data');
 const DASH_DIR      = path.join(__dirname, '../dashboard');
 const PREFIX        = process.env.PREFIX || '!';
@@ -107,18 +110,33 @@ if (!global.lockdownGroups)   global.lockdownGroups   = new Set();
 if (!global.antifakeGroups)   global.antifakeGroups   = new Set();
 if (!global.slowmodeLastMsg)  global.slowmodeLastMsg  = new Map();
 if (!global.captchaPending)   global.captchaPending   = new Map();
-function cleanupTempSessions() {
-    try {
-        if (fs.existsSync(SESSIONS_ROOT)) {
-            fse.removeSync(SESSIONS_ROOT);
-            console.log('[Cleanup] 🗑️ Dossier TEMP des sessions supprimé');
-        }
-    } catch (e) {
-        console.warn('[Cleanup] ⚠️  Erreur suppression TEMP:', e.message);
-    }
-}
+// Les sessions sont stockées sur disque et ne sont jamais effacées au démarrage/arrêt.
 
-cleanupTempSessions();
+// Sauvegarde complète vers Atlas avant l'arrêt (plafonnée à 15 s)
+async function saveAllToAtlasBeforeExit() {
+    await Promise.race([
+        saveAllActiveSessions(sessions),
+        new Promise(r => setTimeout(r, 15000)),
+    ]).catch(() => {});
+}
+// Arrêt propre (Ctrl+C, fermeture, SIGTERM) : copie finale de chaque session vers Atlas
+// avant de quitter, pour que Atlas ait les dernières données si le disque est perdu ensuite.
+let shuttingDown = false;
+const gracefulExit = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Process] ${signal} — sauvegarde finale vers Atlas avant arrêt...`);
+    await saveAllToAtlasBeforeExit();
+    console.log('[Process] ✅ Sauvegarde finale terminée');
+    process.exit(0);
+};
+process.on('SIGINT',  () => gracefulExit('SIGINT'));
+process.on('SIGTERM', () => gracefulExit('SIGTERM'));
+// nodemon redémarre avec SIGUSR2 : on sauvegarde puis on laisse le signal tuer le processus
+process.once('SIGUSR2', async () => {
+    await saveAllToAtlasBeforeExit();
+    process.kill(process.pid, 'SIGUSR2');
+});
 const processedMsgIds = new Map(); // msgId → timestamp
 const MSG_TTL = 10 * 60 * 1000;   // 10 minutes par message
 setInterval(() => {
@@ -143,7 +161,7 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
+import { saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
 import { isOwnerSender, ensureBotModeFile } from './utils/botmode.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
@@ -159,6 +177,31 @@ import { getWelcomeConfig } from './utils/welcome.js';
 import { isCaptchaEnabled, createChallenge } from './utils/captcha.js';
 import { log as logGroupAction } from './utils/grouplogs.js';
 const sessions = new Map();
+
+// Sauvegarde Atlas : au plus une fois toutes les 2 heures par session.
+// Les fichiers locaux restent la source de vérité ; Mongo n'est qu'une copie.
+const MONGO_BACKUP_INTERVAL_MS = 2 * 60 * 60 * 1000;
+async function backupIfDue(st, number = st?.connectedNumber) {
+    if (!st?.authPath || !number) return;
+    if (Date.now() - (st.lastMongoBackupAt || 0) < MONGO_BACKUP_INTERVAL_MS) return;
+    st.lastMongoBackupAt = Date.now();
+    await saveSessionMongo(st.id, number, st.authPath).catch(() => {});
+}
+// Restaure depuis Atlas les sessions NON chargées dans ce processus, et seulement
+// si la copie Atlas est plus récente que le disque. Une session active n'est jamais touchée.
+async function restoreSessionsFromAtlas() {
+    const docs = await listSessionsMongo();
+    for (const d of docs) {
+        const id = d._id;
+        if (sessions.has(id)) continue;
+        const r = await restoreSessionFromAtlasIfNewer(id, path.join(SESSIONS_ROOT, id));
+        if (r === 'restored') addLog('success', `[Atlas] Session [${id}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
+    }
+}
+// Vérification toutes les 10 min : sauvegarde seulement si 2h se sont écoulées
+setInterval(() => {
+    for (const st of sessions.values()) backupIfDue(st).catch(() => {});
+}, 10 * 60 * 1000).unref?.();
 global.sessions = sessions; // exposé pour que les commandes accèdent aux sockets de toutes les sessions
 const logs = [];
 const activeSocketByNumber = new Map(); // number -> { sessionId, sock }
@@ -281,7 +324,7 @@ async function startSession(sessionId, phoneNumber = null) {
         browser: ['Ubuntu','Chrome','20.0.0'],
         syncFullHistory: false, markOnlineOnConnect: true,
         connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
-        retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 25000,
+        retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 60000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
     });
 
@@ -295,10 +338,22 @@ async function startSession(sessionId, phoneNumber = null) {
             // réception des messages, comme observé). Si sendMessage reste
             // bloqué (connexion dégradée), ça lève une erreur au lieu de
             // bloquer indéfiniment la commande en cours.
-            const result = await Promise.race([
-                _origSendMessage(jid, content, options),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000)),
-            ]);
+            const t0 = Date.now();
+            if (!sock.__sentJids) sock.__sentJids = new Set();
+            const firstToJid = !sock.__sentJids.has(jid);
+            sock.__sentJids.add(jid);
+            let timer;
+            let result;
+            try {
+                result = await Promise.race([
+                    _origSendMessage(jid, content, options),
+                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000); }),
+                ]);
+            } finally {
+                clearTimeout(timer);
+                const dt = Date.now() - t0;
+                if (dt > 3000) addLog('warn', `[${sessionId}] envoi lent ${(dt/1000).toFixed(1)}s vers ${jid?.endsWith('@g.us') ? 'groupe' : 'privé'} (1er envoi vers ce chat: ${firstToJid})`);
+            }
             try {
                 if (jid && jid.endsWith('@g.us') && result?.key) {
                     if (!global.botMessages.has(jid)) global.botMessages.set(jid, []);
@@ -330,8 +385,7 @@ async function startSession(sessionId, phoneNumber = null) {
 
     sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
         await saveCreds(); // Écriture disque local
-        await saveSessionMongo(state.id, state.connectedNumber || state.id, state.authPath).catch(() => {});
-        scheduleSave(state.id, state.connectedNumber || state.id, state.authPath);
+        // Mongo n'est plus écrit ici (trop fréquent) : sauvegarde Atlas toutes les 2h via backupIfDue
         try {
             const sessionData = readSessionFiles(state.authPath);
             if (Object.keys(sessionData).length > 0)
@@ -367,6 +421,7 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     sock.ev.on('messages.reaction', async (events) => {
+        const OWNER = (state.connectedNumber || sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
         for (const { key, reaction } of events) {
             try {
                 if (!reaction?.text) continue;          // réaction retirée → ignorer
@@ -583,7 +638,9 @@ async function startSession(sessionId, phoneNumber = null) {
                 // on ne quitte PAS: continuation sur le même socket → réponse immédiate
             }
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
+// ⏳ PRÉCHAUFFAGE DIFFÉRÉ des groupes : le bot répond immédiatement, les métadonnées chargent en arrière-plan
             (async () => {
+                await new Promise(r => setTimeout(r, 30_000)); // attendre 30s avant de charger les groupes
                 try {
                     const allGroups = await sock.groupFetchAllParticipating();
                     let count = 0;
@@ -591,9 +648,9 @@ async function startSession(sessionId, phoneNumber = null) {
                         state.groupMetaCache.set(jid, meta);
                         count++;
                     }
-                    addLog('info', `[${state.id}] Cache métadonnées de groupe préchauffé (${count} groupe(s))`);
+                    // Log silencieux pour éviter le spam — la première commande sera rapide
                 } catch (e) {
-                    addLog('warn', `[${state.id}] Préchauffage groupMetaCache: ${e.message}`);
+                    // Silencieux — pas d'erreur critique si le chargage est retardé
                 }
             })();
             try {
@@ -609,7 +666,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     state.sessionString = sStr;
                 }
             } catch {}
-            try { await saveSessionMongo(state.id, num, state.authPath); } catch(e) { addLog('warn', `[MongoDB] saveSession: ${e.message}`); }
+            await backupIfDue(state, num).catch(e => addLog('warn', `[MongoDB] saveSession: ${e.message}`));
             if (state.pingInterval) clearInterval(state.pingInterval);
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
@@ -708,6 +765,9 @@ async function startSession(sessionId, phoneNumber = null) {
             }
             if (msg.key.remoteJid === 'status@broadcast') continue;
             state.lastActivity = Date.now();
+            if (type === 'notify') {
+                addLog('info', `[${state.id}] MSG reçu (temps réel) chat=${msg.key.remoteJid} fromMe=${msg.key.fromMe} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
+            }
             const msgId = msg.key.id;
             if (!msgId || processedMsgIds.has(msgId)) continue;
             processedMsgIds.set(msgId, Date.now());
@@ -1057,25 +1117,14 @@ setInterval(async () => {
             state.lastActivity = now;
         }
 
-        try {
-            await state.sock.sendPresenceUpdate('available');
-            state.lastPing = new Date().toISOString();
-        } catch (e) {
-            addLog('warn', `[Watchdog] [${id}] sendPresence échoué: ${e.message} — reconnexion`);
-            if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
-            if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
-            state.connection = 'close';
-            try { state.sock.ws?.close(); } catch {}
-            try { state.sock.end(); } catch {}
-            scheduleReconnect(id, 5000);
-        }
+        // Présence gérée par pingInterval (30s) — le watchdog ne relance jamais une session pour ça.
     }
 }, WATCHDOG_INTERVAL);
 async function loadExistingSessions() {
     let sessionsToStart = [];
     const mongoOk = await connectMongo();
     if (mongoOk) {
-        const db = getMongoDb();
+        const db = null; // verrou Mongo désactivé : une seule instance, Mongo = sauvegarde seulement
         const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
         const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000'); // 60s
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
@@ -1138,12 +1187,11 @@ async function loadExistingSessions() {
                 console.log('[Process] ✅ Flush terminé');
             } catch {}
             try { await releaseLock({ db, lockName, ownerId }); } catch {}
-            cleanupTempSessions();
+            await saveAllToAtlasBeforeExit();
             process.exit(0);
         };
 
-        process.on('SIGINT',  () => shutdown('SIGINT'));
-        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        // SIGINT/SIGTERM sont gérés au niveau du module (sauvegarde Atlas finale, même sans Mongo au démarrage)
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
         if (count > 0) {
@@ -1415,6 +1463,8 @@ button:hover{background:#1fb858}
         const token = genToken();
         dashSessions.set(token, { ip, expires: Date.now()+SESSION_TTL });
         addLog('success', `[Auth] Connexion dashboard depuis ${ip}`);
+        // Restauration depuis Atlas en arrière-plan (ne retarde pas la connexion)
+        restoreSessionsFromAtlas().catch(e => addLog('warn', `[Atlas] Restauration: ${e.message}`));
         const cookieFlags = [`dash_token=${token}`,'HttpOnly','SameSite=Strict',`Max-Age=${Math.floor(SESSION_TTL/1000)}`,'Path=/',...(IS_HTTPS?['Secure']:[])].join('; ');
         res.writeHead(302, { Location:'/', 'Set-Cookie': cookieFlags, ...SECURITY_HEADERS });
         return res.end();
@@ -1489,6 +1539,14 @@ button:hover{background:#1fb858}
         const result = await deleteAllSessionsMongo().catch(e => ({ deleted: 0, error: e.message }));
         addLog('info', `Purge totale : ${ids.length} session(s) locale(s), ${result.deleted||0} en MongoDB (IP: ${ip})`);
         return sendJson(res, { ok:true, sessionsCleared: ids.length, mongoDeleted: result.deleted||0 });
+    }
+
+    // GET /api/sessions/backup-now — sauvegarde immédiate de toutes les sessions vers Atlas
+    // (à lancer avant de toucher au disque). Protégé par l'authentification dashboard.
+    if (pathname==='/api/sessions/backup-now' && method==='GET') {
+        const saved = await saveAllActiveSessions(sessions);
+        addLog('success', `[Backup] Sauvegarde manuelle vers Atlas : ${saved} session(s) (IP: ${ip})`);
+        return sendJson(res, { ok:true, saved });
     }
 
     const smatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
@@ -1605,7 +1663,10 @@ button:hover{background:#1fb858}
     } catch (e) {
         addLog('error', `[HTTP] Exception non gérée sur ${method} ${pathname}: ${e.message}`);
         try {
-            if (!res.headersSent) return sendJson(res, { error: 'Erreur serveur interne', detail: e.message }, 500);
+            if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Erreur serveur interne' }));
+            }
         } catch {}
     }
 }).listen(PORT, BIND_HOST, () => {

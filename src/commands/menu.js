@@ -55,7 +55,7 @@ ${P}wordle — Devine le mot en 6 essais
 ${P}imagine [style?] [texte] — Génération image IA avancée
 ${P}imagine styles — Voir les styles disponibles
 ${P}sticker (alias ${P}s) — Créer sticker
-${P}vo (alias ${P}jolie) — Extraire vue unique
+${P}vo — Extraire vue unique
 ${P}pp [@quelqu'un] — Photo de profil
 ${P}avatar [nom] — Générer un avatar unique basé sur un nom
 ${P}caption [texte] — Ajouter un texte stylisé sur une image

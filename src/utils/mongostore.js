@@ -17,6 +17,7 @@ import fse  from 'fs-extra';
 import path from 'path';
 import { MongoClient } from 'mongodb';
 import os from 'os';
+import { fileURLToPath } from 'url';
 
 const DB_NAME    = 'laluxurebot';
 const COLLECTION = 'sessions';
@@ -25,7 +26,10 @@ let client     = null;
 let collection = null;
 let connected  = false;
 let memCache   = new Map(); // Chaque sessionId → { number, files, updatedAt }
-const TEMP_DIR = path.join(os.tmpdir(), 'wa-bot-sessions');
+// Même dossier local que index.js (SESSIONS_ROOT). Mongo ne fait que sauvegarder.
+const TEMP_DIR = process.env.SESSIONS_DIR
+    ? path.resolve(process.env.SESSIONS_DIR)
+    : path.join(path.dirname(fileURLToPath(import.meta.url)), '../../data/sessions');
 
 // Expose des accès read-only pour réutiliser le client Mongo ailleurs (lock d'instance, etc.)
 export function getMongoClient() {
@@ -170,18 +174,21 @@ export async function saveSessionMongo(sessionId, number, authPath) {
         // sessions du même numéro à chaque sauvegarde (catastrophique en cas de doublon)
         // L'unicité est gérée manuellement depuis le dashboard
 
-        // Sauvegarder en BD
-        await collection.updateOne(
+        // Sauvegarder en BD AVEC timeout pour bloquer pas plus de 3s
+        const RESULT = await collection.updateOne(
             { _id: sessionId },
             { $set: { _id: sessionId, number, files, updatedAt: new Date() } },
-            { upsert: true }
+            { upsert: true, maxTimeMS: 3000 }  // ⛔ Max 3 secondes avant d'abandonner
         );
         
-        // Mettre à jour le cache mémoire aussi
+        // Mettre à jour le cache mémoire aussi (toujours, même si BD a échoué)
         memCache.set(sessionId, { number, files, updatedAt: new Date() });
         
-        return true;
+        // Retourner true si la DB a répondu dans les 3s, mais on continue quand même
+        return RESULT.acknowledged ? true : false;
     } catch (e) {
+        // Erreur MongoDB — on vide le cache mémoire pour forcer recalcul prochain fois
+        memCache.delete(sessionId);
         console.error(`[MongoDB] ❌ saveSession [${sessionId}]:`, e.message);
         return false;
     }
@@ -237,38 +244,24 @@ export async function restoreAllSessions(sessionsRoot) {
             sessionsByNumber[number].push({ id: sessionId, updatedAt: cached.updatedAt || new Date(0) });
         }
 
-        const skippedIds = new Set();
+        // Mongo = SAUVEGARDE. On restaure depuis Mongo UNIQUEMENT les sessions absentes
+        // localement : les fichiers locaux ne sont jamais écrasés, et rien n'est supprimé.
         for (const [number, entries] of Object.entries(sessionsByNumber)) {
-            if (entries.length > 1) {
-                // Trier par updatedAt décroissant → garder le plus récent
-                entries.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-                const kept = entries[0];
-                const dups = entries.slice(1);
-                console.log(`[MongoDB] ⚠️  ${entries.length} sessions pour [${number}] — garde [${kept.id}], supprime: ${dups.map(d => d.id).join(', ')}`);
-                for (const dup of dups) {
-                    skippedIds.add(dup.id);
-                    try {
-                        await collection.deleteOne({ _id: dup.id });
-                        memCache.delete(dup.id);
-                    } catch (e) {
-                        console.warn(`[MongoDB] Suppression doublon [${dup.id}]: ${e.message}`);
-                    }
-                }
-            }
+            if (entries.length > 1) console.log(`[MongoDB] ⚠️  ${entries.length} sessions pour [${number}] — aucune suppression automatique`);
         }
 
-        // Restaure uniquement les sessions non-dupliquées
         for (const sessionId of memCache.keys()) {
-            if (skippedIds.has(sessionId)) continue; // ignorer les doublons sans supprimer
+            const localDir = path.join(sessionsRoot, sessionId);
+            if (fs.existsSync(path.join(localDir, 'creds.json'))) {
+                console.log(`[MongoDB] Session [${sessionId}] présente localement — conservée`);
+                continue;
+            }
             const cached = memCache.get(sessionId);
-            const authPath = path.join(TEMP_DIR, sessionId);
-            
             try {
-                // Toujours écraser depuis MongoDB — vider le dossier TEMP avant de restaurer
-                fse.removeSync(authPath);
-                fse.ensureDirSync(authPath);
-                writeSessionFiles(authPath, cached.files);
-                console.log(`[MongoDB] ✅ Session [${sessionId}] (${cached.number}) restaurée en TEMP`);
+                fse.removeSync(localDir);
+                fse.ensureDirSync(localDir);
+                writeSessionFiles(localDir, cached.files);
+                console.log(`[MongoDB] ✅ Session [${sessionId}] restaurée depuis la sauvegarde`);
                 count++;
             } catch (e) {
                 console.error(`[MongoDB] ❌ Restauration [${sessionId}]:`, e.message);
@@ -315,6 +308,22 @@ export async function deleteAllSessionsMongo() {
 // ─────────────────────────────────────────────
 // LIST — Liste toutes les sessions en base
 // ─────────────────────────────────────────────
+// Restaure une session depuis Atlas UNIQUEMENT si la copie Atlas est plus récente
+// que les fichiers du disque. Le disque ne perd donc jamais des identifiants plus frais.
+export async function restoreSessionFromAtlasIfNewer(sessionId, localDir) {
+    if (!connected || !collection) return 'no-db';
+    const doc = await collection.findOne({ _id: sessionId }, { projection: { files: 1, updatedAt: 1 } }).catch(() => null);
+    if (!doc?.files) return 'absent';
+    const localCreds = path.join(localDir, 'creds.json');
+    const localTime = fs.existsSync(localCreds) ? fs.statSync(localCreds).mtimeMs : 0;
+    const remoteTime = new Date(doc.updatedAt).getTime() || 0;
+    if (remoteTime <= localTime) return 'local-newer';
+    fse.removeSync(localDir);
+    fse.ensureDirSync(localDir);
+    writeSessionFiles(localDir, doc.files);
+    return 'restored';
+}
+
 export async function listSessionsMongo() {
     if (!connected || !collection) return [];
     try {

@@ -7,6 +7,8 @@ bot-final.zip
 session.zip
 bot.zip
 bot-.zip
+data/
+downloads/
 # Variables sensibles
 .env
 env.txt
