@@ -351,7 +351,7 @@ async function startSession(sessionId, phoneNumber = null) {
             try {
                 result = await Promise.race([
                     _origSendMessage(jid, content, options),
-                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000); }),
+                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (5min)')), 330_000); }),
                 ]);
             } finally {
                 clearTimeout(timer);

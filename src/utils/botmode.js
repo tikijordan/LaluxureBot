@@ -56,10 +56,11 @@ export function isOwnerSender({ fromMe, senderNumber, senderLid, owner, ownerLid
 }
 
 /** Peut-on traiter les commandes de cet expéditeur ? */
-export function canUseBot(isOwner, isGroup = false, senderNumber) {
+export function canUseBot(isOwner, isGroup = false, senderNumber, ownerNumber) {
   if (isOwner === true) return true;
-  // 2e chance : si le numéro de l'expéditeur match le propriétaire directement
-  if (senderNumber && normalizeNumber(senderNumber) === normalizeNumber(process.env.OWNER_NUMBER)) return true;
+  // Utilisation du propriétaire passé en paramètre (numéro de session connectée)
+  // Au lieu du global process.env.OWNER_NUMBER pour supporter plusieurs sessions
+  if (ownerNumber && senderNumber && normalizeNumber(senderNumber) === normalizeNumber(ownerNumber)) return true;
   return ALLOW_GROUP_ADMINS && isGroup === true;
 }
 
