@@ -13,7 +13,9 @@ import makeWASocket, {
     DisconnectReason,
     getContentType,
     downloadContentFromMessage,
+ WAMessageStubType,
 } from '@whiskeysockets/baileys';
+import { isAntideleteEnabled } from './commands/security.js';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcodeterminal from 'qrcode-terminal';
@@ -326,6 +328,8 @@ async function startSession(sessionId, phoneNumber = null) {
         connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
         retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 60000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
+        // Indispensable au déchiffrement des votes de sondage (sans ça, aucun vote n'est compté)
+        getMessage: async (key) => global.pollStore?.get(key?.id)?.msg?.message || undefined,
     });
 
     state.sock = sock;
@@ -417,6 +421,66 @@ async function startSession(sessionId, phoneNumber = null) {
         if (ownerNum && pnNum === ownerNum && state.ownerLid !== lidNum) {
             state.ownerLid = lidNum;
             addLog('info', `[${state.id}] ownerLid corrigé via lid-mapping.update: ${lidNum}`);
+        }
+    });
+
+    async function resendDeletedMessage(sock, chat, origMsg, deleterJid, ownerNumber) {
+        // Le message est renvoyé dans la conversation personnelle du propriétaire
+        const to = `${ownerNumber}@s.whatsapp.net`;
+        const raw = origMsg.message?.ephemeralMessage?.message || origMsg.message || {};
+        const who = deleterJid.split('@')[0].split(':')[0];
+        let where = 'dans une conversation privée';
+        if (chat.endsWith('@g.us')) {
+            const subject = state.groupMetaCache?.get(chat)?.subject
+                || await sock.groupMetadata(chat).then(m => m.subject).catch(() => null)
+                || chat.split('@')[0];
+            where = `dans le groupe "${subject}"`;
+        }
+        const pseudo = state.pushNames?.get(deleterJid)
+            || ((origMsg.key?.participant || origMsg.key?.remoteJid) === deleterJid ? origMsg.pushName : null)
+            || who;
+        const text = raw.conversation || raw.extendedTextMessage?.text || '';
+        const mediaType = ['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage']
+            .find(t => raw[t]);
+        const header = `🗑️ *Message supprimé* ${where}\n👤 Supprimé par : *${pseudo}* (${who})`;
+        if (!mediaType) {
+            if (!text) return;
+            await sock.sendMessage(to, { text: `${header}\n\n${text}` });
+            return;
+        }
+        const kind = mediaType.replace('Message', '');
+        const stream = await downloadContentFromMessage(raw[mediaType], kind);
+        const chunks = [];
+        for await (const c of stream) chunks.push(c);
+        const buffer = Buffer.concat(chunks);
+        const caption = `${header}${raw[mediaType].caption ? `\n\n${raw[mediaType].caption}` : ''}`;
+        if (kind === 'image') await sock.sendMessage(to, { image: buffer, caption });
+        else if (kind === 'video') await sock.sendMessage(to, { video: buffer, caption });
+        else if (kind === 'audio') await sock.sendMessage(to, { audio: buffer, mimetype: raw.audioMessage.mimetype || 'audio/ogg; codecs=opus', ptt: !!raw.audioMessage.ptt });
+        else if (kind === 'sticker') await sock.sendMessage(to, { sticker: buffer });
+        else await sock.sendMessage(to, { document: buffer, mimetype: raw.documentMessage.mimetype || 'application/octet-stream', fileName: raw.documentMessage.fileName || 'fichier', caption });
+    }
+
+    sock.ev.on('messages.update', (updates) => {
+        for (const { key, update } of updates) {
+            // ── Anti-delete : message supprimé par un membre → on le renvoie dans le groupe ──
+            if (update?.messageStubType === WAMessageStubType.REVOKE) {
+                const chat = key?.remoteJid;
+                const deleter = update.key?.participant || update.key?.remoteJid || '';
+                // Toutes les conversations (groupes et privés). Les suppressions faites
+                // par le bot ou par toi-même (fromMe) sont ignorées.
+                if (chat && !update.key?.fromMe && isAntideleteEnabled()) {
+                    const cached = state.msgCache?.get(key.id);
+                    if (!cached) { addLog('warn', `[${state.id}] Anti-delete: message supprimé inconnu du cache (id=${key.id})`); }
+                    else {
+                        resendDeletedMessage(sock, chat, cached.msg, deleter, state.connectedNumber).catch(e => addLog('warn', `[${state.id}] Anti-delete: ${e.message}`));
+                    }
+                }
+                continue;
+            }
+            if (!update?.pollUpdates?.length) continue;
+            const poll = global.pollStore?.get(key?.id);
+            if (poll && !poll.closed) poll.updates.push(...update.pollUpdates);
         }
     });
 
@@ -886,6 +950,11 @@ async function startSession(sessionId, phoneNumber = null) {
                     state.msgCache.set(msg.key.id, {
                         msg, senderNumber, senderJid, isGroup, from, rawJid, ts: Date.now(),
                     });
+                    // Pseudo WhatsApp de l'expéditeur (utilisé par l'anti-delete)
+                    if (msg.pushName) {
+                        if (!state.pushNames) state.pushNames = new Map();
+                        state.pushNames.set(msg.key.participant || msg.key.remoteJid, msg.pushName);
+                    }
                     if (state.msgCache.size > 2000) {
                         const oldestKey = state.msgCache.keys().next().value;
                         state.msgCache.delete(oldestKey);

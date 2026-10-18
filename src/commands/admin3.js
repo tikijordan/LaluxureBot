@@ -23,12 +23,97 @@
 import { addVip, removeVip, isVip, getVipList } from '../utils/vip.js';
 import { logAction, getHistory, clearHistory } from '../utils/history.js';
 import { addSchedule, getPendingSchedules, cancelSchedule } from '../utils/schedule.js';
+import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
+
+// Sondages natifs : message envoyé (pour le déchiffrement des votes) + votes reçus
+if (!global.pollStore) global.pollStore = new Map();   // pollMsgId → { msg, updates: [], closed }
+if (!global.pollByGroup) global.pollByGroup = new Map(); // groupJid → pollMsgId
+// Statut réel des actions sur les membres (intégré — aucun fichier séparé)
+const GROUP_STATUS_MESSAGES = {
+  '400': 'Requête invalide.',
+  '401': 'Non autorisé — vérifiez que le bot est bien administrateur.',
+  '403': 'Action refusée (confidentialité du membre ou droits insuffisants).',
+  '404': 'Membre introuvable ou déjà absent du groupe.',
+  '408': 'Délai dépassé (timeout WhatsApp).',
+  '409': 'Conflit — action déjà effectuée.',
+  '500': 'Erreur interne WhatsApp.',
+};
+
+/**
+ * Exécute groupParticipantsUpdate pour UN participant et retourne
+ * un résultat structuré et fiable.
+ *
+ * @returns {Promise<{ok: boolean, status: string|null, reason: string|null}>}
+ */
+export async function updateGroupParticipant(sock, from, jid, action) {
+  try {
+    const result = await sock.groupParticipantsUpdate(from, [jid], action);
+    const status = result?.[0]?.status != null ? String(result[0].status) : null;
+
+    // Certaines versions de Baileys ne renvoient pas de status du tout
+    // (tableau vide/undefined) : dans ce cas on considère l'appel comme
+    // ayant réussi UNIQUEMENT s'il n'a pas levé d'exception, mais on le
+    // signale comme "non confirmé" plutôt que "confirmé".
+    if (status === null) {
+      return { ok: true, status: null, reason: null, unconfirmed: true };
+    }
+
+    if (status === '200') {
+      return { ok: true, status, reason: null };
+    }
+
+    return { ok: false, status, reason: GROUP_STATUS_MESSAGES[status] || `Statut ${status} (échec).` };
+  } catch (err) {
+    return { ok: false, status: null, reason: err?.message || 'Erreur inconnue.' };
+  }
+}
+
 
 // Timers pour les expulsions temporaires
 const tempKickTimers = new Map();
 
+
+function currentPoll(groupJid) {
+  const id = global.pollByGroup.get(groupJid);
+  return id ? global.pollStore.get(id) : null;
+}
+
+async function createNativePoll({ sock, from, isGroup, text, sender }, selectableCount) {
+  if (!checkGroup(sock, from, isGroup)) return;
+  const parts = (text || '').split('|').map(p => p.trim()).filter(Boolean);
+  if (parts.length < 3) {
+    await sock.sendMessage(from, { text: '*Usage:* !poll Question | Option1 | Option2 ...\nExemple: !poll Opencode est bien ? | Oui | Non' });
+    return;
+  }
+  const question = parts[0];
+  const options = [...new Set(parts.slice(1))].slice(0, 12);
+  if (options.length < 2) { await sock.sendMessage(from, { text: 'Il faut au moins 2 options différentes.' }); return; }
+
+  const sent = await sock.sendMessage(from, { poll: { name: question, values: options, selectableCount } });
+  if (!sent?.key?.id) return;
+  global.pollStore.set(sent.key.id, { msg: sent, updates: [], closed: false, createdBy: sender, multi: selectableCount === 0 });
+  global.pollByGroup.set(from, sent.key.id);
+}
+
+function pollResults(sock, entry) {
+  const meId = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
+  return getAggregateVotesInPollMessage({ message: entry.msg.message, pollUpdates: entry.updates }, meId);
+}
+
+function formatPollResults(sock, entry, title) {
+  const results = pollResults(sock, entry);
+  const total = new Set(results.flatMap(r => r.voters)).size;
+  const lines = results.map(r => {
+    const n = r.voters.length;
+    const pct = total > 0 ? Math.round((n / total) * 100) : 0;
+    return `${r.name}: *${n}* vote(s) (${pct}%)`;
+  });
+  const mode = entry.multi ? 'plusieurs choix possibles' : 'un seul choix';
+  return `*${title}*\n\n❓ *${entry.msg.message?.pollCreationMessageV3?.name || entry.msg.message?.pollCreationMessage?.name || ''}*\n_(${mode})_\n\n${lines.join('\n')}\n\nTotal: ${total} votant(s)`;
+}
+
 // Stockage des sondages actifs
-const activePolls = new Map(); // jid → { question, options, votes, messageKey }
+const activePolls = new Map(); // (ancien système texte — remplacé) // jid → { question, options, votes, messageKey }
 
 // Signalements en attente
 const reports = new Map(); // groupId → [{ sender, target, reason, date }]
@@ -76,8 +161,15 @@ export default {
         const inviteCode = await sock.groupInviteCode(from);
         const inviteLink = `https://chat.whatsapp.com/${inviteCode}`;
 
-        // Expulser
-        await sock.groupParticipantsUpdate(from, [target], 'remove');
+        // Expulser — on vérifie le statut réel avant d'annoncer un succès
+        const kickResult = await updateGroupParticipant(sock, from, target, 'remove');
+        if (!kickResult.ok) {
+          await sock.sendMessage(from, {
+            text: `❌ Impossible d'expulser @${number}.\n_${kickResult.reason || 'Vérifiez que le bot est admin.'}_`,
+            mentions: [target],
+          });
+          return;
+        }
 
         await sock.sendMessage(from, {
           text: `⏱️ @${number} a été expulsé *temporairement* pour *${minutes} minute(s)*.\nIl sera automatiquement réinvité.\n\n_!tempkick @membre 0 pour annuler_`,
@@ -95,14 +187,14 @@ export default {
 
         // Réinviter après X minutes
         const timer = setTimeout(async () => {
-          try {
-            await sock.groupParticipantsUpdate(from, [target], 'add');
+          const readdResult = await updateGroupParticipant(sock, from, target, 'add');
+          if (readdResult.ok) {
             await sock.sendMessage(from, {
               text: `✅ @${number} peut revenir dans le groupe (expulsion temporaire terminée).`,
               mentions: [target],
             });
-          } catch {
-            // Si l'ajout échoue, envoyer le lien
+          } else {
+            // Si l'ajout échoue (ex: confidentialité), envoyer le lien
             try {
               await sock.sendMessage(target, {
                 text: `✅ Ton expulsion temporaire est terminée ! Rejoins le groupe:\n${inviteLink}`,
@@ -182,20 +274,33 @@ export default {
           text: ` *Broadcast en cours...*\n ${members.length} membre(s) à contacter.\n\n_Cela peut prendre quelques minutes._`,
         });
 
+        const ownLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : null;
+        const ownNum = (sock.user?.id || '').split(':')[0];
         let sent = 0, failed = 0;
+        const failures = [];
         for (const member of members) {
-          if (member.id === sock.user?.id) continue;
+          const rawNum = member.id.split('@')[0].split(':')[0];
+          if (rawNum === ownNum || (ownLid && rawNum === ownLid)) continue;
+          // Les membres sont souvent identifiés par LID : on envoie au vrai numéro si on le connaît
+          let target = member.id;
+          if (member.id.endsWith('@lid')) {
+            const pn = await sock.signalRepository?.lidMapping?.getPNForLID(member.id).catch(() => null);
+            if (pn) target = pn.split(':')[0].split('@')[0] + '@s.whatsapp.net';
+          }
           try {
-            await sock.sendMessage(member.id, {
+            await sock.sendMessage(target, {
               text: ` *Message du groupe "${meta.subject}":*\n\n${text}`,
             });
             sent++;
-            await new Promise(r => setTimeout(r, 1000)); // 1s entre chaque message
-          } catch { failed++; }
+          } catch (e) {
+            failed++;
+            failures.push(`${rawNum}: ${e.message}`);
+          }
+          await new Promise(r => setTimeout(r, 1000)); // 1s entre chaque message
         }
 
         await sock.sendMessage(from, {
-          text: ` *Broadcast terminé !*\n Envoyés: ${sent}\n Échecs: ${failed}`,
+          text: ` *Broadcast terminé !*\n Envoyés: ${sent}\n Échecs: ${failed}` + (failures.length ? `\n\n_Échecs (10 premiers):_\n${failures.slice(0, 10).join('\n')}` : ''),
         });
       } catch (err) {
         await sock.sendMessage(from, { text: ` Erreur: ${err.message}` });
@@ -204,57 +309,15 @@ export default {
   },
 
   poll: {
-    description: 'Créer un sondage dans le groupe',
+    description: 'Créer un sondage WhatsApp (un seul choix)',
     adminOnly: false,
-    execute: async ({ sock, msg, from, isGroup, sender, text, args }) => {
-      if (!checkGroup(sock, from, isGroup)) return;
+    execute: async (ctx) => createNativePoll(ctx, 1),
+  },
 
-      // Format: !poll Question | Option1 | Option2 | Option3
-      const parts = text.split('|').map(p => p.trim()).filter(Boolean);
-
-      if (parts.length < 3) {
-        await sock.sendMessage(from, {
-          text: ` *Usage:* !poll [Question] | [Option1] | [Option2] | ...\n\nExemple:\n!poll Quelle est votre couleur préférée? | Rouge | Bleu | Vert | Jaune`,
-        });
-        return;
-      }
-
-      const question = parts[0];
-      const options = parts.slice(1).slice(0, 12); // max 12 options
-      const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔢','🔣'];
-
-      let pollText = ` *SONDAGE*\n\n *${question}*\n\n`;
-      options.forEach((opt, i) => { pollText += `${emojis[i]} ${opt}\n`; });
-      pollText += `\n_Réponds avec le numéro de ton choix (1, 2, 3...)_\n_Sondage créé par @${sender.split('@')[0]}_`;
-
-      const sentMsg = await sock.sendMessage(from, { text: pollText, mentions: [sender] });
-
-      // Stocker le sondage
-      activePolls.set(from, {
-        question,
-        options,
-        votes: {},
-        createdBy: sender,
-        messageKey: sentMsg?.key,
-        createdAt: new Date().toISOString(),
-      });
-
-      // Fermeture auto après 24h
-      setTimeout(() => {
-        if (activePolls.has(from)) {
-          const poll = activePolls.get(from);
-          const results = options.map((opt, i) => {
-            const count = Object.values(poll.votes).filter(v => v === i).length;
-            return { opt, count };
-          }).sort((a, b) => b.count - a.count);
-
-          sock.sendMessage(from, {
-            text: ` *Sondage terminé (24h)*\n\n ${question}\n\n${results.map((r, i) => `${emojis[i]} ${r.opt}: *${r.count} vote(s)*`).join('\n')}\n\n Gagnant: *${results[0].opt}*`,
-          }).catch(() => {});
-          activePolls.delete(from);
-        }
-      }, 24 * 60 * 60 * 1000);
-    },
+  pollm: {
+    description: 'Créer un sondage WhatsApp (plusieurs choix)',
+    adminOnly: false,
+    execute: async (ctx) => createNativePoll(ctx, 0),
   },
 
   pollresult: {
@@ -262,22 +325,9 @@ export default {
     adminOnly: false,
     execute: async ({ sock, from, isGroup }) => {
       if (!checkGroup(sock, from, isGroup)) return;
-      const poll = activePolls.get(from);
-      if (!poll) {
-        await sock.sendMessage(from, { text: ' Aucun sondage en cours.\nUtilise !poll pour en créer un.' });
-        return;
-      }
-      const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
-      const totalVotes = Object.keys(poll.votes).length;
-      const results = poll.options.map((opt, i) => {
-        const count = Object.values(poll.votes).filter(v => v === i).length;
-        const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
-        const bar = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
-        return `${emojis[i]} ${opt}\n   ${bar} ${count} vote(s) (${pct}%)`;
-      });
-      await sock.sendMessage(from, {
-        text: ` *Résultats en direct*\n\n *${poll.question}*\n\n${results.join('\n\n')}\n\n Total: ${totalVotes} vote(s)\n_!closepoll pour fermer_`,
-      });
+      const entry = currentPoll(from);
+      if (!entry) { await sock.sendMessage(from, { text: 'Aucun sondage en cours.\nUtilise !poll pour en créer un.' }); return; }
+      await sock.sendMessage(from, { text: formatPollResults(sock, entry, 'Résultats en direct') });
     },
   },
 
@@ -286,23 +336,11 @@ export default {
     adminOnly: true,
     execute: async ({ sock, from, isGroup }) => {
       if (!checkGroup(sock, from, isGroup)) return;
-      const poll = activePolls.get(from);
-      if (!poll) { await sock.sendMessage(from, { text: ' Aucun sondage en cours.' }); return; }
-      const emojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
-      const totalVotes = Object.keys(poll.votes).length;
-      const results = poll.options.map((opt, i) => {
-        const count = Object.values(poll.votes).filter(v => v === i).length;
-        const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
-        return `${emojis[i]} ${opt}: *${count} vote(s)* (${pct}%)`;
-      }).sort((a, b) => {
-        const ca = Object.values(poll.votes).filter(v => v === poll.options.indexOf(a.split(' ')[1])).length;
-        const cb = Object.values(poll.votes).filter(v => v === poll.options.indexOf(b.split(' ')[1])).length;
-        return cb - ca;
-      });
-      await sock.sendMessage(from, {
-        text: ` *Sondage fermé !*\n\n❓ *${poll.question}*\n\n${results.join('\n')}\n\n Total: ${totalVotes} vote(s)`,
-      });
-      activePolls.delete(from);
+      const entry = currentPoll(from);
+      if (!entry) { await sock.sendMessage(from, { text: 'Aucun sondage en cours.' }); return; }
+      entry.closed = true;
+      global.pollByGroup.delete(from);
+      await sock.sendMessage(from, { text: formatPollResults(sock, entry, 'Sondage fermé') });
     },
   },
 
@@ -477,35 +515,24 @@ export default {
     execute: async ({ sock, from, isGroup, args }) => {
       if (!checkGroup(sock, from, isGroup)) return;
       const count = Math.min(parseInt(args[0]) || 5, 50);
-      // FIX: !purge ne regardait que global.botMessages (messages envoyés
-      // par le bot lui-même), qui est vide la plupart du temps — d'où
-      // l'impression que la commande "ne donne rien". WhatsApp autorise un
-      // admin à supprimer les messages de N'IMPORTE QUI dans le groupe ;
-      // on utilise maintenant l'historique complet du groupe.
-      const msgs = global.groupMsgHistory?.get(from) || [];
-
-      if (msgs.length === 0) {
-        await sock.sendMessage(from, { text: ' Aucun message récent à supprimer (historique vide, redémarre le bot ou attends de nouveaux messages).' });
-        return;
-      }
+      const msgs = global.botMessages?.get(from) || [];
 
       await sock.sendMessage(from, { text: ` Suppression de ${count} message(s) en cours...` });
 
-      let deleted = 0, failed = 0;
+      let deleted = 0;
+      // Supprimer les messages du bot d'abord (les seuls qu'on peut supprimer)
       const toDelete = msgs.slice(-count);
       for (const key of toDelete) {
         try {
           await sock.sendMessage(from, { delete: key });
           deleted++;
-          await new Promise(r => setTimeout(r, 250));
-        } catch { failed++; }
+          await new Promise(r => setTimeout(r, 200));
+        } catch {}
       }
 
-      global.groupMsgHistory.set(from, msgs.slice(0, -count));
-      const note = failed > 0
-        ? `\n\n_${failed} message(s) trop ancien(s) ou déjà supprimé(s) — WhatsApp limite la suppression dans le temps._`
-        : '';
-      await sock.sendMessage(from, { text: ` *${deleted} message(s) supprimé(s).*${note}` });
+      // Vider le cache
+      global.botMessages.set(from, msgs.slice(0, -count));
+      await sock.sendMessage(from, { text: ` *${deleted} message(s) supprimé(s).*\n\n_Note: WhatsApp ne permet de supprimer que les messages du bot._` });
     },
   },
 

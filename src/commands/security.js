@@ -17,6 +17,22 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// ── Anti-delete : réglage global (data/antidelete.json) ──
+const ANTIDELETE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../data/antidelete.json');
+function readAntidelete() {
+  try { return JSON.parse(fs.readFileSync(ANTIDELETE_FILE, 'utf-8')); } catch { return {}; }
+}
+export function isAntideleteEnabled() {
+  return readAntidelete().enabled === true;
+}
+function setAntidelete(on) {
+  const data = readAntidelete();
+  data.enabled = on;
+  fs.mkdirSync(path.dirname(ANTIDELETE_FILE), { recursive: true });
+  fs.writeFileSync(ANTIDELETE_FILE, JSON.stringify(data, null, 2));
+}
+
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mode du bot : géré uniquement par utils/botmode.js
@@ -25,6 +41,21 @@ import { getBotMode, setBotMode } from '../utils/botmode.js';
 export default {
 
   // ── ANTI-SPAM ───────────────────────────────────────────────
+  antidelete: {
+    description: 'Activer/désactiver la récupération des messages supprimés (toutes les conversations)',
+    adminOnly: true,
+    execute: async ({ sock, from, args }) => {
+      const action = (args[0] || '').toLowerCase();
+      if (!['on', 'off'].includes(action)) {
+        const on = isAntideleteEnabled();
+        await sock.sendMessage(from, { text: `🗑️ *Anti-delete* (toutes les conversations)\n\nStatut: ${on ? 'Activé' : 'Désactivé'}\n\n• !antidelete on → Activer\n• !antidelete off → Désactiver\n\n_Quand quelqu'un supprime un message, il est renvoyé dans ta conversation personnelle._` });
+        return;
+      }
+      setAntidelete(action === 'on');
+      await sock.sendMessage(from, { text: action === 'on' ? '✅ Anti-delete activé.' : '❌ Anti-delete désactivé.' });
+    },
+  },
+
   antispam: {
     description: 'État de l\'anti-spam',
     execute: async ({ sock, from }) => {

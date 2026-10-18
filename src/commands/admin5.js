@@ -26,6 +26,66 @@ import { addToWhitelist, removeFromWhitelist, isWhitelisted, getWhitelist } from
 import { log, getLogs, clearLogs } from '../utils/grouplogs.js';
 import { enableCaptcha, disableCaptcha, isCaptchaEnabled, createChallenge } from '../utils/captcha.js';
 import { getGroupStats } from '../utils/groupstats.js';
+// Statut réel des actions sur les membres (intégré — aucun fichier séparé)
+const GROUP_STATUS_MESSAGES = {
+  '400': 'Requête invalide.',
+  '401': 'Non autorisé — vérifiez que le bot est bien administrateur.',
+  '403': 'Action refusée (confidentialité du membre ou droits insuffisants).',
+  '404': 'Membre introuvable ou déjà absent du groupe.',
+  '408': 'Délai dépassé (timeout WhatsApp).',
+  '409': 'Conflit — action déjà effectuée.',
+  '500': 'Erreur interne WhatsApp.',
+};
+
+/**
+ * Exécute groupParticipantsUpdate pour UN participant et retourne
+ * un résultat structuré et fiable.
+ *
+ * @returns {Promise<{ok: boolean, status: string|null, reason: string|null}>}
+ */
+export async function updateGroupParticipant(sock, from, jid, action) {
+  try {
+    const result = await sock.groupParticipantsUpdate(from, [jid], action);
+    const status = result?.[0]?.status != null ? String(result[0].status) : null;
+
+    // Certaines versions de Baileys ne renvoient pas de status du tout
+    // (tableau vide/undefined) : dans ce cas on considère l'appel comme
+    // ayant réussi UNIQUEMENT s'il n'a pas levé d'exception, mais on le
+    // signale comme "non confirmé" plutôt que "confirmé".
+    if (status === null) {
+      return { ok: true, status: null, reason: null, unconfirmed: true };
+    }
+
+    if (status === '200') {
+      return { ok: true, status, reason: null };
+    }
+
+    return { ok: false, status, reason: GROUP_STATUS_MESSAGES[status] || `Statut ${status} (échec).` };
+  } catch (err) {
+    return { ok: false, status: null, reason: err?.message || 'Erreur inconnue.' };
+  }
+}
+
+import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
+
+// Sondages natifs partagés avec admin3 (même stockage)
+if (!global.pollStore) global.pollStore = new Map();
+if (!global.pollByGroup) global.pollByGroup = new Map();
+
+function votePoll(groupJid) {
+  const id = global.pollByGroup.get(groupJid);
+  return id ? global.pollStore.get(id) : null;
+}
+
+function voteResultsText(sock, entry, title) {
+  const meId = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
+  const results = getAggregateVotesInPollMessage({ message: entry.msg.message, pollUpdates: entry.updates }, meId);
+  const oui = results.find(r => r.name === 'Oui')?.voters.length || 0;
+  const non = results.find(r => r.name === 'Non')?.voters.length || 0;
+  const total = new Set(results.flatMap(r => r.voters)).size;
+  const pct = n => total > 0 ? Math.round((n / total) * 100) : 0;
+  return `*${title}*\n\n❓ *${entry.question}*\n\n✅ Oui: *${oui}* (${pct(oui)}%)\n❌ Non: *${non}* (${pct(non)}%)\n👥 Total: ${total} votant(s)`;
+}
 
 // État en mémoire
 if (!global.automodGroups)    global.automodGroups    = new Set();
@@ -259,41 +319,40 @@ export default {
   },
 
   vote: {
-    description: 'Créer un vote rapide Oui/Non',
+    description: 'Créer un vote WhatsApp Oui/Non (!vote close pour fermer)',
     adminOnly: false,
-    execute: async ({ sock, from, isGroup, sender, args, text }) => {
+    execute: async ({ sock, from, isGroup, sender, text }) => {
       if (!checkGroup(sock, from, isGroup)) return;
+      const open = votePoll(from);
 
-      if (global.activeVotes.has(from)) {
-        const v = global.activeVotes.get(from);
-        const oui = Object.values(v.votes).filter(x=>x===1).length;
-        const non = Object.values(v.votes).filter(x=>x===0).length;
-        const total = oui + non;
-        const ouiPct = total > 0 ? Math.round(oui/total*100) : 0;
-        const nonPct = total > 0 ? Math.round(non/total*100) : 0;
-        await sock.sendMessage(from, {
-          text: `📊 *Vote en cours:*\n❓ ${v.question}\n\n✅ Oui: ${oui} (${ouiPct}%)\n❌ Non: ${non} (${nonPct}%)\n👥 Total: ${total}\n\n_Réponds avec* ✅ *ou* ❌ *pour voter_\n_!vote close pour fermer (admin)_`,
-        });
+      if ((text || '').trim().toLowerCase() === 'close') {
+        if (!open) { await sock.sendMessage(from, { text: 'Aucun vote en cours.' }); return; }
+        open.closed = true;
+        global.pollByGroup.delete(from);
+        await sock.sendMessage(from, { text: voteResultsText(sock, open, 'Vote fermé') });
         return;
       }
 
-      if (!text) { await sock.sendMessage(from, { text: '❌ Usage: !vote [question]\nExemple: !vote Doit-on organiser une réunion ce week-end?' }); return; }
+      if (open && !text) {
+        await sock.sendMessage(from, { text: voteResultsText(sock, open, 'Vote en cours') + '\n\n_!vote close pour fermer (admin)_' });
+        return;
+      }
 
-      global.activeVotes.set(from, { question: text, votes: {}, creator: sender });
-      await sock.sendMessage(from, {
-        text: `🗳️ *VOTE OUVERT*\n\n❓ *${text}*\n\n✅ Réponds avec ✅ pour *OUI*\n❌ Réponds avec ❌ pour *NON*\n\n_!vote pour voir les résultats_\n_!vote close pour fermer (admin)_`,
-      });
+      if (!text) { await sock.sendMessage(from, { text: 'Usage: !vote [question]\nExemple: !vote Doit-on organiser une réunion ce week-end ?' }); return; }
+      if (open) { await sock.sendMessage(from, { text: 'Un vote est déjà en cours. Utilise !vote close pour le fermer.' }); return; }
 
-      // Auto-fermeture après 1h
+      const sent = await sock.sendMessage(from, { poll: { name: text, values: ['Oui', 'Non'], selectableCount: 1 } });
+      if (!sent?.key?.id) return;
+      global.pollStore.set(sent.key.id, { msg: sent, updates: [], closed: false, createdBy: sender, question: text });
+      global.pollByGroup.set(from, sent.key.id);
+
+      // Fermeture automatique après 1h, avec le résultat final
       setTimeout(async () => {
-        if (!global.activeVotes.has(from)) return;
-        const v = global.activeVotes.get(from);
-        const oui = Object.values(v.votes).filter(x=>x===1).length;
-        const non = Object.values(v.votes).filter(x=>x===0).length;
-        await sock.sendMessage(from, {
-          text: `🗳️ *Vote fermé (1h écoulée)*\n\n❓ ${v.question}\n\n✅ Oui: *${oui}*\n❌ Non: *${non}*\n\n🏆 Résultat: *${oui>non?'OUI l\'emporte':'NON l\'emporte'}*`,
-        }).catch(()=>{});
-        global.activeVotes.delete(from);
+        const entry = global.pollStore.get(sent.key.id);
+        if (!entry || entry.closed) return;
+        entry.closed = true;
+        global.pollByGroup.delete(from);
+        await sock.sendMessage(from, { text: voteResultsText(sock, entry, 'Vote fermé (1h écoulée)') }).catch(() => {});
       }, 3600000);
     },
   },
@@ -413,13 +472,11 @@ export default {
         const nonAdmins = meta.participants.filter(p => !p.admin);
         let kicked = 0;
         for (const member of nonAdmins) {
-          try {
-            await sock.groupParticipantsUpdate(from, [member.id], 'remove');
-            kicked++;
-            await new Promise(r => setTimeout(r, 500));
-          } catch {}
+          const r = await updateGroupParticipant(sock, from, member.id, 'remove');
+          if (r.ok) kicked++;
+          await new Promise(res => setTimeout(res, 500));
         }
-        await sock.sendMessage(from, { text: `🚨 *Lockdown effectué*\n✅ Groupe fermé\n👢 ${kicked} membre(s) expulsé(s)\n\n_!lockdown off pour rétablir_` });
+        await sock.sendMessage(from, { text: `🚨 *Lockdown effectué*\n✅ Groupe fermé\n👢 ${kicked} membre(s) réellement expulsé(s)\n\n_!lockdown off pour rétablir_` });
       } catch (err) {
         await sock.sendMessage(from, { text: `❌ Erreur lockdown: ${err.message}` });
       }

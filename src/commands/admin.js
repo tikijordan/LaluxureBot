@@ -25,6 +25,46 @@ import { addWarn, getWarns, resetWarns, getAllWarns } from '../utils/warns.js';
 import { enableAntilink, disableAntilink, isAntilinkEnabled } from '../utils/antilink.js';
 import { setWelcome, setGoodbye, disableWelcome, getWelcomeConfig } from '../utils/welcome.js';
 import { downloadContentFromMessage, getContentType } from '@whiskeysockets/baileys';
+// Statut réel des actions sur les membres (intégré — aucun fichier séparé)
+const GROUP_STATUS_MESSAGES = {
+  '400': 'Requête invalide.',
+  '401': 'Non autorisé — vérifiez que le bot est bien administrateur.',
+  '403': 'Action refusée (confidentialité du membre ou droits insuffisants).',
+  '404': 'Membre introuvable ou déjà absent du groupe.',
+  '408': 'Délai dépassé (timeout WhatsApp).',
+  '409': 'Conflit — action déjà effectuée.',
+  '500': 'Erreur interne WhatsApp.',
+};
+
+/**
+ * Exécute groupParticipantsUpdate pour UN participant et retourne
+ * un résultat structuré et fiable.
+ *
+ * @returns {Promise<{ok: boolean, status: string|null, reason: string|null}>}
+ */
+export async function updateGroupParticipant(sock, from, jid, action) {
+  try {
+    const result = await sock.groupParticipantsUpdate(from, [jid], action);
+    const status = result?.[0]?.status != null ? String(result[0].status) : null;
+
+    // Certaines versions de Baileys ne renvoient pas de status du tout
+    // (tableau vide/undefined) : dans ce cas on considère l'appel comme
+    // ayant réussi UNIQUEMENT s'il n'a pas levé d'exception, mais on le
+    // signale comme "non confirmé" plutôt que "confirmé".
+    if (status === null) {
+      return { ok: true, status: null, reason: null, unconfirmed: true };
+    }
+
+    if (status === '200') {
+      return { ok: true, status, reason: null };
+    }
+
+    return { ok: false, status, reason: GROUP_STATUS_MESSAGES[status] || `Statut ${status} (échec).` };
+  } catch (err) {
+    return { ok: false, status: null, reason: err?.message || 'Erreur inconnue.' };
+  }
+}
+
 
 const MAX_WARNS = parseInt(process.env.MAX_WARNS || '3');
 
@@ -64,14 +104,14 @@ export default {
         await sock.sendMessage(from, { text: ' Usage: !kick @membre\nMentionnez le membre à expulser.' });
         return;
       }
-      try {
-        await sock.groupParticipantsUpdate(from, [target], 'remove');
+      const r = await updateGroupParticipant(sock, from, target, 'remove');
+      if (r.ok) {
         await sock.sendMessage(from, {
           text: ` *${target.split('@')[0]}* a été expulsé du groupe.`,
           mentions: [target],
         });
-      } catch (err) {
-        await sock.sendMessage(from, { text: ` Impossible d'expulser ce membre.\n_Vérifiez que le bot est admin._` });
+      } else {
+        await sock.sendMessage(from, { text: ` Impossible d'expulser ce membre.\n_${r.reason || 'Vérifiez que le bot est admin.'}_` });
       }
     },
   },
@@ -87,18 +127,13 @@ export default {
       }
       const number = text.replace(/[^0-9]/g, '');
       const jid = `${number}@s.whatsapp.net`;
-      try {
-        const result = await sock.groupParticipantsUpdate(from, [jid], 'add');
-        const status = result[0]?.status;
-        if (status === '200') {
-          await sock.sendMessage(from, { text: ` *${number}* a été ajouté au groupe.` });
-        } else if (status === '403') {
-          await sock.sendMessage(from, { text: ` *${number}* a la confidentialité activée. Il doit être ajouté manuellement.` });
-        } else {
-          await sock.sendMessage(from, { text: ` Statut: ${status} pour ${number}` });
-        }
-      } catch (err) {
-        await sock.sendMessage(from, { text: ` Impossible d'ajouter ce membre: ${err.message}` });
+      const r = await updateGroupParticipant(sock, from, jid, 'add');
+      if (r.ok) {
+        await sock.sendMessage(from, { text: ` *${number}* a été ajouté au groupe.` });
+      } else if (r.status === '403') {
+        await sock.sendMessage(from, { text: ` *${number}* a la confidentialité activée. Il doit être ajouté manuellement.` });
+      } else {
+        await sock.sendMessage(from, { text: ` Impossible d'ajouter *${number}*.\n_${r.reason}_` });
       }
     },
   },
@@ -113,14 +148,14 @@ export default {
         await sock.sendMessage(from, { text: ' Usage: !promote @membre' });
         return;
       }
-      try {
-        await sock.groupParticipantsUpdate(from, [target], 'promote');
+      const r = await updateGroupParticipant(sock, from, target, 'promote');
+      if (r.ok) {
         await sock.sendMessage(from, {
           text: `⬆ @${target.split('@')[0]} est maintenant *administrateur* du groupe ! `,
           mentions: [target],
         });
-      } catch {
-        await sock.sendMessage(from, { text: ` Impossible de promouvoir ce membre.\n_Vérifiez que le bot est admin._` });
+      } else {
+        await sock.sendMessage(from, { text: ` Impossible de promouvoir ce membre.\n_${r.reason || 'Vérifiez que le bot est admin.'}_` });
       }
     },
   },
@@ -135,14 +170,14 @@ export default {
         await sock.sendMessage(from, { text: ' Usage: !demote @membre' });
         return;
       }
-      try {
-        await sock.groupParticipantsUpdate(from, [target], 'demote');
+      const r = await updateGroupParticipant(sock, from, target, 'demote');
+      if (r.ok) {
         await sock.sendMessage(from, {
           text: `⬇ @${target.split('@')[0]} n'est plus administrateur.`,
           mentions: [target],
         });
-      } catch {
-        await sock.sendMessage(from, { text: ` Impossible de rétrograder ce membre.` });
+      } else {
+        await sock.sendMessage(from, { text: ` Impossible de rétrograder ce membre.\n_${r.reason || ''}_` });
       }
     },
   },
@@ -266,16 +301,20 @@ export default {
       const count = addWarn(from, target.split('@')[0]);
 
       if (count >= MAX_WARNS) {
-        // Kick automatique
-        await sock.sendMessage(from, {
-          text: ` @${target.split('@')[0]} a reçu *${count}/${MAX_WARNS} avertissements* et a été *expulsé automatiquement* !\n\n Raison: ${reason}`,
-          mentions: [target],
-        });
-        try {
-          await sock.groupParticipantsUpdate(from, [target], 'remove');
+        // Kick automatique — on tente l'expulsion AVANT d'annoncer le résultat,
+        // pour ne jamais annoncer un succès qui n'a pas eu lieu.
+        const r = await updateGroupParticipant(sock, from, target, 'remove');
+        if (r.ok) {
           resetWarns(from, target.split('@')[0]);
-        } catch {
-          await sock.sendMessage(from, { text: ' Impossible d\'expulser (bot pas admin ?)' });
+          await sock.sendMessage(from, {
+            text: ` @${target.split('@')[0]} a reçu *${count}/${MAX_WARNS} avertissements* et a été *expulsé automatiquement* !\n\n Raison: ${reason}`,
+            mentions: [target],
+          });
+        } else {
+          await sock.sendMessage(from, {
+            text: ` @${target.split('@')[0]} a atteint ${count}/${MAX_WARNS} avertissements mais l'expulsion a échoué.\n_${r.reason || 'Vérifiez que le bot est admin.'}_`,
+            mentions: [target],
+          });
         }
       } else {
         await sock.sendMessage(from, {

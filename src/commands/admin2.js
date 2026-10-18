@@ -23,6 +23,46 @@
 import { addFilter, removeFilter, getFilters, clearFilters } from '../utils/filter.js';
 import { setSlowmode, disableSlowmode, getSlowmode } from '../utils/slowmode.js';
 import { banUser, unbanUser, isBanned, getBanList } from '../utils/banned.js';
+// Statut réel des actions sur les membres (intégré — aucun fichier séparé)
+const GROUP_STATUS_MESSAGES = {
+  '400': 'Requête invalide.',
+  '401': 'Non autorisé — vérifiez que le bot est bien administrateur.',
+  '403': 'Action refusée (confidentialité du membre ou droits insuffisants).',
+  '404': 'Membre introuvable ou déjà absent du groupe.',
+  '408': 'Délai dépassé (timeout WhatsApp).',
+  '409': 'Conflit — action déjà effectuée.',
+  '500': 'Erreur interne WhatsApp.',
+};
+
+/**
+ * Exécute groupParticipantsUpdate pour UN participant et retourne
+ * un résultat structuré et fiable.
+ *
+ * @returns {Promise<{ok: boolean, status: string|null, reason: string|null}>}
+ */
+export async function updateGroupParticipant(sock, from, jid, action) {
+  try {
+    const result = await sock.groupParticipantsUpdate(from, [jid], action);
+    const status = result?.[0]?.status != null ? String(result[0].status) : null;
+
+    // Certaines versions de Baileys ne renvoient pas de status du tout
+    // (tableau vide/undefined) : dans ce cas on considère l'appel comme
+    // ayant réussi UNIQUEMENT s'il n'a pas levé d'exception, mais on le
+    // signale comme "non confirmé" plutôt que "confirmé".
+    if (status === null) {
+      return { ok: true, status: null, reason: null, unconfirmed: true };
+    }
+
+    if (status === '200') {
+      return { ok: true, status, reason: null };
+    }
+
+    return { ok: false, status, reason: GROUP_STATUS_MESSAGES[status] || `Statut ${status} (échec).` };
+  } catch (err) {
+    return { ok: false, status: null, reason: err?.message || 'Erreur inconnue.' };
+  }
+}
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -66,13 +106,11 @@ export default {
         });
         let count = 0;
         for (const jid of nonAdmins) {
-          try {
-            await sock.groupParticipantsUpdate(from, [jid], 'remove');
-            count++;
-            await new Promise(r => setTimeout(r, 500)); // éviter le rate limit
-          } catch {}
+          const r = await updateGroupParticipant(sock, from, jid, 'remove');
+          if (r.ok) count++;
+          await new Promise(res => setTimeout(res, 500)); // éviter le rate limit
         }
-        await sock.sendMessage(from, { text: ` *Expulsion terminée !*\n ${count}/${nonAdmins.length} membres expulsés.` });
+        await sock.sendMessage(from, { text: ` *Expulsion terminée !*\n ${count}/${nonAdmins.length} membres réellement expulsés.` });
       } catch (err) {
         await sock.sendMessage(from, { text: ` Erreur: ${err.message}` });
       }
@@ -91,14 +129,19 @@ export default {
       }
       const number = target.split('@')[0];
       const reason = args.slice(1).join(' ') || 'Aucune raison';
-      banUser(from, number, reason);
-      try {
-        await sock.groupParticipantsUpdate(from, [target], 'remove');
-      } catch {}
-      await sock.sendMessage(from, {
-        text: ` *${number}* a été *banni* du groupe.\n Raison: ${reason}\n\n_Il sera re-expulsé automatiquement s'il tente de rejoindre._`,
-        mentions: [target],
-      });
+      banUser(from, number, reason); // liste noire mise à jour dans tous les cas
+      const r = await updateGroupParticipant(sock, from, target, 'remove');
+      if (r.ok) {
+        await sock.sendMessage(from, {
+          text: ` *${number}* a été *banni* du groupe.\n Raison: ${reason}\n\n_Il sera re-expulsé automatiquement s'il tente de rejoindre._`,
+          mentions: [target],
+        });
+      } else {
+        await sock.sendMessage(from, {
+          text: ` *${number}* a été ajouté à la liste noire, mais l'expulsion du groupe a échoué.\n_${r.reason || 'Vérifiez que le bot est admin.'}_\nRaison du ban: ${reason}`,
+          mentions: [target],
+        });
+      }
     },
   },
 
