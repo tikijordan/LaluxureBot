@@ -180,6 +180,21 @@ import { isCaptchaEnabled, createChallenge } from './utils/captcha.js';
 import { log as logGroupAction } from './utils/grouplogs.js';
 const sessions = new Map();
 
+// Déballe les enveloppes WhatsApp : messages éphémères, vue unique, message modifié.
+function unwrapMessage(m) {
+    let cur = m || {};
+    for (let i = 0; i < 4; i++) {
+        const inner = cur.ephemeralMessage?.message
+            || cur.viewOnceMessage?.message
+            || cur.viewOnceMessageV2?.message
+            || cur.viewOnceMessageV2Extension?.message
+            || cur.editedMessage?.message;
+        if (!inner) break;
+        cur = inner;
+    }
+    return cur;
+}
+
 // Sauvegarde Atlas : au plus une fois toutes les 2 heures par session.
 // Les fichiers locaux restent la source de vérité ; Mongo n'est qu'une copie.
 const MONGO_BACKUP_INTERVAL_MS = 2 * 60 * 60 * 1000;
@@ -351,7 +366,7 @@ async function startSession(sessionId, phoneNumber = null) {
             try {
                 result = await Promise.race([
                     _origSendMessage(jid, content, options),
-                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (5min)')), 330_000); }),
+                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000); }),
                 ]);
             } finally {
                 clearTimeout(timer);
@@ -744,8 +759,9 @@ async function startSession(sessionId, phoneNumber = null) {
                     scheduleReconnect(state.id, 3000);
                     return;
                 }
-                const inactiveSince = Date.now() - (state.lastActivity || state.lastConnectedAt || 0);
-                if (wsState === 1 && inactiveSince > 25 * 60 * 1000) {
+                // Ping WebSocket toutes les 2 min (et non après 25 min d'inactivité) :
+                // détecte une connexion qui semble ouverte mais ne livre plus rien.
+                if (wsState === 1) {
                     const alive = await wsPingCheck(sock);
                     if (!alive) {
                         addLog('warn', `[${state.id}] Health check: zombie confirmé — reconnexion`);
@@ -797,6 +813,8 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
+        // DIAGNOSTIC : tout événement reçu de WhatsApp, quel que soit le filtre appliqué ensuite
+        addLog('info', `[${state.id}] EVENT messages.upsert type=${type} n=${messages.length} chats=${[...new Set(messages.map(m => m.key?.remoteJid))].slice(0,3).join(',')} fromMe=${messages.map(m => m.key?.fromMe).join(',')}`);
         if (type !== 'notify') {
             // 'append' = normalement la sync d'historique au démarrage → à ignorer.
             // MAIS après une coupure (redéploiement, reconnexion réseau...),
@@ -921,12 +939,16 @@ async function startSession(sessionId, phoneNumber = null) {
                     senderNumber = OWNER;
                     senderJid    = OWNER + '@s.whatsapp.net';
                 }
-                const ct = getContentType(msg.message);
+                // Déballer les enveloppes (messages éphémères, vue unique, message modifié, document avec légende)
+                // sinon le texte est vide dès que la conversation a les messages éphémères activés.
+                const unwrapped = unwrapMessage(msg.message);
+                const ct = getContentType(unwrapped);
                 let body = '';
-                if (ct==='conversation') body=msg.message.conversation||'';
-                else if (ct==='extendedTextMessage') body=msg.message.extendedTextMessage?.text||'';
-                else if (ct==='imageMessage') body=msg.message.imageMessage?.caption||'';
-                else if (ct==='videoMessage') body=msg.message.videoMessage?.caption||'';
+                if (ct==='conversation') body=unwrapped.conversation||'';
+                else if (ct==='extendedTextMessage') body=unwrapped.extendedTextMessage?.text||'';
+                else if (ct==='imageMessage') body=unwrapped.imageMessage?.caption||'';
+                else if (ct==='videoMessage') body=unwrapped.videoMessage?.caption||'';
+                else if (ct==='documentWithCaptionMessage') body=unwrapped.documentWithCaptionMessage?.message?.documentMessage?.caption||'';
                 const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
                 const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
                 const isVOraw = /^viewOnceMessage/.test(voCt)
@@ -1193,7 +1215,9 @@ async function loadExistingSessions() {
     let sessionsToStart = [];
     const mongoOk = await connectMongo();
     if (mongoOk) {
-        const db = null; // verrou Mongo désactivé : une seule instance, Mongo = sauvegarde seulement
+        // Verrou Mongo réactivé : empêche deux instances (ancien + nouveau déploiement) de se disputer WhatsApp.
+        // Si Atlas est injoignable, le verrou laisse tourner (fail-open) sans couper WhatsApp.
+        const db = getMongoDb();
         const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
         const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000'); // 60s
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
