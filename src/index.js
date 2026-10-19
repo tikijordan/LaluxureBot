@@ -163,7 +163,7 @@ console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))
 import { handleCommand } from './handler.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
+import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
 import { isOwnerSender, ensureBotModeFile } from './utils/botmode.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
@@ -207,6 +207,7 @@ async function backupIfDue(st, number = st?.connectedNumber) {
 // Restaure depuis Atlas les sessions NON chargées dans ce processus, et seulement
 // si la copie Atlas est plus récente que le disque. Une session active n'est jamais touchée.
 async function restoreSessionsFromAtlas() {
+    if (!global.instanceLockHeld) return;
     const docs = await listSessionsMongo();
     for (const d of docs) {
         const id = d._id;
@@ -215,6 +216,23 @@ async function restoreSessionsFromAtlas() {
         if (r === 'restored') addLog('success', `[Atlas] Session [${id}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
     }
 }
+// Sauvegarde Atlas différée : une écriture au plus toutes les 2 min par session
+const ATLAS_DEBOUNCE_MS = 2 * 60 * 1000;
+function scheduleAtlasBackup(st) {
+    if (!st?.authPath || st.atlasTimer) return;
+    st.atlasTimer = setTimeout(async () => {
+        st.atlasTimer = null;
+        st.lastMongoBackupAt = Date.now();
+        await saveSessionMongo(st.id, st.connectedNumber || st.id, st.authPath).catch(() => {});
+    }, ATLAS_DEBOUNCE_MS);
+    st.atlasTimer.unref?.();
+}
+// Nettoyage Atlas toutes les 5h : supprime les sessions obsolètes (7 jours sans mise à jour, non actives)
+setInterval(() => {
+    cleanupStaleSessionDocs([...sessions.keys()], 7)
+        .then(n => { if (n) addLog('info', `[Atlas] Nettoyage : ${n} session(s) obsolète(s) supprimée(s)`); })
+        .catch(() => {});
+}, 5 * 60 * 60 * 1000).unref?.();
 // Vérification toutes les 10 min : sauvegarde seulement si 2h se sont écoulées
 setInterval(() => {
     for (const st of sessions.values()) backupIfDue(st).catch(() => {});
@@ -298,6 +316,10 @@ function addLog(level, msg) {
 }
 
 async function startSession(sessionId, phoneNumber = null) {
+    if (!global.instanceLockHeld) {
+        addLog('warn', `[${sessionId}] Verrou non détenu — session non démarrée (instance en veille)`);
+        return;
+    }
     const existing = sessions.get(sessionId);
     if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
@@ -404,7 +426,7 @@ async function startSession(sessionId, phoneNumber = null) {
 
     sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
         await saveCreds(); // Écriture disque local
-        // Mongo n'est plus écrit ici (trop fréquent) : sauvegarde Atlas toutes les 2h via backupIfDue
+        scheduleAtlasBackup(state); // Atlas : au plus une écriture toutes les 2 min, seulement si les identifiants ont changé
         try {
             const sessionData = readSessionFiles(state.authPath);
             if (Object.keys(sessionData).length > 0)
@@ -1225,30 +1247,17 @@ async function loadExistingSessions() {
         const deployId = process.env.RENDER_SERVICE_ID || process.env.RAILWAY_DEPLOYMENT_ID || '';
         const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
         let lockOk = lockRes.ok;
-        if (!lockOk) {
-            await forceReleaseExpiredLock({ db, lockName });
-            lockOk = await forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId });
-            if (!lockOk && deployId) {
-                lockOk = await forceStealOlderDeploy({ db, lockName, ownerId, ttlMs, deployId });
-            }
-            if (!lockOk) {
-                const waitMs = Math.min(ttlMs / 2, 30000);
-                addLog('warn', `[Lock] Lock détenu par ${lockRes.holder} — attente ${Math.round(waitMs/1000)}s...`);
-                await new Promise(r => setTimeout(r, waitMs));
-                const retry = await tryAcquireLock({ db, lockName, ownerId, ttlMs });
-                lockOk = retry.ok;
-                if (!lockOk) {
-                    await forceStealStaleLock({ db, lockName, ownerId, ttlMs: 0, deployId });
-                    lockOk = true;
-                    addLog('warn', `[Lock] Lock forcé (takeover) — ancienne instance considérée morte`);
-                }
-            }
+        // Verrou : une seule instance peut se connecter à WhatsApp.
+        // Une instance qui ne l'a pas reste en veille (réessai toutes les 30 s), sans rien démarrer
+        // ni lire/écrire dans Atlas, et démarre seulement quand le verrou se libère.
+        while (!lockOk) {
+            addLog('warn', `[Lock] Verrou détenu par ${lockRes.holder || 'une autre instance'} — ce service reste en veille (réessai dans 30s)`);
+            await new Promise(r => setTimeout(r, 30000));
+            const retry = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
+            if (!retry.ok) await forceReleaseExpiredLock({ db, lockName });
+            lockOk = retry.ok || await forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId });
         }
-
-        if (!lockOk) {
-            addLog('warn', `[Lock] Impossible d'acquérir le lock — WhatsApp ne sera pas démarré ici.`);
-            return;
-        }
+        global.instanceLockHeld = true;
 
         addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
         const hb = startLockHeartbeat({

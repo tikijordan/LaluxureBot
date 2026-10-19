@@ -165,6 +165,7 @@ export function writeSessionFiles(authPath, files) {
 // SAVE — Sauvegarde une session dans MongoDB + cache mémoire
 // ─────────────────────────────────────────────
 export async function saveSessionMongo(sessionId, number, authPath) {
+    if (!global.instanceLockHeld) return false; // instance en veille : aucune écriture
     if (!connected || !collection) return false;
     try {
         const files = readSessionFiles(authPath);
@@ -310,7 +311,17 @@ export async function deleteAllSessionsMongo() {
 // ─────────────────────────────────────────────
 // Restaure une session depuis Atlas UNIQUEMENT si la copie Atlas est plus récente
 // que les fichiers du disque. Le disque ne perd donc jamais des identifiants plus frais.
+// Supprime dans Atlas les sessions obsolètes : non actives localement ET non mises à jour depuis maxAgeDays.
+export async function cleanupStaleSessionDocs(keepIds = [], maxAgeDays = 7) {
+    if (!global.instanceLockHeld) return 0;
+    if (!connected || !collection) return 0;
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+    const r = await collection.deleteMany({ _id: { $nin: keepIds }, updatedAt: { $lt: cutoff } }).catch(() => null);
+    return r?.deletedCount || 0;
+}
+
 export async function restoreSessionFromAtlasIfNewer(sessionId, localDir) {
+    if (!global.instanceLockHeld) return 'standby';
     if (!connected || !collection) return 'no-db';
     const doc = await collection.findOne({ _id: sessionId }, { projection: { files: 1, updatedAt: 1 } }).catch(() => null);
     if (!doc?.files) return 'absent';
