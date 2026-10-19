@@ -1667,12 +1667,13 @@ button:hover{background:#1fb858}
         return sendJson(res,{
             ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
             groupMetaCache:undefined, msgCache:undefined, lidCache:undefined, lidFailCache:undefined,
+            atlasTimer:undefined, reconnectTimer:undefined, qrTimer:undefined,
             recentCommands:(s.recentCommands || []).slice(-20),
             uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
             totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
             topCommands:topCmds, users, prefix:PREFIX,
             memory:Math.round(process.memoryUsage().heapUsed/1024/1024), node:process.version,
-            sessionString: s.sessionString || null,
+            // sessionString volontairement absent : identifiants WhatsApp, jamais exposés par l'API
         });
     }
 

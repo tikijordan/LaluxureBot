@@ -265,6 +265,7 @@ button:disabled { opacity: .4; cursor: not-allowed; transform: none !important; 
         <div class="sidebar-btns">
           <button class="btn-green btn-sm" onclick="newSession()" id="btn-new" title="Nouvelle session QR">QR</button>
           <button class="btn-ghost btn-sm" onclick="showPairModal()" title="Code pairing"></button>
+          <button class="btn-ghost btn-sm" onclick="manualRefresh()" title="Actualiser">↻</button>
         </div>
       </div>
       <div id="sessions-list"><div class="sess-empty">Chargement...</div></div>
@@ -735,18 +736,32 @@ async function startPairing() {
   const sid = r.sessionId;
   res.textContent=' Code en cours... (10s)';
   await refreshSessions(); selectSession(sid);
-  let att = 0;
+  let att = 0, codeShown = false;
   const poll = setInterval(async () => {
     att++;
     const s = await api(`/api/sessions/${encodeURIComponent(sid)}`).catch(()=>null); if (!s) return;
-    if (s.pairingCode) {
-      res.innerHTML=` Code: <strong style="font-size:1.2rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.68rem;color:var(--muted)">Valable ~60s</span>`;
+    if (s.pairingCode && !codeShown) {
+      codeShown = true;
+      res.innerHTML=` Code: <strong style="font-size:1.2rem;letter-spacing:3px;color:var(--green)">${esc(s.pairingCode)}</strong><br><span style="font-size:.68rem;color:var(--muted)">Valable ~60s — saisis-le dans WhatsApp &gt; Appareils connectés</span>`;
       res.style.cssText='display:block;background:rgba(37,211,102,.07);color:var(--text);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:.78rem;line-height:1.6';
-      clearInterval(poll);
     }
-    if (s.connection==='open') { clearInterval(poll); closePairModal(); toast(' Connecté !','ok'); }
-    if (att > 15) clearInterval(poll);
+    if (s.connection==='open') {
+      clearInterval(poll); closePairModal(); toast(' Connecté !','ok');
+      await refreshSessions(); selectSession(sid); return;
+    }
+    if (!codeShown && att === 15) {
+      res.textContent=' Pas de code reçu. Si cette session existe déjà, supprime-la puis relance le jumelage.';
+    }
+    if (att > 90) {
+      clearInterval(poll);
+      res.textContent=' Délai dépassé (3 min). Relance le jumelage.';
+    }
   }, 2000);
+}
+
+async function manualRefresh() {
+  await refreshSessions();
+  if (currentSession) selectSession(currentSession);
 }
 
 // ═══════════════════════════════════════════════════════════

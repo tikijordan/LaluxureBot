@@ -5,7 +5,7 @@
  * @author      Bot Developer
  * @copyright   Copyright (c) 2026 Bot Developer
  * @license     MIT — See LICENSE file for details
- * @description Commande de signalement WhatsApp — Bannissement et email de support
+ * @description Commande de signalement WhatsApp — Bannissement et contact support
  * ============================================================
  *
  * Permission is hereby granted, free of charge, to any person
@@ -23,14 +23,15 @@ import nodemailer from 'nodemailer';
 // __dirname déjà défini plus haut dans le fichier
 
 // ============================================================
-// CONFIGURATION EMAIL - WhatsApp Support
+// CONFIGURATION EMAIL INTÉGRÉE (pas de variables d'environnement)
 // ============================================================
 
-// Lectura de configuration email depuis .env
-const EMAIL_HOST = process.env.EMAIL_HOST || 'smtp.gmail.com';
-const EMAIL_PORT = parseInt(process.env.EMAIL_PORT || '587');
-const EMAIL_USER = process.env.EMAIL_USER || 'bot.whatsapp.support@gmail.com';
-const EMAIL_PASSWORD = process.env.EMAIL_PASSWORD || 'your_app_password_here';
+// Configuration email par défaut intégrée au code
+// L'utilisateur peut modifier ces valeurs directement ci-dessous
+const EMAIL_HOST = 'smtp.gmail.com';
+const EMAIL_PORT = 587;
+const EMAIL_USER = 'testtiktok@gmail.com';
+const EMAIL_PASSWORD = 'j\'aimedieu';
 
 // Transporter nodemailer configuré (créé à la demande)
 let transporter = null;
@@ -46,6 +47,7 @@ function getTransporter() {
           pass: EMAIL_PASSWORD,
         },
       });
+      console.log('✅ Transporter email initialisé (intégré au code)');
     } catch (err) {
       console.error('❌ Erreur configuration email:', err.message);
       transporter = null;
@@ -177,7 +179,7 @@ Veuillez examiner ce compte pour violation des conditions d'utilisation de Whats
 
 export default {
 
-  // ══════════════════════════════════════
+  // ═════════════════════════════════════
   // SIGNALEMENT ET BANNISSEMENT WHATSAPP
   // ══════════════════════════════════════
 
@@ -210,7 +212,7 @@ export default {
         text += `📋 *Fonctionnement* :\n`;
         text += `• Le numéro saisi sera banni du groupe\n`;
         text += `• Un email de signalement sera envoyé automatiquement à WhatsApp Support\n`;
-        text += `• Les 7 adresses email ci-dessous sont également fournées\n\n`;
+        text += `• Les 7 adresses email ci-dessous sont également fournies\n\n`;
         text += `📧 *Adresses email WhatsApp Support* :\n\n`;
         WHATSAPP_SUPPORT_EMAILS.forEach(({ email, label }) => {
           text += `• ${email} — ${label}\n`;
@@ -268,9 +270,9 @@ export default {
     },
   },
 
-  // ════════════════════════════════════
+  // ═══════════════════════════════════
   // Voir l'état des signalements
-  // ══════════════════════════════════════
+  // ═════════════════════════════════════
 
   reports: {
     description: 'Voir l état des signalements',
