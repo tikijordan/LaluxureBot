@@ -216,6 +216,15 @@ async function restoreSessionsFromAtlas() {
         if (r === 'restored') addLog('success', `[Atlas] Session [${id}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
     }
 }
+// Sessions supprimées volontairement : elles ne doivent plus être relancées automatiquement
+const deletedSessionIds = new Set();
+function forgetSession(sid) {
+    deletedSessionIds.add(sid);
+    clearReconnectTimer(sid);
+    const st = sessions.get(sid);
+    if (st?.atlasTimer) { clearTimeout(st.atlasTimer); st.atlasTimer = null; }
+}
+
 // Sauvegarde Atlas différée : une écriture au plus toutes les 2 min par session
 const ATLAS_DEBOUNCE_MS = 2 * 60 * 1000;
 function scheduleAtlasBackup(st) {
@@ -316,6 +325,10 @@ function addLog(level, msg) {
 }
 
 async function startSession(sessionId, phoneNumber = null) {
+    if (deletedSessionIds.has(sessionId)) {
+        addLog('info', `[${sessionId}] Session supprimée — pas de redémarrage automatique`);
+        return;
+    }
     if (!global.instanceLockHeld) {
         addLog('warn', `[${sessionId}] Verrou non détenu — session non démarrée (instance en veille)`);
         return;
@@ -815,6 +828,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     const n = state.connectedNumber;
                     if (n && activeSocketByNumber.get(n)?.sock === sock) activeSocketByNumber.delete(n);
                 } catch {}
+                forgetSession(state.id);
                 try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
                 sessions.delete(state.id);
                 deleteSessionMongo(state.id).catch(() => {});
@@ -1624,6 +1638,7 @@ button:hover{background:#1fb858}
         try { body = await readBodySafe(req); } catch {}
         const phone = (body.phone||'').replace(/\D/g,'');
         const id = 'sess_'+Date.now();
+        deletedSessionIds.delete(id);
         await startSession(id, phone || null);
         const msg = phone ? 'Session créée, pairing code en cours...' : 'Session créée, QR en cours...';
         return sendJson(res,{ ok:true, sessionId:id, message:msg });
@@ -1690,6 +1705,7 @@ button:hover{background:#1fb858}
         if (s.connection === 'open') return sendJson(res,{error:'Déjà connecté'},400);
         try {
             if (!s.sock) {
+                deletedSessionIds.delete(sid);
                 await startSession(sid, phone);
                 return sendJson(res,{ok:true, message:'Session démarrée, code en cours...'});
             }
@@ -1724,6 +1740,7 @@ button:hover{background:#1fb858}
         const s = sessions.get(sid);
         if (!s) return sendJson(res,{error:'Session introuvable'},404);
         addLog('info',`[${sid}] Déconnexion depuis le dashboard (IP: ${ip})`);
+        forgetSession(sid);
         try { if(s.sock) await s.sock.logout(); } catch {}
         fse.removeSync(path.join(SESSIONS_ROOT,sid));
         sessions.delete(sid);
@@ -1736,6 +1753,8 @@ button:hover{background:#1fb858}
         const sid = sanitizeId(dmatch[1]);
         if (!sid) return sendJson(res,{error:'ID invalide'},400);
         const s = sessions.get(sid);
+        forgetSession(sid);
+        try { if(s?.sock) await s.sock.logout(); } catch {}
         try { if(s?.sock) await s.sock.end(); } catch {}
         fse.removeSync(path.join(SESSIONS_ROOT,sid));
         sessions.delete(sid);
