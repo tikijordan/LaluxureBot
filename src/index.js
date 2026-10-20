@@ -216,14 +216,82 @@ async function restoreSessionsFromAtlas() {
         if (r === 'restored') addLog('success', `[Atlas] Session [${id}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
     }
 }
+// ── Verrou par session (un numéro WhatsApp = un service à la fois) ──
+const PROCESS_OWNER = `${os.hostname()}-${process.pid}-${Date.now()}`;
+const SESSION_LOCK_TTL = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000');
+const SESSION_LOCK_HB  = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000');
+const sessionLocks = new Map(); // sessionId -> { hb, lockName, ownerId }
+
+async function acquireSessionLock(sessionId) {
+    if (sessionLocks.has(sessionId)) return true;
+    const lockName = `wa-session-${sessionId}`;
+    const ownerId = `${PROCESS_OWNER}:${sessionId}`;
+    const db = getMongoDb();
+    let r = await tryAcquireLock({ db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL });
+    if (!r.ok) {
+        await forceReleaseExpiredLock({ db, lockName });
+        r = await tryAcquireLock({ db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL });
+    }
+    if (!r.ok) {
+        addLog('warn', `[${sessionId}] Session déjà active sur une autre instance (${r.holder || 'inconnue'}) — non démarrée ici`);
+        return false;
+    }
+    const hb = startLockHeartbeat({
+        db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL, intervalMs: SESSION_LOCK_HB,
+        onLost: () => {
+            addLog('warn', `[${sessionId}] Verrou de session perdu — arrêt de cette session ici`);
+            const st = sessions.get(sessionId);
+            try { st?.sock?.end?.(); } catch {}
+            if (st) st.connection = 'close';
+            sessionLocks.delete(sessionId);
+        },
+    });
+    sessionLocks.set(sessionId, { hb, lockName, ownerId });
+    return true;
+}
+
+async function releaseSessionLock(sessionId) {
+    const l = sessionLocks.get(sessionId);
+    if (!l) return;
+    sessionLocks.delete(sessionId);
+    try { l.hb.stop(); } catch {}
+    try { await releaseLock({ db: getMongoDb(), lockName: l.lockName, ownerId: l.ownerId }); } catch {}
+}
+
 // Sessions supprimées volontairement : elles ne doivent plus être relancées automatiquement
 const deletedSessionIds = new Set();
 function forgetSession(sid) {
     deletedSessionIds.add(sid);
+    releaseSessionLock(sid).catch(() => {});
     clearReconnectTimer(sid);
     const st = sessions.get(sid);
     if (st?.atlasTimer) { clearTimeout(st.atlasTimer); st.atlasTimer = null; }
 }
+
+// ── Vérification de livraison : le bot s'envoie un message vide toutes les 10 min ──
+// Si rien n'est reçu dans les 90 s qui suivent, la session est relancée (connexion morte).
+const PROBE_INTERVAL_MS = 10 * 60 * 1000;
+const PROBE_TIMEOUT_MS  = 90 * 1000;
+async function runDeliveryProbe(sid) {
+    const st = sessions.get(sid);
+    if (!st || st.connection !== 'open' || !st.sock || !st.connectedNumber) return;
+    const sentAt = Date.now();
+    try {
+        await st.sock.sendMessage(`${st.connectedNumber}@s.whatsapp.net`, { text: '\u200b' });
+    } catch (e) {
+        addLog('warn', `[${sid}] Vérif livraison : envoi impossible (${e.message})`);
+    }
+    setTimeout(() => {
+        const cur = sessions.get(sid);
+        if (!cur || cur.connection !== 'open') return;
+        if ((cur.lastDeliveryAt || 0) >= sentAt) return;
+        addLog('warn', `[${sid}] Vérif livraison échouée : aucun message reçu depuis 90s — reconnexion`);
+        try { cur.sock.end(new Error('delivery-probe')); } catch {}
+    }, PROBE_TIMEOUT_MS);
+}
+setInterval(() => {
+    for (const sid of sessions.keys()) runDeliveryProbe(sid).catch(() => {});
+}, PROBE_INTERVAL_MS).unref?.();
 
 // Sauvegarde Atlas différée : une écriture au plus toutes les 2 min par session
 const ATLAS_DEBOUNCE_MS = 2 * 60 * 1000;
@@ -329,10 +397,7 @@ async function startSession(sessionId, phoneNumber = null) {
         addLog('info', `[${sessionId}] Session supprimée — pas de redémarrage automatique`);
         return;
     }
-    if (!global.instanceLockHeld) {
-        addLog('warn', `[${sessionId}] Verrou non détenu — session non démarrée (instance en veille)`);
-        return;
-    }
+    if (!(await acquireSessionLock(sessionId))) return;
     const existing = sessions.get(sessionId);
     if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
@@ -396,15 +461,11 @@ async function startSession(sessionId, phoneNumber = null) {
             if (!sock.__sentJids) sock.__sentJids = new Set();
             const firstToJid = !sock.__sentJids.has(jid);
             sock.__sentJids.add(jid);
-            let timer;
             let result;
             try {
-                result = await Promise.race([
-                    _origSendMessage(jid, content, options),
-                    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('sendMessage: délai dépassé (45s)')), 45_000); }),
-                ]);
+                // Pas de limite de temps : la réponse attend l'envoi réel
+                result = await _origSendMessage(jid, content, options);
             } finally {
-                clearTimeout(timer);
                 const dt = Date.now() - t0;
                 if (dt > 3000) addLog('warn', `[${sessionId}] envoi lent ${(dt/1000).toFixed(1)}s vers ${jid?.endsWith('@g.us') ? 'groupe' : 'privé'} (1er envoi vers ce chat: ${firstToJid})`);
             }
@@ -871,18 +932,24 @@ async function startSession(sessionId, phoneNumber = null) {
 
         for (const msg of messages) {
             if (!msg.message) {
-                // Diagnostic ciblé : le message arrive mais sans contenu du tout
-                // (échec de déchiffrement probable — clé de session pas encore
-                // synchronisée avec l'expéditeur). Les messageStubType (ex: 2 =
-                // suppression/révocation) sont des notifications protocolaires
-                // normales SANS contenu par nature — pas une erreur, à ignorer.
-                if (msg.key?.remoteJid !== 'status@broadcast' && !msg.messageStubType) {
-                    addLog('warn', `[${state.id}] MSG SANS CONTENU (échec déchiffrement ?) id=${msg.key?.id} remoteJid=${msg.key?.remoteJid}`);
+                if (msg.messageStubType === WAMessageStubType.CIPHERTEXT) {
+                    // Message reçu mais illisible : les clés de session ne correspondent plus.
+                    // Sans ce signalement il est ignoré en silence (commandes jamais lues).
+                    state.cipherCount = (state.cipherCount || 0) + 1;
+                    addLog('warn', `[${state.id}] MSG ILLISIBLE (clés de session désynchronisées) chat=${msg.key?.remoteJid} — ${state.cipherCount} au total`);
+                    if (state.cipherCount === 3 || state.cipherCount % 100 === 0) {
+                        sock.sendMessage(`${(state.connectedNumber || '').replace(/\D/g, '')}@s.whatsapp.net`, {
+                            text: `⚠️ Le bot reçoit des messages illisibles (clés de session désynchronisées).\n\nPour réparer : dans le tableau de bord, supprime cette session, puis recrée-la avec un QR ou un code de jumelage.`,
+                        }).catch(() => {});
+                    }
+                } else if (msg.key?.remoteJid !== 'status@broadcast' && !msg.messageStubType) {
+                    addLog('warn', `[${state.id}] MSG SANS CONTENU id=${msg.key?.id} remoteJid=${msg.key?.remoteJid}`);
                 }
                 continue;
             }
             if (msg.key.remoteJid === 'status@broadcast') continue;
             state.lastActivity = Date.now();
+            state.lastDeliveryAt = Date.now();
             if (type === 'notify') {
                 addLog('info', `[${state.id}] MSG reçu (temps réel) chat=${msg.key.remoteJid} fromMe=${msg.key.fromMe} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
             }
@@ -1259,38 +1326,10 @@ async function loadExistingSessions() {
         const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
         const ownerId = buildOwnerId();
         const deployId = process.env.RENDER_SERVICE_ID || process.env.RAILWAY_DEPLOYMENT_ID || '';
-        const lockRes = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
-        let lockOk = lockRes.ok;
-        // Verrou : une seule instance peut se connecter à WhatsApp.
-        // Une instance qui ne l'a pas reste en veille (réessai toutes les 30 s), sans rien démarrer
-        // ni lire/écrire dans Atlas, et démarre seulement quand le verrou se libère.
-        while (!lockOk) {
-            addLog('warn', `[Lock] Verrou détenu par ${lockRes.holder || 'une autre instance'} — ce service reste en veille (réessai dans 30s)`);
-            await new Promise(r => setTimeout(r, 30000));
-            const retry = await tryAcquireLock({ db, lockName, ownerId, ttlMs, deployId });
-            if (!retry.ok) await forceReleaseExpiredLock({ db, lockName });
-            lockOk = retry.ok || await forceStealStaleLock({ db, lockName, ownerId, ttlMs, deployId });
-        }
+        // Verrou PAR SESSION : le service démarre toujours, chaque session prend son propre
+        // verrou (wa-session-<id>) dans startSession. Deux services ne peuvent jamais tenir le même compte.
         global.instanceLockHeld = true;
-
-        addLog('success', `[Lock] Instance active (${lockName}) — WhatsApp autorisé`);
-        const hb = startLockHeartbeat({
-            db,
-            lockName,
-            ownerId,
-            ttlMs,
-            intervalMs: hbMs,
-            deployId,
-            onLost: (info) => {
-                addLog('warn', `[Lock] Lock perdu (${info?.holder || 'unknown'}) — arrêt des sockets WhatsApp`);
-                for (const [id, st] of sessions) {
-                    try { st.sock?.ws?.close(); } catch {}
-                    try { st.sock?.end?.(); } catch {}
-                    st.connection = 'close';
-                    clearReconnectTimer(id);
-                }
-            },
-        });
+        const hb = { stop() {} };
 
         const shutdown = async (signal) => {
             console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
