@@ -250,6 +250,18 @@ async function acquireSessionLock(sessionId) {
     return true;
 }
 
+// Session tenue par une autre instance : on réessaie toutes les 30 s (dès que le verrou se libère)
+const sessionRetryTimers = new Map();
+function scheduleSessionRetry(sid, phone) {
+    if (sessionRetryTimers.has(sid)) return;
+    const t = setTimeout(() => {
+        sessionRetryTimers.delete(sid);
+        startSession(sid, phone).catch(() => {});
+    }, 30000);
+    sessionRetryTimers.set(sid, t);
+    t.unref?.();
+}
+
 async function releaseSessionLock(sessionId) {
     const l = sessionLocks.get(sessionId);
     if (!l) return;
@@ -262,6 +274,7 @@ async function releaseSessionLock(sessionId) {
 const deletedSessionIds = new Set();
 function forgetSession(sid) {
     deletedSessionIds.add(sid);
+    clearTimeout(sessionRetryTimers.get(sid)); sessionRetryTimers.delete(sid);
     releaseSessionLock(sid).catch(() => {});
     clearReconnectTimer(sid);
     const st = sessions.get(sid);
@@ -397,7 +410,7 @@ async function startSession(sessionId, phoneNumber = null) {
         addLog('info', `[${sessionId}] Session supprimée — pas de redémarrage automatique`);
         return;
     }
-    if (!(await acquireSessionLock(sessionId))) return;
+    if (!(await acquireSessionLock(sessionId))) { scheduleSessionRetry(sessionId, phoneNumber); return; }
     const existing = sessions.get(sessionId);
     if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
@@ -812,6 +825,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 addLog('success', `Session renommée [${sessionId}] → [${num}] (sans redémarrage)`);
                 // on ne quitte PAS: continuation sur le même socket → réponse immédiate
             }
+            state.badSessionCount = 0;
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
 // ⏳ PRÉCHAUFFAGE DIFFÉRÉ des groupes : le bot répond immédiatement, les métadonnées chargent en arrière-plan
             (async () => {
@@ -882,6 +896,34 @@ async function startSession(sessionId, phoneNumber = null) {
                 const prev = n ? activeSocketByNumber.get(n) : null;
                 if (prev?.sock === sock) activeSocketByNumber.delete(n);
             } catch {}
+            // badSession (500) : WhatsApp refuse les identifiants. Reconnecter ne sert à rien
+            // et les identifiants restaurés depuis Atlas reviendraient à chaque démarrage.
+            if (code === DisconnectReason.badSession) {
+                state.badSessionCount = (state.badSessionCount || 0) + 1;
+                if (state.badSessionCount < 2) {
+                    // 1er refus : on renégocie les clés de chiffrement des conversations.
+                    // creds.json (l'identité de l'appareil) est conservé : pas de nouveau jumelage.
+                    if (state.badSessionCount === 1 && state.authPath && fs.existsSync(state.authPath)) {
+                        const keyFiles = fs.readdirSync(state.authPath).filter(f => /^(session-|sender-key-|pre-key-|app-state-sync-)/.test(f));
+                        for (const f of keyFiles) { try { fs.unlinkSync(path.join(state.authPath, f)); } catch {} }
+                        addLog('warn', `[${state.id}] Session refusée (500) — ${keyFiles.length} clé(s) de chiffrement effacée(s) pour renégociation (identité conservée)`);
+                        const num = (state.connectedNumber || state.id).replace(/\D/g, '');
+                        saveSessionMongo(state.id, num, state.authPath).catch(() => {});
+                    } else {
+                        addLog('warn', `[${state.id}] Session refusée par WhatsApp (500) — nouvelle tentative`);
+                    }
+                    scheduleReconnect(state.id, 3000);
+                } else {
+                    addLog('error', `[${state.id}] Session refusée 2 fois (500) — identifiants retirés, recrée la session depuis le tableau de bord`);
+                    forgetSession(state.id);
+                    try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
+                    deleteSessionMongo(state.id).catch(() => {});
+                    sessions.delete(state.id);
+                    const num = (state.connectedNumber || '').replace(/\D/g, '');
+                    if (num) sock.sendMessage(`${num}@s.whatsapp.net`, { text: `⚠️ WhatsApp a refusé la session du bot (500).\n\nLes identifiants ont été retirés. Pour réparer : dans le tableau de bord, recrée la session avec un QR ou un code de jumelage, puis supprime l'ancien appareil dans WhatsApp > Appareils connectés.` }).catch(() => {});
+                }
+                return;
+            }
             if (code === DisconnectReason.loggedOut) {
                 addLog('warn', `[${state.id}] Session loggedOut (401) — suppression complète (local + Mongo)`);
                 try { await sock.end(); } catch {}
@@ -1011,12 +1053,19 @@ async function startSession(sessionId, phoneNumber = null) {
                         senderNumber = cleanPhone(senderJid);
                     }
                 } else {
+                    // DM: rawJid peut être un LID (34347558133923@lid) ou un numéro
+                    const rawIsLid = rawJid.endsWith('@lid');
                     senderNumber = cleanPhone(rawJid);
                     senderJid    = senderNumber + '@s.whatsapp.net';
+                    // Pour la détection owner, on garde le LID original si c'en est un
+                    if (rawIsLid) {
+                        senderJid = rawJid;
+                    }
                 }
                 const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
                 let OWNER_LID = state.ownerLid || null;
-                if (!OWNER_LID && isGroup && OWNER && (!state.ownerLidLastTry || Date.now() - state.ownerLidLastTry > 60_000)) {
+                // Résoudre le LID du owner si pas en cache (groupes ET messages privés)
+                if (!OWNER_LID && OWNER && (!state.ownerLidLastTry || Date.now() - state.ownerLidLastTry > 60_000)) {
                     state.ownerLidLastTry = Date.now();
                     try {
                         const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
@@ -1117,6 +1166,10 @@ async function startSession(sessionId, phoneNumber = null) {
                     addLog('info', `[${state.id}] CMD !${cmd} par ${senderNumber}`);
                 }
                 const currentBotMode = getBotMode();
+                // Debug: log owner detection for troubleshooting
+                if (isCmd) {
+                    addLog('debug', `[${state.id}] isOwner=${isOwner} senderNumber=${senderNumber} senderJid=${senderJid} OWNER=${OWNER} OWNER_LID=${OWNER_LID} botMode=${currentBotMode}`);
+                }
                 if (isGroup && global.mutedMembers?.has(`${from}__${senderJid}`) && !isOwner) {
                     try { await sock.sendMessage(from, { delete: msg.key }); } catch {}
                     continue;
@@ -1201,7 +1254,9 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                 }
                 if (!isCmd) continue;
-                if (!isOwner) continue;
+                // Si le mode est "public", les non-owners peuvent utiliser les commandes
+                // Si le mode est "private", seul l'owner peut utiliser les commandes
+                if (!isOwner && currentBotMode !== 'public') continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,

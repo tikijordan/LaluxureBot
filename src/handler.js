@@ -151,7 +151,14 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     if (!body || !body.startsWith(PREFIX)) return;
 
     // Qui peut lancer une commande : décidé dans utils/botmode.js
-    if (!canUseBot(isOwner, isGroup, senderNumber, ctx.owner)) return;
+    const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner);
+    if (!canUse) {
+        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=false isOwner=${isOwner} isGroup=${isGroup} senderNumber=${senderNumber} ctx.owner=${ctx.owner}`);
+        return;
+    }
+    if (canUse && !isOwner && isGroup) {
+        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=true for non-owner in group (ALLOW_GROUP_ADMINS)`);
+    }
 
     // ── Parsing de la commande ─────────────────────────────────
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);

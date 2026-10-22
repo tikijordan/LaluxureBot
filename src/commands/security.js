@@ -137,13 +137,14 @@ export default {
   },
 
   public: {
-    description: 'Désactivé — bot toujours owner-only',
+    description: 'Activer le mode public — tous les membres peuvent utiliser les commandes',
     execute: async ({ sock, from }) => {
-      setBotMode('private');
+      setBotMode('public');
       await sock.sendMessage(from, {
-        text: `🔒 *Mode public désactivé*\n\n` +
-          `Ce bot est réservé à l'owner uniquement (DM + groupes).\n` +
-          `La commande *!public* ne peut pas ouvrir l'accès aux autres.`,
+        text: `🌐 *Mode public activé*\n\n` +
+          `Tous les membres du groupe peuvent désormais utiliser les commandes.\n` +
+          `L'owner conserve ses privilèges étendus.\n` +
+          `Utilisez !botmode pour voir le statut actuel.`,
       });
     },
   },
