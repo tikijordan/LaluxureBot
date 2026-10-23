@@ -826,6 +826,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 // on ne quitte PAS: continuation sur le même socket → réponse immédiate
             }
             state.badSessionCount = 0;
+            state.cipherCount = 0; // reset compteur messages illisibles après reconnexion réussie
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
 // ⏳ PRÉCHAUFFAGE DIFFÉRÉ des groupes : le bot répond immédiatement, les métadonnées chargent en arrière-plan
             (async () => {
@@ -1006,7 +1007,26 @@ async function startSession(sessionId, phoneNumber = null) {
                     // Sans ce signalement il est ignoré en silence (commandes jamais lues).
                     state.cipherCount = (state.cipherCount || 0) + 1;
                     addLog('warn', `[${state.id}] MSG ILLISIBLE (clés de session désynchronisées) chat=${msg.key?.remoteJid} — ${state.cipherCount} au total`);
-                    if (state.cipherCount === 3 || state.cipherCount % 100 === 0) {
+                    
+                    // AUTO-FIX : à 3 messages illisibles, on force la renégociation des clés
+                    // (même logique que code 500 badSession : supprimer les clés de chiffrement,
+                    // garder creds.json = identité conservée, pas de nouveau jumelage nécessaire)
+                    if (state.cipherCount === 3) {
+                        addLog('warn', `[${state.id}] 3 messages illisibles — renégociation forcée des clés de chiffrement...`);
+                        if (state.authPath && fs.existsSync(state.authPath)) {
+                            const keyFiles = fs.readdirSync(state.authPath).filter(f => /^(session-|sender-key-|pre-key-|app-state-sync-)/.test(f));
+                            for (const f of keyFiles) { try { fs.unlinkSync(path.join(state.authPath, f)); } catch {} }
+                            addLog('warn', `[${state.id}] ${keyFiles.length} clé(s) de chiffrement effacée(s) — reconnexion pour renégociation`);
+                            const num = (state.connectedNumber || state.id).replace(/\D/g, '');
+                            saveSessionMongo(state.id, num, state.authPath).catch(() => {});
+                        }
+                        // Forcer la reconnexion pour déclencher la renégociation
+                        try { sock.end(new Error('cipher-renegotiation')); } catch {}
+                        scheduleReconnect(state.id, 3000);
+                        return; // sortir du handler, la session va redémarrer
+                    }
+                    
+                    if (state.cipherCount % 100 === 0) {
                         sock.sendMessage(`${(state.connectedNumber || '').replace(/\D/g, '')}@s.whatsapp.net`, {
                             text: `⚠️ Le bot reçoit des messages illisibles (clés de session désynchronisées).\n\nPour réparer : dans le tableau de bord, supprime cette session, puis recrée-la avec un QR ou un code de jumelage.`,
                         }).catch(() => {});
