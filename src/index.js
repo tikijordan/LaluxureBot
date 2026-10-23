@@ -856,6 +856,8 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
             } catch {}
             await backupIfDue(state, num).catch(e => addLog('warn', `[MongoDB] saveSession: ${e.message}`));
+            // Probe de livraison immédiate à la connexion pour détecter vite les zombies
+            runDeliveryProbe(state.id).catch(() => {});
             if (state.pingInterval) clearInterval(state.pingInterval);
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
@@ -869,16 +871,41 @@ async function startSession(sessionId, phoneNumber = null) {
                     scheduleReconnect(state.id, 3000);
                     return;
                 }
-                // Ping WebSocket toutes les 2 min (et non après 25 min d'inactivité) :
-                // détecte une connexion qui semble ouverte mais ne livre plus rien.
+                // Test de livraison réel toutes les 2 min (pas juste ping WS) :
+                // détection des connexions "zombie" où l'envoi marche mais la réception est bloquée.
                 if (wsState === 1) {
-                    const alive = await wsPingCheck(sock);
-                    if (!alive) {
-                        addLog('warn', `[${state.id}] Health check: zombie confirmé — reconnexion`);
+                    // 1. Ping WebSocket basique
+                    const wsAlive = await wsPingCheck(sock);
+                    if (!wsAlive) {
+                        addLog('warn', `[${state.id}] Health check: WS ping échoué — reconnexion`);
                         state.connection = 'close';
                         try { sock.ws?.close(); } catch {}
                         try { sock.end(); } catch {}
                         scheduleReconnect(state.id, 5000);
+                        return;
+                    }
+                    // 2. Test de livraison réel : envoi message test + attente écho (30s max)
+                    // Ne fait ça que si inactif depuis > 30s pour ne pas spammer
+                    const inactiveMs = Date.now() - (state.lastDeliveryAt || state.lastActivity || 0);
+                    if (inactiveMs > 30_000) {
+                        const testSentAt = Date.now();
+                        try {
+                            await sock.sendMessage(`${state.connectedNumber}@s.whatsapp.net`, { text: '\u200b' });
+                            // Attendre max 30s pour la réception de l'écho
+                            await new Promise(r => setTimeout(r, 30_000));
+                            if ((state.lastDeliveryAt || 0) < testSentAt) {
+                                addLog('warn', `[${state.id}] Health check: livraison bloquée (pas d'écho en 30s) — reconnexion`);
+                                state.connection = 'close';
+                                try { sock.ws?.close(); } catch {}
+                                try { sock.end(); } catch {}
+                                scheduleReconnect(state.id, 5000);
+                            }
+                        } catch (e) {
+                            addLog('warn', `[${state.id}] Health check: envoi test impossible (${e.message}) — reconnexion`);
+                            state.connection = 'close';
+                            try { sock.end(new Error('health-check-send-failed')); } catch {}
+                            scheduleReconnect(state.id, 5000);
+                        }
                     }
                 }
             }, 2 * 60 * 1000);
@@ -1404,8 +1431,27 @@ async function loadExistingSessions() {
         // SIGINT/SIGTERM sont gérés au niveau du module (sauvegarde Atlas finale, même sans Mongo au démarrage)
         addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
         const count = await restoreAllSessions(SESSIONS_ROOT);
-        if (count > 0) {
-            addLog('success', `[MongoDB] ${count} session(s) restaurée(s)`);
+        
+        // NOUVEAU : pour chaque session présente localement, vérifier si Atlas a une version plus récente
+        // et la restaurer si c'est le cas (évite les creds corrompus/anciens sur le disque)
+        let restoredNewer = 0;
+        if (fs.existsSync(SESSIONS_ROOT)) {
+            const localSessions = fs.readdirSync(SESSIONS_ROOT).filter(d =>
+                fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
+                fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
+            );
+            for (const sessionId of localSessions) {
+                const localDir = path.join(SESSIONS_ROOT, sessionId);
+                const result = await restoreSessionFromAtlasIfNewer(sessionId, localDir).catch(() => 'error');
+                if (result === 'restored') {
+                    restoredNewer++;
+                    addLog('success', `[Atlas] Session [${sessionId}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
+                }
+            }
+        }
+        
+        if (count > 0 || restoredNewer > 0) {
+            addLog('success', `[MongoDB] ${count} session(s) restaurée(s) + ${restoredNewer} mise(s) à jour depuis Atlas`);
             if (fs.existsSync(SESSIONS_ROOT)) {
                 sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
                     fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&

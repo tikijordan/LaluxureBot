@@ -51,7 +51,7 @@ async function callAI(prompt, temp=0.8) {
     try {
       const r = await axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${gKey}`,
-        { contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:temp,maxOutputTokens:600} },
+        { contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:temp,maxOutputTokens:2048} },
         { timeout:15000 }
       );
       return r.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
@@ -60,7 +60,7 @@ async function callAI(prompt, temp=0.8) {
   if (qKey) {
     try {
       const r = await axios.post('https://api.groq.com/openai/v1/chat/completions',
-        { model:'llama-3.3-70b-versatile', messages:[{role:'user',content:prompt}], max_tokens:600, temperature:temp },
+        { model:'llama-3.3-70b-versatile', messages:[{role:'user',content:prompt}], max_tokens:2048, temperature:temp },
         { headers:{Authorization:`Bearer ${qKey}`}, timeout:15000 }
       );
       return r.data?.choices?.[0]?.message?.content?.trim();

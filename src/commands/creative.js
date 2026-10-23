@@ -72,7 +72,7 @@ async function askAI(prompt) {
     try {
       const res = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
-        { model: groqModel, messages: [{ role:'user', content: prompt }], max_tokens: 600 },
+        { model: groqModel, messages: [{ role:'user', content: prompt }], max_tokens: 2048 },
         { headers: { Authorization: `Bearer ${key}` }, timeout: 15000 }
       );
       if (res.data?.choices?.[0]?.message?.content) {

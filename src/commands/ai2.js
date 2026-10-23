@@ -25,7 +25,7 @@ async function callAI(messages, temperature = 0.7) {
         }));
         const res = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${key}`,
-            { contents, generationConfig: { temperature, maxOutputTokens: 1000 } },
+            { contents, generationConfig: { temperature, maxOutputTokens: 4096 } },
             { timeout: 20000 }
         );
         return res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -44,7 +44,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
     const { key } = await sock.sendMessage(from, { text: ' En train d\'écrire..._' });
 
     const messages = [
-        { role: 'system', content: 'Tu es un assistant WhatsApp concis et bref .' },
+        { role: 'system', content: 'Tu es un assistant WhatsApp utile, détaillé et naturel. Réponds complètement sans te couper.' },
         ...session.history.slice(-10),
         { role: 'user', content: text }
     ];

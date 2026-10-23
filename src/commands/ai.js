@@ -68,7 +68,7 @@ async function callGemini(prompt) {
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
       {
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1000 },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
       },
       { timeout: 30000 }
     );
