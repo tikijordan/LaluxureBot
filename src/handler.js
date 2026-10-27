@@ -150,14 +150,14 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!body || !body.startsWith(PREFIX)) return;
 
+    // Mode lu à chaque message (le fichier peut changer via !public / !private)
+    const botMode = getBotMode();
+
     // Qui peut lancer une commande : décidé dans utils/botmode.js
-    const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner);
+    const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner, botMode);
     if (!canUse) {
-        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=false isOwner=${isOwner} isGroup=${isGroup} senderNumber=${senderNumber} ctx.owner=${ctx.owner}`);
+        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=false mode=${botMode} isOwner=${isOwner} isGroup=${isGroup} senderNumber=${senderNumber} ctx.owner=${ctx.owner}`);
         return;
-    }
-    if (canUse && !isOwner && isGroup) {
-        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=true for non-owner in group (ALLOW_GROUP_ADMINS)`);
     }
 
     // ── Parsing de la commande ─────────────────────────────────
@@ -167,10 +167,6 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     const text    = args.join(' ');
 
     if (!cmdName) return;
-
-    // FIX 2 — lire le mode depuis le fichier à chaque message au lieu d'utiliser
-    //          ctx.botMode qui peut être une valeur figée depuis le démarrage du bot
-    const botMode = getBotMode();
 
     const command = commands[cmdName];
     if (!command) return;

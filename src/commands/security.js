@@ -115,17 +115,18 @@ export default {
   botmode: {
     description: 'Voir le mode actuel du bot (owner)',
     execute: async ({ sock, from }) => {
+      const mode = getBotMode();
       await sock.sendMessage(from, {
-        text: `⚙️ *Accès au bot*\n\n` +
-          `🔒 *Owner-only* — permanent\n\n` +
-          `Seul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\n` +
-          `Les autres utilisateurs sont ignorés (aucune réponse).`,
+        text: mode === 'public'
+          ? `⚙️ *Accès au bot*\n\n🌐 *Mode public*\n\nTout le monde peut utiliser les commandes.\nL'owner conserve ses privilèges étendus.\n\n_Pour restreindre : !private_`
+          : `⚙️ *Accès au bot*\n\n🔒 *Mode privé (owner-only)*\n\nSeul le numéro connecté au bot peut utiliser les commandes, en DM comme en groupe.\n\n_Pour ouvrir à tous : !public_`,
       });
     },
   },
 
   private: {
-    description: 'Confirmer le mode owner-only',
+    description: 'Passer le bot en mode owner-only',
+    private: true,
     execute: async ({ sock, from }) => {
       setBotMode('private');
       await sock.sendMessage(from, {
@@ -138,6 +139,7 @@ export default {
 
   public: {
     description: 'Activer le mode public — tous les membres peuvent utiliser les commandes',
+    private: true,
     execute: async ({ sock, from }) => {
       setBotMode('public');
       await sock.sendMessage(from, {

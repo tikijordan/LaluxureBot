@@ -35,7 +35,10 @@ const MODE_FILE = path.join(__dirname, '../../data/botmode.json');
  */
 export const ALLOW_GROUP_ADMINS = true;
 
-const DEFAULT_MODE = 'private';
+// Mode initial : BOT_MODE du .env (public | private), sinon private.
+// Ensuite, les commandes !public / !private persistent le choix dans data/botmode.json.
+const ENV_MODE = String(process.env.BOT_MODE || '').trim().toLowerCase();
+const DEFAULT_MODE = (ENV_MODE === 'public' || ENV_MODE === 'private') ? ENV_MODE : 'private';
 
 export function normalizeNumber(n) {
   return (n || '').replace(/\D/g, '').replace(/^0+/, '');
@@ -56,12 +59,13 @@ export function isOwnerSender({ fromMe, senderNumber, senderLid, owner, ownerLid
 }
 
 /** Peut-on traiter les commandes de cet expéditeur ? */
-export function canUseBot(isOwner, isGroup = false, senderNumber, ownerNumber) {
+export function canUseBot(isOwner, isGroup = false, senderNumber, ownerNumber, mode = DEFAULT_MODE) {
   if (isOwner === true) return true;
   // Utilisation du propriétaire passé en paramètre (numéro de session connectée)
   // Au lieu du global process.env.OWNER_NUMBER pour supporter plusieurs sessions
   if (ownerNumber && senderNumber && normalizeNumber(senderNumber) === normalizeNumber(ownerNumber)) return true;
-  return ALLOW_GROUP_ADMINS && isGroup === true;
+  // public : tout le monde ; private : uniquement le propriétaire (et owner personnel)
+  return String(mode || 'private').toLowerCase() === 'public';
 }
 
 /** Droits sur UNE commande. Retourne { allowed: true } ou { allowed: false, message }. */
@@ -108,7 +112,8 @@ export function getBotMode() {
   try {
     if (fs.existsSync(MODE_FILE)) {
       const data = JSON.parse(fs.readFileSync(MODE_FILE, 'utf-8'));
-      modeCache = data.mode || DEFAULT_MODE;
+      const saved = String(data.mode || '').toLowerCase();
+      modeCache = (saved === 'public' || saved === 'private') ? saved : DEFAULT_MODE;
       return modeCache;
     }
   } catch {}
@@ -126,7 +131,7 @@ export function setBotMode(mode) {
   }
 }
 
-/** Crée le fichier au démarrage s'il n'existe pas (jamais 'public'). */
+/** Crée le fichier au démarrage s'il n'existe pas (valeur initiale : BOT_MODE du .env). */
 export function ensureBotModeFile() {
   if (!fs.existsSync(MODE_FILE)) setBotMode(DEFAULT_MODE);
 }

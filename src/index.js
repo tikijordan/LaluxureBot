@@ -322,6 +322,10 @@ const IQ_CHECK_TIMEOUT_MS    = 20 * 1000;
 // message : certains échanges restent indéchiffrables et le bot devient muet sur ce chat.
 const recentMessages = new Map();
 const RECENT_MESSAGES_MAX = 2000;
+// IDs des messages envoyés par le bot : WhatsApp nous les renvoie en écho
+// (fromMe=true). On les ignore pour ne jamais les traiter comme des reçus.
+const sentMessageIds = new Map();
+const SENT_IDS_MAX = 3000;
 function rememberMessage(msg) {
     const id = msg?.key?.id;
     if (!id || !msg?.message) return;
@@ -580,6 +584,13 @@ async function startSession(sessionId, phoneNumber = null) {
             try {
                 // Conserve le message envoyé pour répondre aux retry receipts de WhatsApp.
                 if (result?.key?.id && result?.message) rememberMessage({ key: result.key, message: result.message });
+                // Mémorise l'ID pour ignorer l'écho de nos propres envois.
+                if (result?.key?.id) {
+                    sentMessageIds.set(result.key.id, Date.now());
+                    while (sentMessageIds.size > SENT_IDS_MAX) {
+                        sentMessageIds.delete(sentMessageIds.keys().next().value);
+                    }
+                }
                 if (jid && jid.endsWith('@g.us') && result?.key) {
                     if (!global.botMessages.has(jid)) global.botMessages.set(jid, []);
                     const arr = global.botMessages.get(jid);
@@ -1058,8 +1069,6 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!isCurrentSocket(state, sock)) return; // ignore les événements d'un ancien socket
         // Preuve que le flux ENTRANT fonctionne (quel que soit le type d'événement).
         touchSession(state);
-        // DIAGNOSTIC : tout événement reçu de WhatsApp, quel que soit le filtre appliqué ensuite
-        addLog('info', `[${state.id}] EVENT messages.upsert type=${type} n=${messages.length} chats=${[...new Set(messages.map(m => m.key?.remoteJid))].slice(0,3).join(',')} fromMe=${messages.map(m => m.key?.fromMe).join(',')}`);
         if (type !== 'notify') {
             // 'append' = normalement la sync d'historique au démarrage → à ignorer.
             // MAIS après une coupure (redéploiement, reconnexion réseau...),
@@ -1079,20 +1088,15 @@ async function startSession(sessionId, phoneNumber = null) {
         }
 
         for (const msg of messages) {
+            // Écho d'un message envoyé par le bot : on l'ignore totalement
+            // (sinon il apparaît en fromMe=true et peut se répondre à lui-même).
+            if (msg.key?.fromMe && sentMessageIds.has(msg.key.id)) continue;
             if (!msg.message) {
+                // Message illisible : Baileys a déjà demandé automatiquement à
+                // l'expéditeur de le renvoyer (retry receipt). On ne supprime
+                // aucune clé et on ne coupe pas la session.
                 if (msg.messageStubType === WAMessageStubType.CIPHERTEXT) {
-                    // Message illisible : Baileys a DÉJÀ demandé automatiquement à
-                    // l'expéditeur de le renvoyer (retry receipt). On ne touche à rien :
-                    // supprimer les clés ou couper la session rend la session durablement
-                    // muette (prekeys privées perdues = plus rien ne se déchiffre).
                     state.cipherCount = (state.cipherCount || 0) + 1;
-                    const n = state.cipherCount;
-                    if (n <= 3 || n % 50 === 0) {
-                        addLog('warn', `[${state.id}] ${n} message(s) illisible(s) — renvoi demandé automatiquement, session conservée (chat=${msg.key?.remoteJid})`);
-                    }
-                    touchSession(state);
-                } else if (msg.key?.remoteJid !== 'status@broadcast' && !msg.messageStubType) {
-                    addLog('warn', `[${state.id}] MSG SANS CONTENU id=${msg.key?.id} remoteJid=${msg.key?.remoteJid}`);
                 }
                 continue;
             }
@@ -1103,8 +1107,9 @@ async function startSession(sessionId, phoneNumber = null) {
             if (msg.key.fromMe) rememberMessage(msg);
             state.lastActivity = Date.now();
             state.lastDeliveryAt = Date.now();
-            if (type === 'notify') {
-                addLog('info', `[${state.id}] MSG reçu (temps réel) chat=${msg.key.remoteJid} fromMe=${msg.key.fromMe} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
+            if (type === 'notify' && !msg.key.fromMe) {
+                const who = msg.key.participant || msg.key.remoteJid;
+                addLog('info', `[${state.id}] MSG REÇU de=${who} chat=${msg.key.remoteJid} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
             }
             const msgId = msg.key.id;
             if (!msgId || processedMsgIds.has(msgId)) continue;
@@ -1361,8 +1366,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                 }
                 if (!isCmd) continue;
-                const mayUseBot = currentBotMode === 'public'
-                    || canUseBot(isOwner, isGroup, senderNumber, OWNER);
+                const mayUseBot = canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode);
                 if (!mayUseBot) continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
