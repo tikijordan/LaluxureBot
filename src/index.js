@@ -165,7 +165,8 @@ import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
-import { isOwnerSender, ensureBotModeFile } from './utils/botmode.js';
+import { isOwnerSender, ensureBotModeFile, canUseBot } from './utils/botmode.js';
+import { resolveIsOwner, extractMessageBody } from './utils/message.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
 import { isAntilinkEnabled } from './utils/antilink.js';
 import { getFilters as getBadWordFilters } from './utils/filter.js';
@@ -221,6 +222,29 @@ const PROCESS_OWNER = `${os.hostname()}-${process.pid}-${Date.now()}`;
 const SESSION_LOCK_TTL = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000');
 const SESSION_LOCK_HB  = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000');
 const sessionLocks = new Map(); // sessionId -> { hb, lockName, ownerId }
+
+/** Résout ownerLid immédiatement (commandes groupe) — évite d'attendre lid-mapping ou le cooldown 60s. */
+async function resolveOwnerLidIfNeeded(sock, state, ownerNum) {
+    if (!ownerNum) return state.ownerLid || null;
+    const envLid = (process.env.OWNER_LID || '').replace(/\D/g, '');
+    if (envLid && !state.ownerLid) state.ownerLid = envLid;
+    if (state.ownerLid) return state.ownerLid;
+    try {
+        if (sock.user?.lid) {
+            state.ownerLid = sock.user.lid.split('@')[0].split(':')[0];
+            return state.ownerLid;
+        }
+        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${ownerNum}@s.whatsapp.net`]);
+        if (pairs?.[0]?.lid) {
+            state.ownerLid = pairs[0].lid.split('@')[0].split(':')[0];
+            if (!state.lidCache) state.lidCache = {};
+            state.lidCache[ownerNum] = state.ownerLid;
+            state.lidCache[state.ownerLid] = ownerNum;
+            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${state.ownerLid}`);
+        }
+    } catch {}
+    return state.ownerLid || null;
+}
 
 async function acquireSessionLock(sessionId) {
     if (sessionLocks.has(sessionId)) return true;
@@ -281,30 +305,88 @@ function forgetSession(sid) {
     if (st?.atlasTimer) { clearTimeout(st.atlasTimer); st.atlasTimer = null; }
 }
 
-// ── Vérification de livraison : le bot s'envoie un message vide toutes les 10 min ──
-// Si rien n'est reçu dans les 90 s qui suivent, la session est relancée (connexion morte).
-const PROBE_INTERVAL_MS = 10 * 60 * 1000;
-const PROBE_TIMEOUT_MS  = 90 * 1000;
-async function runDeliveryProbe(sid) {
-    const st = sessions.get(sid);
-    if (!st || st.connection !== 'open' || !st.sock || !st.connectedNumber) return;
-    const sentAt = Date.now();
-    try {
-        await st.sock.sendMessage(`${st.connectedNumber}@s.whatsapp.net`, { text: '\u200b' });
-    } catch (e) {
-        addLog('warn', `[${sid}] Vérif livraison : envoi impossible (${e.message})`);
+// ── Santé de session : on surveille le flux ENTRANT, pas les envois ──
+// Un socket peut rester "open" alors que le flux entrant est mort : le bot envoie
+// normalement mais ne reçoit plus rien. On ne se base donc plus sur des messages de
+// test envoyés à soi-même (spam + faux positifs) : on mesure le silence réel de
+// WhatsApp. Aucune récupération ne supprime d'identifiants ni de clés.
+const RECEIVE_STALL_MS       = 30 * 60 * 1000;   // 30 min de silence entrant = flux suspect
+const STALL_RESTART_FIRST_MS = 30 * 60 * 1000;   // délai mini entre deux rafraîchissements
+const STALL_RESTART_MAX_MS   = 6 * 60 * 60 * 1000; // plafond du délai (double à chaque fois)
+const WA_QUERY_TIMEOUT_MS    = 120 * 1000;       // jamais 0 : une requête perdue ne doit pas bloquer la réception
+const WA_MAX_MSG_RETRY       = 5;                // demandes de renvoi d'un message illisible
+const IQ_CHECK_TIMEOUT_MS    = 20 * 1000;
+
+// Cache des messages récents : sert à répondre aux « retry receipts » de WhatsApp.
+// Sans ce cache, getMessage() renvoie undefined et WhatsApp ne peut pas récupérer un
+// message : certains échanges restent indéchiffrables et le bot devient muet sur ce chat.
+const recentMessages = new Map();
+const RECENT_MESSAGES_MAX = 2000;
+function rememberMessage(msg) {
+    const id = msg?.key?.id;
+    if (!id || !msg?.message) return;
+    recentMessages.delete(id);
+    recentMessages.set(id, msg);
+    while (recentMessages.size > RECENT_MESSAGES_MAX) {
+        const oldest = recentMessages.keys().next().value;
+        recentMessages.delete(oldest);
     }
-    setTimeout(() => {
-        const cur = sessions.get(sid);
-        if (!cur || cur.connection !== 'open') return;
-        if ((cur.lastDeliveryAt || 0) >= sentAt) return;
-        addLog('warn', `[${sid}] Vérif livraison échouée : aucun message reçu depuis 90s — reconnexion`);
-        try { cur.sock.end(new Error('delivery-probe')); } catch {}
-    }, PROBE_TIMEOUT_MS);
 }
-setInterval(() => {
-    for (const sid of sessions.keys()) runDeliveryProbe(sid).catch(() => {});
-}, PROBE_INTERVAL_MS).unref?.();
+
+/** Activité RÉELLE reçue de WhatsApp (utilisée par le watchdog de réception). */
+function touchSession(state) {
+    if (!state) return;
+    state.lastEventAt = Date.now();
+    // Le trafic est revenu : on repart d'un backoff nul pour la surveillance.
+    state.stallCooldownMs = 0;
+    state.stallRestarts = 0;
+}
+
+/** Les handlers d'un ancien socket ne doivent jamais piloter la session courante. */
+function isCurrentSocket(state, sock) {
+    return !!state && state.sock === sock;
+}
+
+// Redémarre UNIQUEMENT le socket (creds.json, prekeys et clés de session sont conservés).
+// C'est la seule action de récupération : elle rafraîchit le flux entrant sans casser
+// l'appairage, sans supprimer de fichier et sans nouveau QR code.
+function restartSocket(state, { reason = 'inconnu', delayMs = 2000 } = {}) {
+    if (!state || state.restarting) return false;
+    state.restarting = true;
+    state.lastRestartReason = reason;
+    state.lastRestartAt = Date.now();
+    addLog('warn', `[${state.id}] Redémarrage du socket (${reason}) — identifiants conservés`);
+    clearReconnectTimer(state.id);
+    if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
+    if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
+    const old = state.sock;
+    state.sock = null;              // libère immédiatement startSession()
+    state.connection = 'connecting';
+    try {
+        const n = state.connectedNumber;
+        if (n && activeSocketByNumber.get(n)?.sock === old) activeSocketByNumber.delete(n);
+    } catch {}
+    setTimeout(() => {
+        try { old?.ws?.close(); } catch {}
+        try { old?.end(new Error(`restart:${reason}`)); } catch {}
+    }, 0);
+    const t = setTimeout(async () => {
+        state.restarting = false;
+        try {
+            await startSession(state.id);
+        } catch (e) {
+            addLog('error', `[${state.id}] Redémarrage impossible: ${e.message} — nouvelle tentative dans 15s`);
+            scheduleReconnect(state.id, 15_000);
+            return;
+        }
+        if (state.sock || state.connection === 'open' || state.needsRepair) return;
+        if (deletedSessionIds.has(state.id)) return;
+        addLog('warn', `[${state.id}] Aucun socket après redémarrage — nouvelle tentative dans 30s`);
+        scheduleReconnect(state.id, 30_000);
+    }, Math.max(500, delayMs));
+    t.unref?.();
+    return true;
+}
 
 // Sauvegarde Atlas différée : une écriture au plus toutes les 2 min par session
 const ATLAS_DEBOUNCE_MS = 2 * 60 * 1000;
@@ -378,9 +460,18 @@ function clearReconnectTimer(sessionId) {
 
 function scheduleReconnect(sessionId, delayMs = 3000) {
     clearReconnectTimer(sessionId);
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
         reconnectTimerBySessionId.delete(sessionId);
-        startSession(sessionId);
+        try {
+            await startSession(sessionId);
+        } catch (e) {
+            // Ne jamais laisser une session morte sans nouvelle tentative : c'est
+            // exactement ce qui donne un bot « connecté » mais totalement muet.
+            const st = sessions.get(sessionId);
+            if (st && !st.sock) st.connection = 'close';
+            addLog('error', `[${sessionId}] Échec du démarrage/reconnexion: ${e.message} — nouvelle tentative dans 15s`);
+            scheduleReconnect(sessionId, 15_000);
+        }
     }, delayMs);
     reconnectTimerBySessionId.set(sessionId, t);
 }
@@ -412,7 +503,7 @@ async function startSession(sessionId, phoneNumber = null) {
     }
     if (!(await acquireSessionLock(sessionId))) { scheduleSessionRetry(sessionId, phoneNumber); return; }
     const existing = sessions.get(sessionId);
-    if (existing && (existing.connection === 'open' || existing.connection === 'connecting')) { 
+    if (existing?.sock && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
         return; 
     }
@@ -434,9 +525,12 @@ async function startSession(sessionId, phoneNumber = null) {
     }
 
     state.connection = 'connecting';
+    state.restarting = false;
     state.qrCode = null;
     state.pairingCode = null;
     state.authPath = authPath;
+    state.lastEventAt = Date.now();
+    state.startedAt = Date.now();
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
     const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
     const saveCreds = async () => {
@@ -453,36 +547,39 @@ async function startSession(sessionId, phoneNumber = null) {
         auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
         browser: ['Ubuntu','Chrome','20.0.0'],
         syncFullHistory: false, markOnlineOnConnect: true,
-        connectTimeoutMs: 60000, defaultQueryTimeoutMs: 0,
-        retryRequestDelayMs: 2000, maxMsgRetryCount: 2, keepAliveIntervalMs: 60000,
+        // Timeout fini (et non 0) : une requête sans réponse ne doit jamais bloquer
+        // indéfiniment la file de déchiffrement (symptôme « connecté mais muet »).
+        connectTimeoutMs: 60000, defaultQueryTimeoutMs: WA_QUERY_TIMEOUT_MS,
+        retryRequestDelayMs: 2000, maxMsgRetryCount: WA_MAX_MSG_RETRY, keepAliveIntervalMs: 60000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
-        // Indispensable au déchiffrement des votes de sondage (sans ça, aucun vote n'est compté)
-        getMessage: async (key) => global.pollStore?.get(key?.id)?.msg?.message || undefined,
+        // Indispensable aux retry receipts : on doit pouvoir renvoyer un message déjà
+        // envoyé/reçu quand WhatsApp le demande (sondages + messages non déchiffrés).
+        getMessage: async (key) =>
+            recentMessages.get(key?.id)?.message
+            || global.pollStore?.get(key?.id)?.msg?.message
+            || undefined,
     });
 
     state.sock = sock;
+    sock.state = state;
     if (!sock.__sendMessageWrapped) {
         const _origSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options) => {
-            // Timeout ciblé (45s) UNIQUEMENT sur sendMessage — sans toucher au
-            // defaultQueryTimeoutMs global (qui doit rester illimité, sinon ça
-            // casse des opérations internes de Baileys nécessaires à la
-            // réception des messages, comme observé). Si sendMessage reste
-            // bloqué (connexion dégradée), ça lève une erreur au lieu de
-            // bloquer indéfiniment la commande en cours.
+            // Pas de limite de temps imposée ici : la réponse attend l'envoi réel.
             const t0 = Date.now();
             if (!sock.__sentJids) sock.__sentJids = new Set();
             const firstToJid = !sock.__sentJids.has(jid);
             sock.__sentJids.add(jid);
             let result;
             try {
-                // Pas de limite de temps : la réponse attend l'envoi réel
                 result = await _origSendMessage(jid, content, options);
             } finally {
                 const dt = Date.now() - t0;
                 if (dt > 3000) addLog('warn', `[${sessionId}] envoi lent ${(dt/1000).toFixed(1)}s vers ${jid?.endsWith('@g.us') ? 'groupe' : 'privé'} (1er envoi vers ce chat: ${firstToJid})`);
             }
             try {
+                // Conserve le message envoyé pour répondre aux retry receipts de WhatsApp.
+                if (result?.key?.id && result?.message) rememberMessage({ key: result.key, message: result.message });
                 if (jid && jid.endsWith('@g.us') && result?.key) {
                     if (!global.botMessages.has(jid)) global.botMessages.set(jid, []);
                     const arr = global.botMessages.get(jid);
@@ -512,6 +609,7 @@ async function startSession(sessionId, phoneNumber = null) {
     }
 
     sock.ev.on('creds.update', wrapHandler('creds.update', async () => {
+        if (!isCurrentSocket(state, sock)) return; // un ancien socket ne doit pas écraser les creds
         await saveCreds(); // Écriture disque local
         scheduleAtlasBackup(state); // Atlas : au plus une écriture toutes les 2 min, seulement si les identifiants ont changé
         try {
@@ -535,6 +633,7 @@ async function startSession(sessionId, phoneNumber = null) {
     }
 
     sock.ev.on('lid-mapping.update', ({ pn, lid }) => {
+        if (!isCurrentSocket(state, sock)) return;
         if (!pn || !lid) return;
         const pnNum  = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
         const lidNum = lid.split('@')[0].split(':')[0];
@@ -586,6 +685,8 @@ async function startSession(sessionId, phoneNumber = null) {
     }
 
     sock.ev.on('messages.update', (updates) => {
+        if (!isCurrentSocket(state, sock)) return;
+        touchSession(state);
         for (const { key, update } of updates) {
             // ── Anti-delete : message supprimé par un membre → on le renvoie dans le groupe ──
             if (update?.messageStubType === WAMessageStubType.REVOKE) {
@@ -609,6 +710,8 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     sock.ev.on('messages.reaction', async (events) => {
+        if (!isCurrentSocket(state, sock)) return;
+        touchSession(state);
         const OWNER = (state.connectedNumber || sock.user?.id?.split(':')[0] || '').replace(/\D/g, '');
         for (const { key, reaction } of events) {
             try {
@@ -662,6 +765,8 @@ async function startSession(sessionId, phoneNumber = null) {
         }
     }, 60 * 60 * 1000);
     sock.ev.on('group-participants.update', wrapHandler('group-participants.update', async ({ id: from, participants, action }) => {
+        if (!isCurrentSocket(state, sock)) return;
+        touchSession(state);
         if (!from || !participants?.length) return;
         try {
             const meta = await sock.groupMetadata(from).catch(() => null);
@@ -750,6 +855,7 @@ async function startSession(sessionId, phoneNumber = null) {
     }));
 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+        if (!isCurrentSocket(state, sock)) return; // événement d'un socket remplacé
         if (qr && !phoneNumber) {
             state.qrCode = qr;
             state.connection = 'connecting';
@@ -795,6 +901,10 @@ async function startSession(sessionId, phoneNumber = null) {
             state.connectedNumber = num;
             state.lastActivity    = Date.now();
             state.lastConnectedAt = Date.now(); // pour la reconnexion périodique
+            // Le flux entrant est considéré sain au moment de la connexion.
+            state.lastEventAt      = Date.now();
+            state.restarting       = false;
+            state.needsRepair      = false;
             reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
             ensureSingleActiveSocketForNumber(num, state.id, sock);
             if (sessionId !== num && !sessions.has(num)) {
@@ -826,8 +936,26 @@ async function startSession(sessionId, phoneNumber = null) {
                 // on ne quitte PAS: continuation sur le même socket → réponse immédiate
             }
             state.badSessionCount = 0;
+            state.badSessionFirstAt = null;
             state.cipherCount = 0; // reset compteur messages illisibles après reconnexion réussie
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
+            // Auto-réparation : si les prekeys privées manquent (ancienne logique qui les
+            // supprimait, restauration partielle…), on publie un nouveau lot. Sans ça,
+            // WhatsApp distribue des prekeys que le bot ne peut plus déchiffrer.
+            setTimeout(async () => {
+                if (!isCurrentSocket(state, sock)) return;
+                try {
+                    const prekeyFiles = fs.readdirSync(state.authPath).filter(f => /^pre-key-\d+\.json$/.test(f));
+                    // 0 prekey après 15 s = Baileys n'en a pas non plus publié (session
+                    // endommagée par l'ancienne logique) → on publie un lot neuf.
+                    if (prekeyFiles.length === 0 && typeof sock.uploadPreKeys === 'function') {
+                        await sock.uploadPreKeys();
+                        addLog('warn', `[${state.id}] Aucune prekey locale — nouveau lot publié pour rétablir la réception`);
+                    }
+                } catch (e) {
+                    addLog('warn', `[${state.id}] Réparation des prekeys impossible: ${e.message}`);
+                }
+            }, 15000);
 // ⏳ PRÉCHAUFFAGE DIFFÉRÉ des groupes : le bot répond immédiatement, les métadonnées chargent en arrière-plan
             (async () => {
                 await new Promise(r => setTimeout(r, 30_000)); // attendre 30s avant de charger les groupes
@@ -857,64 +985,18 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
             } catch {}
             await backupIfDue(state, num).catch(e => addLog('warn', `[MongoDB] saveSession: ${e.message}`));
-            // Probe de livraison immédiate à la connexion pour détecter vite les zombies
-            runDeliveryProbe(state.id).catch(() => {});
             if (state.pingInterval) clearInterval(state.pingInterval);
             state.pingInterval = setInterval(async () => {
                 try { await sock.sendPresenceUpdate('available'); state.lastPing = new Date().toISOString(); } catch {}
             }, 30_000);
-            if (state.healthCheckInterval) clearInterval(state.healthCheckInterval);
-            state.healthCheckInterval = setInterval(async () => {
-                const wsState = sock.ws?.readyState;
-                if (wsState === 3) {
-                    addLog('warn', `[${state.id}] Health check: socket CLOSED sans événement — reconnexion`);
-                    state.connection = 'close';
-                    scheduleReconnect(state.id, 3000);
-                    return;
-                }
-                // Test de livraison réel toutes les 2 min (pas juste ping WS) :
-                // détection des connexions "zombie" où l'envoi marche mais la réception est bloquée.
-                if (wsState === 1) {
-                    // 1. Ping WebSocket basique
-                    const wsAlive = await wsPingCheck(sock);
-                    if (!wsAlive) {
-                        addLog('warn', `[${state.id}] Health check: WS ping échoué — reconnexion`);
-                        state.connection = 'close';
-                        try { sock.ws?.close(); } catch {}
-                        try { sock.end(); } catch {}
-                        scheduleReconnect(state.id, 5000);
-                        return;
-                    }
-                    // 2. Test de livraison réel : envoi message test + attente écho (30s max)
-                    // Ne fait ça que si inactif depuis > 30s pour ne pas spammer
-                    const inactiveMs = Date.now() - (state.lastDeliveryAt || state.lastActivity || 0);
-                    if (inactiveMs > 30_000) {
-                        const testSentAt = Date.now();
-                        try {
-                            await sock.sendMessage(`${state.connectedNumber}@s.whatsapp.net`, { text: '\u200b' });
-                            // Attendre max 30s pour la réception de l'écho
-                            await new Promise(r => setTimeout(r, 30_000));
-                            if ((state.lastDeliveryAt || 0) < testSentAt) {
-                                addLog('warn', `[${state.id}] Health check: livraison bloquée (pas d'écho en 30s) — reconnexion`);
-                                state.connection = 'close';
-                                try { sock.ws?.close(); } catch {}
-                                try { sock.end(); } catch {}
-                                scheduleReconnect(state.id, 5000);
-                            }
-                        } catch (e) {
-                            addLog('warn', `[${state.id}] Health check: envoi test impossible (${e.message}) — reconnexion`);
-                            state.connection = 'close';
-                            try { sock.end(new Error('health-check-send-failed')); } catch {}
-                            scheduleReconnect(state.id, 5000);
-                        }
-                    }
-                }
-            }, 2 * 60 * 1000);
+            // (Plus de « health check » local : la surveillance du flux entrant est
+            // centralisée dans le watchdog, qui ne coupe jamais la session.)
         }
 
         if (connection === 'close') {
             state.connection = 'close';
             state.lastDisconnectAt = Date.now();
+            if (state.sock === sock) state.sock = null; // libère startSession() pour la reconnexion
             if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null; }
             if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
             const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -924,41 +1006,34 @@ async function startSession(sessionId, phoneNumber = null) {
                 const prev = n ? activeSocketByNumber.get(n) : null;
                 if (prev?.sock === sock) activeSocketByNumber.delete(n);
             } catch {}
-            // badSession (500) : WhatsApp refuse les identifiants. Reconnecter ne sert à rien
-            // et les identifiants restaurés depuis Atlas reviendraient à chaque démarrage.
+            // badSession (500) : WhatsApp refuse la poignée de main. On ne supprime RIEN
+            // (ni clés, ni session) : on retente quelques fois avec un délai croissant,
+            // puis on demande un réappairage manuel. Aucun message ni identifiant n'est perdu.
             if (code === DisconnectReason.badSession) {
+                const now = Date.now();
+                if (!state.badSessionFirstAt || now - state.badSessionFirstAt > 30 * 60 * 1000) {
+                    state.badSessionFirstAt = now;
+                    state.badSessionCount = 0;
+                }
                 state.badSessionCount = (state.badSessionCount || 0) + 1;
-                if (state.badSessionCount < 2) {
-                    // 1er refus : on renégocie les clés de chiffrement des conversations.
-                    // creds.json (l'identité de l'appareil) est conservé : pas de nouveau jumelage.
-                    if (state.badSessionCount === 1 && state.authPath && fs.existsSync(state.authPath)) {
-                        const keyFiles = fs.readdirSync(state.authPath).filter(f => /^(session-|sender-key-|pre-key-|app-state-sync-)/.test(f));
-                        for (const f of keyFiles) { try { fs.unlinkSync(path.join(state.authPath, f)); } catch {} }
-                        addLog('warn', `[${state.id}] Session refusée (500) — ${keyFiles.length} clé(s) de chiffrement effacée(s) pour renégociation (identité conservée)`);
-                        const num = (state.connectedNumber || state.id).replace(/\D/g, '');
-                        saveSessionMongo(state.id, num, state.authPath).catch(() => {});
-                    } else {
-                        addLog('warn', `[${state.id}] Session refusée par WhatsApp (500) — nouvelle tentative`);
-                    }
-                    scheduleReconnect(state.id, 3000);
+                if (state.badSessionCount < 5) {
+                    const delay = Math.min(3000 * state.badSessionCount, 60_000);
+                    addLog('warn', `[${state.id}] Session refusée (500, tentative ${state.badSessionCount}/5) — nouvelle tentative dans ${Math.round(delay/1000)}s, identifiants intacts`);
+                    scheduleReconnect(state.id, delay);
                 } else {
-                    addLog('error', `[${state.id}] Session refusée 2 fois (500) — identifiants retirés, recrée la session depuis le tableau de bord`);
-                    forgetSession(state.id);
-                    try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
-                    deleteSessionMongo(state.id).catch(() => {});
-                    sessions.delete(state.id);
-                    const num = (state.connectedNumber || '').replace(/\D/g, '');
-                    if (num) sock.sendMessage(`${num}@s.whatsapp.net`, { text: `⚠️ WhatsApp a refusé la session du bot (500).\n\nLes identifiants ont été retirés. Pour réparer : dans le tableau de bord, recrée la session avec un QR ou un code de jumelage, puis supprime l'ancien appareil dans WhatsApp > Appareils connectés.` }).catch(() => {});
+                    state.needsRepair = true;
+                    addLog('error', `[${state.id}] WhatsApp refuse la session (500) après 5 tentatives. Rien n'a été supprimé : clique « Redémarrer » sur le dashboard (ou réappaire la session) puis supprime l'ancien appareil dans WhatsApp > Appareils connectés.`);
+                    addLog('info', `[${state.id}] Nouvelle tentative automatique dans 30 min (identifiants conservés)`);
+                    scheduleReconnect(state.id, 30 * 60 * 1000);
                 }
                 return;
             }
             if (code === DisconnectReason.loggedOut) {
-                addLog('warn', `[${state.id}] Session loggedOut (401) — suppression complète (local + Mongo)`);
+                // 401 = l'appareil a été retiré côté WhatsApp : les identifiants sont
+                // définitivement invalides, il faut un nouveau jumelage. C'est le SEUL
+                // cas où la session est supprimée (aucune donnée exploitable ne reste).
+                addLog('warn', `[${state.id}] Session loggedOut (401) — appareil retiré, réappairage nécessaire (session supprimée)`);
                 try { await sock.end(); } catch {}
-                try {
-                    const n = state.connectedNumber;
-                    if (n && activeSocketByNumber.get(n)?.sock === sock) activeSocketByNumber.delete(n);
-                } catch {}
                 forgetSession(state.id);
                 try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
                 sessions.delete(state.id);
@@ -980,6 +1055,9 @@ async function startSession(sessionId, phoneNumber = null) {
     });
 
     sock.ev.on('messages.upsert', wrapHandler('messages.upsert', async ({ messages, type }) => {
+        if (!isCurrentSocket(state, sock)) return; // ignore les événements d'un ancien socket
+        // Preuve que le flux ENTRANT fonctionne (quel que soit le type d'événement).
+        touchSession(state);
         // DIAGNOSTIC : tout événement reçu de WhatsApp, quel que soit le filtre appliqué ensuite
         addLog('info', `[${state.id}] EVENT messages.upsert type=${type} n=${messages.length} chats=${[...new Set(messages.map(m => m.key?.remoteJid))].slice(0,3).join(',')} fromMe=${messages.map(m => m.key?.fromMe).join(',')}`);
         if (type !== 'notify') {
@@ -1003,40 +1081,26 @@ async function startSession(sessionId, phoneNumber = null) {
         for (const msg of messages) {
             if (!msg.message) {
                 if (msg.messageStubType === WAMessageStubType.CIPHERTEXT) {
-                    // Message reçu mais illisible : les clés de session ne correspondent plus.
-                    // Sans ce signalement il est ignoré en silence (commandes jamais lues).
+                    // Message illisible : Baileys a DÉJÀ demandé automatiquement à
+                    // l'expéditeur de le renvoyer (retry receipt). On ne touche à rien :
+                    // supprimer les clés ou couper la session rend la session durablement
+                    // muette (prekeys privées perdues = plus rien ne se déchiffre).
                     state.cipherCount = (state.cipherCount || 0) + 1;
-                    addLog('warn', `[${state.id}] MSG ILLISIBLE (clés de session désynchronisées) chat=${msg.key?.remoteJid} — ${state.cipherCount} au total`);
-                    
-                    // AUTO-FIX : à 3 messages illisibles, on force la renégociation des clés
-                    // (même logique que code 500 badSession : supprimer les clés de chiffrement,
-                    // garder creds.json = identité conservée, pas de nouveau jumelage nécessaire)
-                    if (state.cipherCount === 3) {
-                        addLog('warn', `[${state.id}] 3 messages illisibles — renégociation forcée des clés de chiffrement...`);
-                        if (state.authPath && fs.existsSync(state.authPath)) {
-                            const keyFiles = fs.readdirSync(state.authPath).filter(f => /^(session-|sender-key-|pre-key-|app-state-sync-)/.test(f));
-                            for (const f of keyFiles) { try { fs.unlinkSync(path.join(state.authPath, f)); } catch {} }
-                            addLog('warn', `[${state.id}] ${keyFiles.length} clé(s) de chiffrement effacée(s) — reconnexion pour renégociation`);
-                            const num = (state.connectedNumber || state.id).replace(/\D/g, '');
-                            saveSessionMongo(state.id, num, state.authPath).catch(() => {});
-                        }
-                        // Forcer la reconnexion pour déclencher la renégociation
-                        try { sock.end(new Error('cipher-renegotiation')); } catch {}
-                        scheduleReconnect(state.id, 3000);
-                        return; // sortir du handler, la session va redémarrer
+                    const n = state.cipherCount;
+                    if (n <= 3 || n % 50 === 0) {
+                        addLog('warn', `[${state.id}] ${n} message(s) illisible(s) — renvoi demandé automatiquement, session conservée (chat=${msg.key?.remoteJid})`);
                     }
-                    
-                    if (state.cipherCount % 100 === 0) {
-                        sock.sendMessage(`${(state.connectedNumber || '').replace(/\D/g, '')}@s.whatsapp.net`, {
-                            text: `⚠️ Le bot reçoit des messages illisibles (clés de session désynchronisées).\n\nPour réparer : dans le tableau de bord, supprime cette session, puis recrée-la avec un QR ou un code de jumelage.`,
-                        }).catch(() => {});
-                    }
+                    touchSession(state);
                 } else if (msg.key?.remoteJid !== 'status@broadcast' && !msg.messageStubType) {
                     addLog('warn', `[${state.id}] MSG SANS CONTENU id=${msg.key?.id} remoteJid=${msg.key?.remoteJid}`);
                 }
                 continue;
             }
             if (msg.key.remoteJid === 'status@broadcast') continue;
+            // Cache des messages ENVOYÉS (y compris depuis un autre appareil) : WhatsApp
+            // peut nous demander de les renvoyer pour un destinataire qui n'a pas pu les
+            // déchiffrer. On ne mémorise pas les messages reçus (évite tout écho).
+            if (msg.key.fromMe) rememberMessage(msg);
             state.lastActivity = Date.now();
             state.lastDeliveryAt = Date.now();
             if (type === 'notify') {
@@ -1057,13 +1121,23 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (!OWNER) continue; // session pas encore connectée (QR/pairing en attente)
                 const OWNER_PERSONAL = (process.env.OWNER_NUMBER || '').replace(/\D/g, '').replace(/^0+/, '');
                 const from  = isGroup ? rawJid : rawJid;
+                const participantRaw = msg.key.participant || '';
                 let senderJid, senderNumber;
                 const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                const bodyEarly = extractMessageBody(msg);
+                const isCmdEarly = bodyEarly.startsWith(PREFIX);
                 if (fromMe) {
                     senderNumber = OWNER;
-                    senderJid    = isGroup ? (msg.key.participant || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
+                    senderJid    = isGroup ? (participantRaw || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
+                    if (isGroup && participantRaw.endsWith('@lid')) {
+                        const lidNum = participantRaw.split('@')[0].split(':')[0];
+                        state.ownerLid = lidNum;
+                        if (!state.lidCache) state.lidCache = {};
+                        state.lidCache[lidNum] = OWNER;
+                        state.lidCache[OWNER] = lidNum;
+                    }
                 } else if (isGroup) {
-                    senderJid = msg.key.participant || '';
+                    senderJid = participantRaw || '';
                     const isParticipantLid = senderJid.endsWith('@lid');
                     if (isParticipantLid) {
                         const lidNum = senderJid.split('@')[0].split(':')[0];
@@ -1075,11 +1149,15 @@ async function startSession(sessionId, phoneNumber = null) {
                             senderJid    = senderNumber + '@s.whatsapp.net';
                             if (!state.lidCache) state.lidCache = {};
                             state.lidCache[lidNum] = senderNumber;
-                        } else if (state.lidFailCache?.[lidNum] && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000) {
+                        } else if (
+                            !isCmdEarly
+                            && state.lidFailCache?.[lidNum]
+                            && Date.now() - state.lidFailCache[lidNum] < 5 * 60_000
+                        ) {
                             senderNumber = lidNum;
                         } else {
                             try {
-                                const pn = await sock.signalRepository.lidMapping.getPNForLID(senderJid);
+                                const pn = await sock.signalRepository.lidMapping.getPNForLID(participantRaw || senderJid);
                                 if (pn) {
                                     senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
                                     senderJid    = senderNumber + '@s.whatsapp.net';
@@ -1109,45 +1187,27 @@ async function startSession(sessionId, phoneNumber = null) {
                         senderJid = rawJid;
                     }
                 }
-                const normalize = n => (n || '').replace(/\D/g, '').replace(/^0+/, '');
-                let OWNER_LID = state.ownerLid || null;
-                // Résoudre le LID du owner si pas en cache (groupes ET messages privés)
-                if (!OWNER_LID && OWNER && (!state.ownerLidLastTry || Date.now() - state.ownerLidLastTry > 60_000)) {
-                    state.ownerLidLastTry = Date.now();
-                    try {
-                        const pairs = await sock.signalRepository.lidMapping.getLIDsForPNs([`${OWNER}@s.whatsapp.net`]);
-                        if (pairs && pairs.length > 0 && pairs[0]?.lid) {
-                            OWNER_LID = pairs[0].lid.split('@')[0].split(':')[0];
-                            state.ownerLid = OWNER_LID;
-                            addLog('info', `[${state.id}] ownerLid résolu à la demande: ${OWNER_LID}`);
-                        }
-                    } catch {}
+                if (isGroup && isCmdEarly) {
+                    await resolveOwnerLidIfNeeded(sock, state, OWNER);
                 }
-                const senderIsLid = senderJid.endsWith('@lid');
-                const senderLidNum = senderIsLid ? senderJid.split('@')[0].split(':')[0] : null;
-                const isOwner = isOwnerSender({
-                    fromMe, senderNumber, senderLid: senderLidNum,
-                    owner: OWNER, ownerLid: OWNER_LID, ownerPersonal: OWNER_PERSONAL,
+                let OWNER_LID = state.ownerLid || null;
+                const ownerCheckJid = participantRaw || senderJid;
+                let isOwner = resolveIsOwner({
+                    fromMe,
+                    senderNumber,
+                    senderJid: ownerCheckJid,
+                    OWNER,
+                    OWNER_LID,
+                    OWNER_PERSONAL,
+                    lidCache: state.lidCache || {},
                 });
-                // Identité canonique du propriétaire : son message peut arriver avec
-                // son LID (34347558133923) au lieu de son numéro. Si la résolution
-                // LID→numéro a échoué, senderNumber restait le LID : ses notes,
-                // snippets, stats et l'envoi privé (ex: backup) partaient alors sous
-                // une autre identité. On force toujours le numéro connecté.
                 if (isOwner) {
                     senderNumber = OWNER;
                     senderJid    = OWNER + '@s.whatsapp.net';
                 }
-                // Déballer les enveloppes (messages éphémères, vue unique, message modifié, document avec légende)
-                // sinon le texte est vide dès que la conversation a les messages éphémères activés.
                 const unwrapped = unwrapMessage(msg.message);
                 const ct = getContentType(unwrapped);
-                let body = '';
-                if (ct==='conversation') body=unwrapped.conversation||'';
-                else if (ct==='extendedTextMessage') body=unwrapped.extendedTextMessage?.text||'';
-                else if (ct==='imageMessage') body=unwrapped.imageMessage?.caption||'';
-                else if (ct==='videoMessage') body=unwrapped.videoMessage?.caption||'';
-                else if (ct==='documentWithCaptionMessage') body=unwrapped.documentWithCaptionMessage?.message?.documentMessage?.caption||'';
+                let body = bodyEarly || extractMessageBody(msg);
                 const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
                 const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
                 const isVOraw = /^viewOnceMessage/.test(voCt)
@@ -1301,9 +1361,9 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                 }
                 if (!isCmd) continue;
-                // Si le mode est "public", les non-owners peuvent utiliser les commandes
-                // Si le mode est "private", seul l'owner peut utiliser les commandes
-                if (!isOwner && currentBotMode !== 'public') continue;
+                const mayUseBot = currentBotMode === 'public'
+                    || canUseBot(isOwner, isGroup, senderNumber, OWNER);
+                if (!mayUseBot) continue;
                 await handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
@@ -1311,6 +1371,8 @@ async function startSession(sessionId, phoneNumber = null) {
                     prefix: PREFIX,
                     owner: OWNER,
                     ownerLid: state.ownerLid || null,
+                    ownerPersonal: OWNER_PERSONAL,
+                    lidCache: state.lidCache || {},
                     onCommand: (cmd, user) => {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);
@@ -1360,11 +1422,10 @@ async function restoreFromEnvSessionString() {
 }
 
 const WATCHDOG_INTERVAL   = 60 * 1000;       // check toutes les 60s
-const ZOMBIE_THRESHOLD_MS = 20 * 60 * 1000;  // 20 min sans aucun message reçu = suspect
 const PING_TIMEOUT_MS     = 10 * 1000;        // 10s pour recevoir le pong WS
 function wsPingCheck(sock) {
     return new Promise((resolve) => {
-        const ws = sock.ws;
+        const ws = sock?.ws;
         if (!ws || typeof ws.ping !== 'function') { resolve(true); return; } // pas de support ping → on laisse passer
         const t = setTimeout(() => resolve(false), PING_TIMEOUT_MS); // timeout = zombie
         try {
@@ -1379,43 +1440,78 @@ function wsPingCheck(sock) {
     });
 }
 
-setInterval(async () => {
-    const now = Date.now();
-    for (const [id, state] of sessions) {
-        if (state.connection !== 'open' || !state.sock) continue;
-        const wsState = state.sock.ws?.readyState;
-        if (wsState !== undefined && wsState !== 1) {
-            addLog('warn', `[Watchdog] [${id}] WebSocket fermé (readyState=${wsState}) — reconnexion`);
-            if (state.pingInterval)      { clearInterval(state.pingInterval);      state.pingInterval = null; }
-            if (state.healthCheckInterval) { clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
-            state.connection = 'close';
-            try { state.sock.end(); } catch {}
-            scheduleReconnect(id, 3000);
-            continue;
-        }
-
-        const lastActivity = state.lastActivity || state.lastConnectedAt || 0;
-        const inactiveSince = now - lastActivity;
-        if (inactiveSince > ZOMBIE_THRESHOLD_MS) {
-            addLog('info', `[Watchdog] [${id}] Inactif depuis ${Math.round(inactiveSince/60000)}min — vérification WS ping...`);
-            const alive = await wsPingCheck(state.sock);
-            if (!alive) {
-                addLog('warn', `[Watchdog] [${id}] Zombie détecté (pas de pong après ${PING_TIMEOUT_MS/1000}s) — reconnexion forcée`);
-                if (state.pingInterval)       { clearInterval(state.pingInterval);       state.pingInterval = null; }
-                if (state.healthCheckInterval){ clearInterval(state.healthCheckInterval); state.healthCheckInterval = null; }
-                state.connection = 'close';
-                try { state.sock.ws?.close(); } catch {}
-                try { state.sock.end(); } catch {}
-                scheduleReconnect(id, 5000);
-                continue;
-            }
-            addLog('info', `[Watchdog] [${id}] Pong reçu — connexion OK, bot inactif normalement`);
-            state.lastActivity = now;
-        }
-
-        // Présence gérée par pingInterval (30s) — le watchdog ne relance jamais une session pour ça.
+// Vérifie que le canal de réception répond encore (aller-retour IQ avec les serveurs
+// WhatsApp). Si même ça ne répond pas, le socket est mort même si ws.readyState === 1.
+async function iqLivenessCheck(sock, ownNumber) {
+    if (!sock || typeof sock.fetchStatus !== 'function' || !ownNumber) return true;
+    try {
+        await Promise.race([
+            sock.fetchStatus(`${ownNumber}@s.whatsapp.net`),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('iq-timeout')), IQ_CHECK_TIMEOUT_MS)),
+        ]);
+        return true;
+    } catch {
+        return false;
     }
-}, WATCHDOG_INTERVAL);
+}
+
+/**
+ * Watchdog de réception.
+ * Principe : une session saine reçoit régulièrement des messages de WhatsApp.
+ * Un silence total alors que le socket annonce « open » = flux entrant mort.
+ * On rafraîchit alors UNIQUEMENT le socket, jamais les identifiants, et avec un
+ * délai croissant pour éviter les boucles de reconnexion.
+ */
+async function checkSessionHealth(id, state) {
+    if (!state || state.restarting || state.healthChecking) return;
+    if (state.connection !== 'open' || !state.sock) return;
+    state.healthChecking = true;
+    try {
+        await checkSessionHealthInner(id, state);
+    } finally {
+        state.healthChecking = false;
+    }
+}
+
+async function checkSessionHealthInner(id, state) {
+    // 1. WebSocket réellement fermé → on relance.
+    const wsState = state.sock.ws?.readyState;
+    if (wsState !== undefined && wsState !== 1) {
+        restartSocket(state, { reason: `websocket fermé (readyState=${wsState})`, delayMs: 3000 });
+        return;
+    }
+
+    // 2. Silence total du flux entrant.
+    const last = state.lastEventAt || state.lastConnectedAt || Date.now();
+    const silentMs = Date.now() - last;
+    if (silentMs < RECEIVE_STALL_MS) return;
+
+    // Diagnostic non intrusif : WS ping puis aller-retour IQ.
+    const wsAlive = await wsPingCheck(state.sock);
+    const iqAlive = wsAlive ? await iqLivenessCheck(state.sock, state.connectedNumber) : false;
+    if (!sessions.has(id) || state.connection !== 'open' || !state.sock) return;
+
+    // Un socket qui ne répond plus est relancé immédiatement. S'il répond encore,
+    // on temporise (le simple silence peut être normal la nuit).
+    const now = Date.now();
+    const cooldown = state.stallCooldownMs || 0;
+    const cooldownActive = state.lastStallRestartAt && now - state.lastStallRestartAt < cooldown;
+    if (wsAlive && iqAlive && cooldownActive) return;
+
+    state.lastStallRestartAt = now;
+    state.stallCooldownMs = Math.min(cooldown ? cooldown * 2 : STALL_RESTART_FIRST_MS, STALL_RESTART_MAX_MS);
+    state.stallRestarts = (state.stallRestarts || 0) + 1;
+
+    addLog('warn', `[Watchdog] [${id}] Aucun message depuis ${Math.round(silentMs/60000)} min (ws=${wsAlive ? 'ok' : 'muet'}, iq=${iqAlive ? 'ok' : 'muet'}) — rafraîchissement du socket #${state.stallRestarts} (session conservée)`);
+    restartSocket(state, {
+        reason: `flux entrant muet depuis ${Math.round(silentMs/60000)} min`,
+        delayMs: 3000,
+    });
+}
+
+setInterval(() => {
+    for (const [id, state] of sessions) checkSessionHealth(id, state).catch(() => {});
+}, WATCHDOG_INTERVAL).unref?.();
 async function loadExistingSessions() {
     let sessionsToStart = [];
     const mongoOk = await connectMongo();
@@ -1760,7 +1856,10 @@ button:hover{background:#1fb858}
             id: s.id,
             status: s.connection,
             messagesCount: s.messagesCount,
-            lastActivity: s.lastActivity
+            lastActivity: s.lastActivity,
+            silentSeconds: s.lastEventAt ? Math.round((Date.now() - s.lastEventAt) / 1000) : null,
+            cipherCount: s.cipherCount || 0,
+            needsRepair: !!s.needsRepair,
         }));
 
         const connectedCount = sessionsList.filter(s => s.status === 'open').length;
@@ -1786,7 +1885,12 @@ button:hover{background:#1fb858}
         const list = [...sessions.values()].map(s=>({
             id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
             ownerNumber:s.connectedNumber, ownerLid:s.ownerLid||null,
-            qrCode:s.qrCode, pairingCode:s.pairingCode||null, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt
+            qrCode:s.qrCode, pairingCode:s.pairingCode||null, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt,
+            // Diagnostic du flux entrant (utile pour voir une session « connectée mais muette »)
+            silentSeconds: s.lastEventAt ? Math.round((Date.now() - s.lastEventAt)/1000) : null,
+            cipherCount: s.cipherCount || 0,
+            stallRestarts: s.stallRestarts || 0,
+            needsRepair: !!s.needsRepair,
         }));
 
         return sendJson(res,{ sessions:list });
@@ -1884,12 +1988,11 @@ button:hover{background:#1fb858}
         if (!sid) return sendJson(res,{error:'ID invalide'},400);
         const s = sessions.get(sid);
         if (!s) return sendJson(res,{error:'Session introuvable'},404);
-        addLog('info',`[${sid}] Redémarrage depuis le dashboard (IP: ${ip})`);
-        try { if(s.sock) await s.sock.end(); } catch {}
-        // 1.5s était trop court : WhatsApp met parfois plus de temps à considérer
-        // l'ancienne connexion comme terminée côté serveur, causant un conflit
-        // (code 440) avec la nouvelle tentative de connexion.
-        setTimeout(()=>startSession(sid),5000);
+        addLog('info',`[${sid}] Redémarrage depuis le dashboard (IP: ${ip}) — identifiants conservés`);
+        // Redémarre uniquement le socket : creds.json et clés restent intacts.
+        if (!restartSocket(s, { reason: 'dashboard', delayMs: 5000 })) {
+            return sendJson(res,{ error:'Redémarrage déjà en cours' },409);
+        }
         return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
     }
 
@@ -1987,21 +2090,17 @@ loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessi
     addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
 
 ////////////////////
-// PING_SESSION — Garde la session active comme si un message était reçu
+// PING_SESSION — vérification périodique de la santé des sessions
 ////////////////////
-const PING_SESSION_INTERVAL = 15 * 60 * 1000; // toutes les 15 min pour reset le zombie
+const PING_SESSION_INTERVAL = 15 * 60 * 1000;
 let pingSessionTimer = null;
 
+// Le faux « lastActivity » a été supprimé : il masquait les sessions réellement
+// muettes. La surveillance se fait maintenant sur le flux entrant (checkSessionHealth).
 function startPingSession() {
-    if (pingSessionTimer) clearTimeout(pingSessionTimer);
-    // Simule une activité : met à jour lastActivity pour éviter la déconnexion zombie
+    if (pingSessionTimer) clearInterval(pingSessionTimer);
     pingSessionTimer = setInterval(() => {
-        const now = Date.now();
-        for (const [id, state] of sessions) {
-            if (state.connection !== 'open' || !state.sock) continue;
-            // Met à jour lastActivity sans envoyer de message visible
-            state.lastActivity = now;
-        }
+        for (const [id, state] of sessions) checkSessionHealth(id, state).catch(() => {});
     }, PING_SESSION_INTERVAL);
 }
 
@@ -2016,28 +2115,16 @@ function stopPingSession() {
 // restartSession — Comme Ctrl+C : arrêt propre + redémarrage immédiat
 ////////////////////
 function restartSession() {
-    const currentSessionId = Object.keys(sessions).find(
-        id => sessions[id].connectedNumber
-    ) || 'sess_main';
-    const currentState = sessions.get(currentSessionId);
-    if (!currentState) {
+    const active = [...sessions.values()].filter(s => s.connectedNumber || s.connection === 'open');
+    if (!active.length) {
         addLog('warn', '[restart] Aucune session active à redémarrer');
         return;
     }
-    addLog('info', `[restart] Arrêt propre de la session [${currentState.id}]`);
-    try {
-        if (currentState.sock?.ws) currentState.sock.ws.close();
-        if (currentState.sock?.end) currentState.sock.end();
-    } catch (e) {
-        addLog('warn', `[restart] Erreur arrêt socket: ${e.message}`);
+    let count = 0;
+    for (const s of active) {
+        if (restartSocket(s, { reason: 'restart manuel', delayMs: 5000 })) count++;
     }
-    // Petit délai pour que WhatsApp considère l'ancienne connexion terminée
-    setTimeout(() => {
-        try { startSession(currentSessionId); } catch (e) {
-            addLog('error', `[restart] Échec redémarrage: ${e.message}`);
-        }
-    }, 3000);
-    addLog('success', `[restart] Session [${currentSessionId}] relancée (Ctrl+C) — dernière activité préservée`);
+    addLog('success', `[restart] ${count} session(s) relancée(s) — creds.json et clés intacts`);
 }
 
 // Démarrage automatique du PING_SESSION au startup
