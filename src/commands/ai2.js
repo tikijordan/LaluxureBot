@@ -44,7 +44,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
     const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' });
 
     const messages = [
-        { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande, détaillé et naturel. Réponds complètement sans te couper.' },
+        { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande evite parler trop et tu te nomme lalxureAi c\'est commca que tu presente , détaillé et naturel. Réponds complètement sans te couper.' },
         ...session.history.slice(-10),
         { role: 'user', content: text }
     ];

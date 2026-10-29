@@ -570,6 +570,17 @@ async function startSession(sessionId, phoneNumber = null) {
     if (!sock.__sendMessageWrapped) {
         const _origSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options) => {
+            // Une citation ne peut référencer qu'un message du MÊME chat. Quand
+            // une commande tapée dans un autre DM/groupe est redirigée vers ton
+            // chat perso, le « quoted » vient d'une autre conversation :
+            // WhatsApp affiche alors « En attente de ce message... ». On retire
+            // la citation dans ce cas (le texte/média reste intact).
+            if (options?.quoted && jid) {
+                const quotedChat = options.quoted.key?.remoteJid;
+                if (quotedChat && quotedChat !== jid) {
+                    options = { ...options, quoted: undefined };
+                }
+            }
             // Pas de limite de temps imposée ici : la réponse attend l'envoi réel.
             const t0 = Date.now();
             if (!sock.__sentJids) sock.__sentJids = new Set();
@@ -1268,10 +1279,14 @@ async function startSession(sessionId, phoneNumber = null) {
                 // ── Redirection des commandes tapées dans un DM ─────────
                 // Si tu tapes une commande dans le DM d'un contact réel, la
                 // réponse est redirigée vers ton propre chat (invisible pour le
-                // contact). En revanche, dans TON propre chat ("Message
-                // yourself"), on répond dans le chat d'origine (souvent un LID) :
-                // répondre au numéro PN après migration LID rendait les réponses
-                // indéchiffrables côté téléphone ("En attente de ce message").
+                // contact). Dans TON propre chat ("Message yourself"), on répond
+                // dans le chat d'origine (souvent un LID pour ne pas créer un
+                // second fil). Pour la redirection on vise le PN : c'est la
+                // seule cible où Baileys considère TOUS les appareils comme
+                // « moi » et leur envoie l'enveloppe deviceSentMessage. En LID,
+                // le téléphone recevait une copie brute → « En attente de ce
+                // message... ». (La citation croisée est retirée dans le wrapper
+                // sendMessage, même cause.)
                 let replyTo = from;
                 if (!isGroup && isCmd && isOwner && OWNER) {
                     const selfPn = `${OWNER}@s.whatsapp.net`;
@@ -1280,7 +1295,11 @@ async function startSession(sessionId, phoneNumber = null) {
                         || chatNum === OWNER
                         || (state.ownerLid && chatNum === String(state.ownerLid));
                     if (!isSelfChat) {
-                        replyTo = state.ownerLid ? `${state.ownerLid}@lid` : selfPn;
+                        // Cible = ton chat perso en PN (et non en @lid). En LID,
+                        // meId (PN) ne reconnaît pas le LID comme « moi » : Baileys
+                        // envoie alors au téléphone une copie SANS l'enveloppe
+                        // deviceSentMessage → « En attente de ce message... ».
+                        replyTo = selfPn;
                     }
                 }
                 // ── Mode conversation libre (!chatbot) ─────────────────
