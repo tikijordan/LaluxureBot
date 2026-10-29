@@ -27,6 +27,24 @@ const DOWNLOAD_DIR = process.env.RAILWAY_ENVIRONMENT
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
+/** Localise yt-dlp même si le PATH du service (pm2/systemd) est minimal. */
+function resolveYtdlpBin() {
+    if (process.env.YTDLP_PATH) return process.env.YTDLP_PATH;
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    const candidates = [
+        home ? path.join(home, '.local/bin/yt-dlp') : '',
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+        '/snap/bin/yt-dlp',
+        'C:\\yt-dlp\\yt-dlp.exe',
+    ].filter(Boolean);
+    for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return 'yt-dlp';
+}
+const YTDLP_BIN = resolveYtdlpBin();
+
 const TOR_COOKIE_PATHS = [
     process.env.TOR_CONTROL_COOKIE,
     '/tmp/tor_auth_cookie',
@@ -156,7 +174,7 @@ let _impersonateCache = null;
 async function canUseImpersonate() {
     if (_impersonateCache !== null) return _impersonateCache;
     try {
-        const { stdout } = await execPromise('yt-dlp --list-impersonate-targets', { timeout: 10000 });
+        const { stdout } = await execPromise(`"${YTDLP_BIN}" --list-impersonate-targets`, { timeout: 10000 });
         _impersonateCache = /chrome/i.test(stdout) && !/chrome.*unavailable/i.test(stdout);
     } catch {
         _impersonateCache = false;
@@ -167,7 +185,7 @@ async function canUseImpersonate() {
 /** Exécute yt-dlp via spawn (pas de shell — URLs avec & OK) */
 function execYtdlp(args, url) {
     return new Promise((resolve, reject) => {
-        const proc = spawn('yt-dlp', [...args, url], { timeout: PROCESS_TIMEOUT });
+        const proc = spawn(YTDLP_BIN, [...args, url], { timeout: PROCESS_TIMEOUT });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('error', (err) => reject(Object.assign(err, { stderr: err.message })));
@@ -191,6 +209,7 @@ function resolveProxyUrl() {
 
 function buildYtdlpArgs({ filePath, isAudio, isYoutube, isTiktok, ytClient, videoFormat, tiktokImpersonate, tiktokApp }) {
     const args = [
+        '--no-update',
         '--no-check-certificate', '--no-cache-dir',
         '--socket-timeout', '30', '--no-playlist',
         '--retries', '3', '--fragment-retries', '3',
@@ -342,11 +361,14 @@ async function runYtdlp(url, isAudio, filePath) {
     if (isYoutube) {
         const audioFmt = 'bestaudio/best';
         const videoFmts = [
+            // 18 = mp4 360p déjà fusionné (le plus fiable sur WhatsApp).
+            '18/best[height<=480][ext=mp4]/best[height<=480]/best',
             'best[height<=480][ext=mp4]/best[height<=480]/18/best',
             'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]/18/best',
-            '18/best',
         ];
-        const clients = ['android_vr,web', 'mweb,tv_embedded', 'ios,android,web_creator', 'tv,web'];
+        // « android » et « tv_embedded » sont les clients qui passent encore
+        // malgré les blocages 403 de YouTube (constaté : android_vr/web → 403).
+        const clients = ['android', 'tv_embedded', 'android_vr,web', 'mweb,tv_embedded', 'ios,android,web_creator', 'tv,web'];
         for (const client of clients) {
             for (const fmt of (isAudio ? [audioFmt] : videoFmts)) {
                 strategies.push({ ytClient: client, videoFormat: isAudio ? audioFmt : fmt });

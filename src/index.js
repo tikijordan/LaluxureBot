@@ -161,6 +161,7 @@ process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.i
 const _ce = console.error.bind(console);
 console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
 import { handleCommand } from './handler.js';
+import { runChatbotTurn } from './commands/ai2.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
 import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
@@ -1264,9 +1265,48 @@ async function startSession(sessionId, phoneNumber = null) {
                     if (handledCaptcha) continue;
                 }
                 const isCmd = body.startsWith(PREFIX);
+                // ── Redirection des commandes tapées dans un DM ─────────
+                // Si tu tapes une commande dans le DM d'un contact réel, la
+                // réponse est redirigée vers ton propre chat (invisible pour le
+                // contact). En revanche, dans TON propre chat ("Message
+                // yourself"), on répond dans le chat d'origine (souvent un LID) :
+                // répondre au numéro PN après migration LID rendait les réponses
+                // indéchiffrables côté téléphone ("En attente de ce message").
                 let replyTo = from;
                 if (!isGroup && isCmd && isOwner && OWNER) {
-                    replyTo = `${OWNER}@s.whatsapp.net`;
+                    const selfPn = `${OWNER}@s.whatsapp.net`;
+                    const chatNum = String(rawJid || '').split('@')[0].split(':')[0];
+                    const isSelfChat = rawJid === selfPn
+                        || chatNum === OWNER
+                        || (state.ownerLid && chatNum === String(state.ownerLid));
+                    if (!isSelfChat) {
+                        replyTo = state.ownerLid ? `${state.ownerLid}@lid` : selfPn;
+                    }
+                }
+                // ── Mode conversation libre (!chatbot) ─────────────────
+                // Une fois activé par !chatbot, les messages SANS préfixe de
+                // cet utilisateur partent directement à l'IA (le commentaire
+                // d'ai2.js citait cette branche, mais elle n'avait jamais été
+                // branchée : seuls « !chatbot <texte> » fonctionnaient).
+                if (!isGroup && !isCmd && body.trim()
+                    && global.activeChatbotSessions?.has(senderJid)
+                    && canUseBot(isOwner, false, senderNumber, OWNER, getBotMode())) {
+                    const freeChatNum = String(rawJid || '').split('@')[0].split(':')[0];
+                    const isSelfChatFree = !isGroup && (
+                        rawJid === `${OWNER}@s.whatsapp.net`
+                        || freeChatNum === OWNER
+                        || (state.ownerLid && freeChatNum === String(state.ownerLid))
+                    );
+                    // On ignore les messages envoyés par le compte du bot vers
+                    // d'autres contacts ; seul son propre chat est autorisé.
+                    if (!fromMe || isSelfChatFree) {
+                        try {
+                            await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body });
+                        } catch (e) {
+                            addLog('error', `[${state.id}] Chatbot: ${e.message}`);
+                        }
+                        continue;
+                    }
                 }
                 if (fromMe && !isCmd) continue;
                 if (isGroup) trackGroupMsg(from, senderJid);

@@ -41,7 +41,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
     let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
-    const { key } = await sock.sendMessage(from, { text: ' En train d\'écrire..._' });
+    const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' });
 
     const messages = [
         { role: 'system', content: 'Tu es un assistant WhatsApp utile, détaillé et naturel. Réponds complètement sans te couper.' },
@@ -54,7 +54,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
         chatSessions.set(sender, session);
-        await sock.sendMessage(from, { text: ` ${reply}`, edit: key });
+        await sock.sendMessage(from, { text: `🤖 ${reply}`, edit: key });
     } else {
         await sock.sendMessage(from, {
             text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
@@ -72,11 +72,17 @@ export default {
         // premier "!chatbot", ses messages sans préfixe sont automatiquement
         // envoyés à l'IA (voir handleFreeformChatbot dans handler.js et le
         // branchement dans index.js), jusqu'à "!chatbot off".
-        execute: async ({ sock, from, sender, text, args, msg }) => {
+        execute: async ({ sock, from, sender, text, args, msg, isGroup }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
             setTimeout(() => msgCache.delete(msgId), 30000);
+
+            if (isGroup) {
+                return sock.sendMessage(from, {
+                    text: '❌ Le mode conversation libre fonctionne uniquement en message privé (DM).',
+                });
+            }
 
             const sub = args[0]?.toLowerCase();
 
