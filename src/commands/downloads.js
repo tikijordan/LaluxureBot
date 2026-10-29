@@ -1,7 +1,7 @@
 /**
  * @file        downloads.js
  * @description Commandes de téléchargement (YouTube, TikTok, Instagram, Facebook)
- * @engine      yt-dlp (local)
+ * @engine      yt-dlp s'il est présent, sinon ytdl-core (JS pur, sans binaire)
  */
 
 import { spawn, exec } from 'child_process';
@@ -63,6 +63,53 @@ function isTorRotationEnabled() {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Empêche un fallback bloqué (ex: ytdl-core qui n'obtient jamais de réponse) de figer la commande. */
+function withTimeout(promise, ms, label = 'opération') {
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Délai dépassé (${label})`)), ms);
+        }),
+    ]).finally(() => clearTimeout(timer));
+}
+
+/** Agent proxy HTTP(S) pour le fallback ytdl-core (qui n'utilise pas --proxy). */
+async function makeProxyAgent(proxyUrl) {
+    if (!proxyUrl || !/^https?:\/\//i.test(proxyUrl)) return null;
+    try {
+        const mod = await import('https-proxy-agent');
+        const Agent = mod.HttpsProxyAgent || mod.default;
+        return new Agent(proxyUrl);
+    } catch (e) {
+        console.warn('[proxy] agent indisponible:', e.message);
+        return null;
+    }
+}
+
+/** Cookies YouTube pour le fallback JS (fichier Netscape, comme yt-dlp). */
+function loadYoutubeCookies() {
+    const file = process.env.YT_COOKIES_FILE
+        || (fs.existsSync(path.join(process.cwd(), 'cookies.txt')) ? path.join(process.cwd(), 'cookies.txt') : '');
+    if (!file || !fs.existsSync(file)) return [];
+    const cookies = [];
+    try {
+        for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+            const l = line.trim();
+            if (!l || l.startsWith('#')) continue;
+            const p = l.split('\t');
+            if (p.length < 7) continue;
+            const [domain, , cpath, secure, expires, name, value] = p;
+            if (!/youtube\.com|google\.com/i.test(domain)) continue;
+            cookies.push({
+                domain, path: cpath, secure: secure === 'TRUE',
+                expirationDate: Number(expires) || undefined, name, value,
+            });
+        }
+    } catch {}
+    return cookies;
 }
 
 function normalizeMediaUrl(url) {
@@ -196,18 +243,51 @@ function execYtdlp(args, url) {
     });
 }
 
-function resolveProxyUrl() {
-    const torEnabled = isTorEnabled();
-    const rawProxyUrl = process.env.YTDLP_PROXY || process.env.PROXY_URL || (torEnabled ? 'socks5h://127.0.0.1:9050' : '');
-    if (!rawProxyUrl) return '';
-    try {
-        const parsed = new URL(rawProxyUrl);
-        if (parsed.port && /^\d+$/.test(parsed.port)) return rawProxyUrl;
-    } catch {}
-    return '';
+/** Teste si un proxy écoute réellement (Tor n'est pas toujours lancé). */
+function probeTcp(host, port, timeoutMs = 900) {
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            try { socket.destroy(); } catch {}
+            resolve(ok);
+        };
+        const socket = net.createConnection({ host, port });
+        socket.setTimeout(timeoutMs, () => finish(false));
+        socket.once('connect', () => finish(true));
+        socket.once('error', () => finish(false));
+    });
 }
 
-function buildYtdlpArgs({ filePath, isAudio, isYoutube, isTiktok, ytClient, videoFormat, tiktokImpersonate, tiktokApp }) {
+let _torProbe = { at: 0, ok: false };
+let _torWarned = false;
+
+async function resolveProxyUrl() {
+    // 1. Proxy explicitement configuré : prioritaire.
+    const explicit = process.env.YTDLP_PROXY || process.env.PROXY_URL;
+    if (explicit) {
+        try {
+            const parsed = new URL(explicit);
+            if (parsed.port && /^\d+$/.test(parsed.port)) return explicit;
+        } catch {}
+        return '';
+    }
+    // 2. Tor : ne l'utiliser que s'il écoute vraiment. Avant, TOR_PROXY=1
+    //    ajoutait --proxy socks5h://127.0.0.1:9050 même quand Tor n'était pas
+    //    lancé → tous les téléchargements échouaient (Render & co).
+    if (!isTorEnabled()) return '';
+    if (Date.now() - _torProbe.at > 60_000) {
+        _torProbe = { at: Date.now(), ok: await probeTcp('127.0.0.1', 9050) };
+        if (!_torProbe.ok && !_torWarned) {
+            _torWarned = true;
+            console.warn('[yt-dlp] TOR_PROXY est activé mais aucun proxy Tor sur 127.0.0.1:9050 — téléchargement direct (sans proxy).');
+        }
+    }
+    return _torProbe.ok ? 'socks5h://127.0.0.1:9050' : '';
+}
+
+function buildYtdlpArgs({ filePath, isAudio, isYoutube, isTiktok, ytClient, videoFormat, tiktokImpersonate, tiktokApp, proxyUrl }) {
     const args = [
         '--no-update',
         '--no-check-certificate', '--no-cache-dir',
@@ -217,7 +297,6 @@ function buildYtdlpArgs({ filePath, isAudio, isYoutube, isTiktok, ytClient, vide
         '-o', filePath,
     ];
 
-    const proxyUrl = resolveProxyUrl();
     if (proxyUrl) args.push('--proxy', proxyUrl);
 
     if (isYoutube) {
@@ -272,13 +351,24 @@ function streamToFile(stream, filePath) {
  *
  * @returns {Promise<{mimetype: string, ext: string}>}
  */
-async function downloadYoutubeNoBinary(url, isAudio, filePath) {
-    const info = await ytdl.getInfo(url);
+async function downloadYoutubeNoBinary(url, isAudio, filePath, proxyUrl) {
+    const agent = await makeProxyAgent(proxyUrl);
+    let ytdlOpts;
+    if (agent) {
+        ytdlOpts = { requestOptions: { agent } };
+    } else {
+        const cookies = loadYoutubeCookies();
+        if (cookies.length) {
+            console.log(`[ytdl-core] utilisation de ${cookies.length} cookie(s) YouTube`);
+            ytdlOpts = { agent: ytdl.createAgent(cookies) };
+        }
+    }
+    const info = await ytdl.getInfo(url, ytdlOpts);
 
     if (isAudio) {
         const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
         if (!format) throw new Error('Aucun format audio disponible pour cette vidéo.');
-        await streamToFile(ytdl.downloadFromInfo(info, { format }), filePath);
+        await streamToFile(ytdl.downloadFromInfo(info, { format, ...(ytdlOpts || {}) }), filePath);
         const isM4a = /mp4/i.test(format.mimeType || '') || format.container === 'm4a';
         return isM4a ? { mimetype: 'audio/mp4', ext: 'm4a' } : { mimetype: 'audio/webm', ext: 'webm' };
     }
@@ -290,7 +380,7 @@ async function downloadYoutubeNoBinary(url, isAudio, filePath) {
         filter: f => f.hasVideo && f.hasAudio && f.container === 'mp4',
     });
     if (!format) throw new Error("Aucun format vidéo+audio combiné disponible sans ffmpeg pour cette vidéo (essaie une autre vidéo, ou !play pour l'audio seul).");
-    await streamToFile(ytdl.downloadFromInfo(info, { format }), filePath);
+    await streamToFile(ytdl.downloadFromInfo(info, { format, ...(ytdlOpts || {}) }), filePath);
     return { mimetype: 'video/mp4', ext: 'mp4' };
 }
 
@@ -337,7 +427,7 @@ function mapYtdlpError(stderr, isTiktok, isYoutube) {
         return '⏱️ Téléchargement trop long. Essaie une vidéo plus courte.';
     }
     if (isYoutube && (lower.includes('po token') || lower.includes('http error 403') || lower.includes('sabr'))) {
-        return '🔐 YouTube bloque le téléchargement (403). Réessaie ou configure YT_COOKIES_FILE.';
+        return '🔐 YouTube bloque cette IP (403) — fréquent sur Render/VPS. Configure un proxy résidentiel (YTDLP_PROXY ou PROXY_URL) ou des cookies (YT_COOKIES_FILE), ou héberge le bot ailleurs.';
     }
     const errLine = stderr.split('\n').find(l => /ERROR/i.test(l));
     return errLine?.replace(/^ERROR:\s*/, '').slice(0, 200) || '❌ Téléchargement échoué.';
@@ -351,8 +441,8 @@ async function runYtdlp(url, isAudio, filePath) {
     const isYoutube = /youtube\.com|youtu\.be/i.test(url);
     const isTiktok = /tiktok\.com/i.test(url);
 
-    const proxyUrl = resolveProxyUrl();
-    if ((process.env.YTDLP_PROXY || process.env.PROXY_URL) && !proxyUrl && !isTorEnabled()) {
+    const proxyUrl = await resolveProxyUrl();
+    if ((process.env.YTDLP_PROXY || process.env.PROXY_URL) && !proxyUrl) {
         throw new Error('⚠️ Proxy invalide. Format: http://user:pass@host:8080');
     }
 
@@ -391,7 +481,7 @@ async function runYtdlp(url, isAudio, filePath) {
     for (const strat of strategies) {
         try {
             const args = buildYtdlpArgs({
-                filePath, isAudio, isYoutube, isTiktok,
+                filePath, isAudio, isYoutube, isTiktok, proxyUrl,
                 ytClient: strat.ytClient || 'android_vr,web',
                 videoFormat: strat.videoFormat,
                 tiktokImpersonate: strat.tiktokImpersonate,
@@ -415,7 +505,11 @@ async function runYtdlp(url, isAudio, filePath) {
     // Fallback SANS binaire externe pour YouTube (pas de yt-dlp/ffmpeg requis)
     if (isYoutube) {
         try {
-            const result = await downloadYoutubeNoBinary(url, isAudio, filePath);
+            const result = await withTimeout(
+                downloadYoutubeNoBinary(url, isAudio, filePath, proxyUrl),
+                90_000,
+                'ytdl-core',
+            );
             if (fs.existsSync(filePath)) return result;
         } catch (e) {
             console.warn('[ytdl-core fallback]', e.message);

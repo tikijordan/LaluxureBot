@@ -108,7 +108,7 @@ export default {
 
       if (result) {
         await sock.sendMessage(from, {
-          text: `🤖 *IA — ${result.provider}*\n\n${result.text}`,
+          text: ` *IA — ${result.provider}*\n\n${result.text}`,
           edit: key,
         });
       } else {

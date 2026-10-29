@@ -44,7 +44,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
     const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' });
 
     const messages = [
-        { role: 'system', content: 'Tu es un assistant WhatsApp utile, détaillé et naturel. Réponds complètement sans te couper.' },
+        { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande, détaillé et naturel. Réponds complètement sans te couper.' },
         ...session.history.slice(-10),
         { role: 'user', content: text }
     ];
@@ -54,7 +54,7 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
         chatSessions.set(sender, session);
-        await sock.sendMessage(from, { text: `🤖 ${reply}`, edit: key });
+        await sock.sendMessage(from, { text: `${reply}`, edit: key });
     } else {
         await sock.sendMessage(from, {
             text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
@@ -72,17 +72,11 @@ export default {
         // premier "!chatbot", ses messages sans préfixe sont automatiquement
         // envoyés à l'IA (voir handleFreeformChatbot dans handler.js et le
         // branchement dans index.js), jusqu'à "!chatbot off".
-        execute: async ({ sock, from, sender, text, args, msg, isGroup }) => {
+        execute: async ({ sock, from, sender, text, args, msg }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
             setTimeout(() => msgCache.delete(msgId), 30000);
-
-            if (isGroup) {
-                return sock.sendMessage(from, {
-                    text: '❌ Le mode conversation libre fonctionne uniquement en message privé (DM).',
-                });
-            }
 
             const sub = args[0]?.toLowerCase();
 
@@ -106,8 +100,8 @@ export default {
             if (!text) {
                 return sock.sendMessage(from, {
                     text: alreadyActive
-                        ? '🤖 Le mode conversation libre est déjà actif — écris directement, sans !chatbot.'
-                        : '🤖 *Mode conversation libre activé !*\n\nÉcris directement, plus besoin de retaper !chatbot avant chaque message.\n\n_!chatbot off pour arrêter, !chatbot reset pour effacer la mémoire._',
+                        ? ' Le mode conversation libre est déjà actif — écris directement, sans !chatbot.'
+                        : ' *Mode conversation libre activé !*\n\nÉcris directement, plus besoin de retaper !chatbot avant chaque message.\n\n_!chatbot off pour arrêter, !chatbot reset pour effacer la mémoire._',
                 });
             }
 

@@ -1405,6 +1405,18 @@ async function startSession(sessionId, phoneNumber = null) {
                         addLog('error', `[${state.id}] Modération: ${modErr.message}`);
                     }
                 }
+                // Mode conversation libre en groupe : traité APRÈS la
+                // modération pour ne pas contourner antilink/mots interdits.
+                if (isGroup && !isCmd && !fromMe && body.trim()
+                    && global.activeChatbotSessions?.has(senderJid)
+                    && canUseBot(isOwner, true, senderNumber, OWNER, currentBotMode)) {
+                    try {
+                        await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body });
+                    } catch (e) {
+                        addLog('error', `[${state.id}] Chatbot: ${e.message}`);
+                    }
+                    continue;
+                }
                 if (!isCmd) continue;
                 const mayUseBot = canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode);
                 if (!mayUseBot) continue;
