@@ -517,6 +517,22 @@ async function startSession(sessionId, phoneNumber = null) {
     clearReconnectTimer(sessionId);
     const authPath = path.join(SESSIONS_ROOT, sessionId);
     fse.ensureDirSync(authPath); // ← crée le dossier AVANT useMultiFileAuthState
+    // Session non finalisée (jumelage avorté / processus coupé pendant le code
+    // d'appairage) : creds.me existe sans registered=true. Baileys tenterait alors
+    // un LOGIN au lieu d'une inscription → WhatsApp refuse et aucun nouveau QR/code
+    // n'est proposé. Même garde que la version Ely (Images/index.js).
+    try {
+        const credsPath = path.join(authPath, 'creds.json');
+        if (fs.existsSync(credsPath)) {
+            const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+            if (creds && creds.registered !== true && creds.me) {
+                delete creds.me;
+                delete creds.pairingCode;
+                fs.writeFileSync(credsPath, JSON.stringify(creds));
+                addLog('warn', `[${sessionId}] Jumelage non finalisé détecté → réinitialisation, nouveau QR/code à venir`);
+            }
+        }
+    } catch {}
     let state = sessions.get(sessionId);
     if (!state) {
         state = {
@@ -556,10 +572,14 @@ async function startSession(sessionId, phoneNumber = null) {
         auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
         browser: ['Ubuntu','Chrome','20.0.0'],
         syncFullHistory: false, markOnlineOnConnect: true,
+        // Repris de la version Ely (Images/index.js) : évite de charger l'historique
+        // et d'écouter les newsletters/broadcasts inutiles → reconnexions plus rapides.
+        shouldSyncHistoryMessage: () => false,
+        shouldIgnoreJid: (jid) => !!jid && (jid.includes('@newsletter') || jid.endsWith('@@broadcast')),
         // Timeout fini (et non 0) : une requête sans réponse ne doit jamais bloquer
         // indéfiniment la file de déchiffrement (symptôme « connecté mais muet »).
         connectTimeoutMs: 60000, defaultQueryTimeoutMs: WA_QUERY_TIMEOUT_MS,
-        retryRequestDelayMs: 2000, maxMsgRetryCount: WA_MAX_MSG_RETRY, keepAliveIntervalMs: 60000,
+        retryRequestDelayMs: 2000, maxMsgRetryCount: WA_MAX_MSG_RETRY, keepAliveIntervalMs: 30000,
         cachedGroupMetadata: async (jid) => groupMetaCache.get(jid),
         // Indispensable aux retry receipts : on doit pouvoir renvoyer un message déjà
         // envoyé/reçu quand WhatsApp le demande (sondages + messages non déchiffrés).
@@ -1088,25 +1108,28 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!isCurrentSocket(state, sock)) return; // ignore les événements d'un ancien socket
         // Preuve que le flux ENTRANT fonctionne (quel que soit le type d'événement).
         touchSession(state);
+        let appendWindowMs = 0;
         if (type !== 'notify') {
+            if (type !== 'append') return;
             // 'append' = normalement la sync d'historique au démarrage → à ignorer.
             // MAIS après une coupure (redéploiement, reconnexion réseau...),
             // WhatsApp redélivre aussi les messages reçus PENDANT la coupure en
             // tant que 'append' — les rejeter fait perdre de vrais messages
             // récents (observé : messages jamais reçus par le bot après un
             // redéploiement de 45s, alors qu'un seuil fixe de 20s les excluait).
-            // On calcule donc une fenêtre dynamique = durée réelle de la coupure
-            // (+ marge), plafonnée pour ne jamais avaler un vrai historique ancien.
+            // Fenêtre dynamique = durée réelle de la coupure (+ marge), plafonnée.
+            // Comme dans Ely (Images/index.js), le filtre est appliqué MESSAGE PAR
+            // MESSAGE : un seul vieux message dans le lot ne fait plus perdre les
+            // messages récents qui l'accompagnent.
             const outageMs = state.lastDisconnectAt ? (Date.now() - state.lastDisconnectAt) : 20_000;
-            const acceptWindowMs = Math.min(Math.max(outageMs + 30_000, 30_000), 10 * 60 * 1000);
-            const isRecentAppend = type === 'append' && messages.every(m => {
-                const ts = Number(m.messageTimestamp) * 1000;
-                return ts && (Date.now() - ts) < acceptWindowMs;
-            });
-            if (!isRecentAppend) return;
+            appendWindowMs = Math.min(Math.max(outageMs + 30_000, 30_000), 10 * 60 * 1000);
         }
 
         for (const msg of messages) {
+            if (appendWindowMs) {
+                const ts = Number(msg.messageTimestamp) * 1000;
+                if (!ts || (Date.now() - ts) >= appendWindowMs) continue;
+            }
             // Écho d'un message envoyé par le bot : on l'ignore totalement
             // (sinon il apparaît en fromMe=true et peut se répondre à lui-même).
             if (msg.key?.fromMe && sentMessageIds.has(msg.key.id)) continue;
@@ -1148,7 +1171,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 const participantRaw = msg.key.participant || '';
                 let senderJid, senderNumber;
                 const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-                const bodyEarly = extractMessageBody(msg);
+                const bodyEarly = extractMessageBody(msg).trimStart();
                 const isCmdEarly = bodyEarly.startsWith(PREFIX);
                 if (fromMe) {
                     senderNumber = OWNER;
@@ -1231,7 +1254,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
                 const unwrapped = unwrapMessage(msg.message);
                 const ct = getContentType(unwrapped);
-                let body = bodyEarly || extractMessageBody(msg);
+                let body = (bodyEarly || extractMessageBody(msg)).trim();
                 const voMsgContent = msg.message?.ephemeralMessage?.message || msg.message;
                 const voCt = voMsgContent === msg.message ? ct : getContentType(voMsgContent);
                 const isVOraw = /^viewOnceMessage/.test(voCt)
