@@ -7,7 +7,6 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import os from 'os';
 import makeWASocket, {
-    useMultiFileAuthState,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
@@ -16,14 +15,16 @@ import makeWASocket, {
  WAMessageStubType,
 } from '@whiskeysockets/baileys';
 import { isAntideleteEnabled } from './commands/security.js';
+import { useDynamicMultiFileAuthState } from './utils/authState.js';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcodeterminal from 'qrcode-terminal';
 import NodeCache from 'node-cache';
 dotenv.config();
 process.on('uncaughtException', (err) => {
-    console.error('❌ [Process] Uncaught Exception:', err.message);
-    if (err.message.includes('Connection Closed') || err.message.includes('Precondition Required')) {
+    const msg = err?.message || String(err);
+    console.error('❌ [Process] Uncaught Exception:', msg);
+    if (msg.includes('Connection Closed') || msg.includes('Precondition Required')) {
         console.error('   → Baileys connection error (expected during reconnect)');
     } else {
         console.error('   → Stack:', err.stack);
@@ -537,7 +538,10 @@ async function startSession(sessionId, phoneNumber = null) {
     state.lastEventAt = Date.now();
     state.startedAt = Date.now();
     addLog('info', `Démarrage session [${sessionId}]${phoneNumber ? ' (pairing: '+phoneNumber+')' : ''}...`);
-    const { state: auth, saveCreds: _saveCreds } = await useMultiFileAuthState(authPath);
+    // Le dossier est résolu à chaque écriture : si la session est renommée après
+    // connexion (sess_xxx → numéro), les creds suivent le nouveau dossier au lieu
+    // d'échouer en ENOENT sur l'ancien dossier supprimé.
+    const { state: auth, saveCreds: _saveCreds } = await useDynamicMultiFileAuthState(() => state.authPath || authPath);
     const saveCreds = async () => {
         try { fse.ensureDirSync(state.authPath); } catch {}
         return _saveCreds();
@@ -621,11 +625,12 @@ async function startSession(sessionId, phoneNumber = null) {
             try {
                 return await handler(...args);
             } catch (err) {
-                if (err.message.includes('Connection Closed') || err.message.includes('Precondition Required')) {
-                    console.error(`[${name}] Connection error (expected):`, err.message);
+                const msg = err?.message || String(err);
+                if (msg.includes('Connection Closed') || msg.includes('Precondition Required')) {
+                    console.error(`[${name}] Connection error (expected):`, msg);
                 } else {
-                    console.error(`[${name}] Unhandled error:`, err.message);
-                    console.error(err.stack);
+                    console.error(`[${name}] Unhandled error:`, msg);
+                    if (err?.stack) console.error(err.stack);
                 }
             }
         };
@@ -947,8 +952,10 @@ async function startSession(sessionId, phoneNumber = null) {
                             fse.copySync(oldPath, newPath, { overwrite: true });
                         }
                         state.authPath = newPath;
-                        // nettoyage asynchrone de l'ancien dossier, non bloquant
-                        setTimeout(() => { try { if (oldPath !== newPath) fse.removeSync(oldPath); } catch {} }, 1000);
+                        // Nettoyage asynchrone de l'ancien dossier, non bloquant.
+                        // 5 s de marge : laisse finir les écritures déjà en vol
+                        // (creds.update / clés) avant de supprimer le dossier.
+                        setTimeout(() => { try { if (oldPath !== newPath) fse.removeSync(oldPath); } catch {} }, 5000);
                     } catch (e) { addLog('warn', `Renommage session: ${e.message}`); }
                 }
                 // Migration MongoDB en arrière-plan (non bloquante)
