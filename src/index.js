@@ -5,7 +5,6 @@ import fse from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import os from 'os';
 import makeWASocket, {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
@@ -162,11 +161,10 @@ process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.i
 const _ce = console.error.bind(console);
 console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
 import { handleCommand } from './handler.js';
-import { runChatbotTurn } from './commands/ai2.js';
+import { runChatbotTurn, isReplyToAI } from './commands/ai2.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { getBotMode } from './commands/security.js';
-import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, scheduleSave, getMongoDb, flushAllPendingSaves, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
-import { buildOwnerId, tryAcquireLock, startLockHeartbeat, releaseLock, forceReleaseExpiredLock, forceStealStaleLock, forceStealOlderDeploy } from './utils/instancelock.js';
+import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 import { isOwnerSender, ensureBotModeFile, canUseBot } from './utils/botmode.js';
 import { resolveIsOwner, extractMessageBody } from './utils/message.js';
 import { autoSaveViewOnce, isViewOnceMessage, extractViewOnceInner, downloadViewOnceBuffer, persistViewOnce, notifyOwnerViewOnce } from './utils/viewonce.js';
@@ -182,6 +180,9 @@ import { getWelcomeConfig } from './utils/welcome.js';
 import { isCaptchaEnabled, createChallenge } from './utils/captcha.js';
 import { log as logGroupAction } from './utils/grouplogs.js';
 const sessions = new Map();
+// Sessions locales = source de vérité. Aucun verrou d'instance ne doit empêcher
+// le chargement des dossiers présents dans data/sessions.
+global.instanceLockHeld = true;
 
 // Déballe les enveloppes WhatsApp : messages éphémères, vue unique, message modifié.
 function unwrapMessage(m) {
@@ -219,12 +220,6 @@ async function restoreSessionsFromAtlas() {
         if (r === 'restored') addLog('success', `[Atlas] Session [${id}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
     }
 }
-// ── Verrou par session (un numéro WhatsApp = un service à la fois) ──
-const PROCESS_OWNER = `${os.hostname()}-${process.pid}-${Date.now()}`;
-const SESSION_LOCK_TTL = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000');
-const SESSION_LOCK_HB  = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000');
-const sessionLocks = new Map(); // sessionId -> { hb, lockName, ownerId }
-
 /** Résout ownerLid immédiatement (commandes groupe) — évite d'attendre lid-mapping ou le cooldown 60s. */
 async function resolveOwnerLidIfNeeded(sock, state, ownerNum) {
     if (!ownerNum) return state.ownerLid || null;
@@ -248,60 +243,10 @@ async function resolveOwnerLidIfNeeded(sock, state, ownerNum) {
     return state.ownerLid || null;
 }
 
-async function acquireSessionLock(sessionId) {
-    if (sessionLocks.has(sessionId)) return true;
-    const lockName = `wa-session-${sessionId}`;
-    const ownerId = `${PROCESS_OWNER}:${sessionId}`;
-    const db = getMongoDb();
-    let r = await tryAcquireLock({ db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL });
-    if (!r.ok) {
-        await forceReleaseExpiredLock({ db, lockName });
-        r = await tryAcquireLock({ db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL });
-    }
-    if (!r.ok) {
-        addLog('warn', `[${sessionId}] Session déjà active sur une autre instance (${r.holder || 'inconnue'}) — non démarrée ici`);
-        return false;
-    }
-    const hb = startLockHeartbeat({
-        db, lockName, ownerId, ttlMs: SESSION_LOCK_TTL, intervalMs: SESSION_LOCK_HB,
-        onLost: () => {
-            addLog('warn', `[${sessionId}] Verrou de session perdu — arrêt de cette session ici`);
-            const st = sessions.get(sessionId);
-            try { st?.sock?.end?.(); } catch {}
-            if (st) st.connection = 'close';
-            sessionLocks.delete(sessionId);
-        },
-    });
-    sessionLocks.set(sessionId, { hb, lockName, ownerId });
-    return true;
-}
-
-// Session tenue par une autre instance : on réessaie toutes les 30 s (dès que le verrou se libère)
-const sessionRetryTimers = new Map();
-function scheduleSessionRetry(sid, phone) {
-    if (sessionRetryTimers.has(sid)) return;
-    const t = setTimeout(() => {
-        sessionRetryTimers.delete(sid);
-        startSession(sid, phone).catch(() => {});
-    }, 30000);
-    sessionRetryTimers.set(sid, t);
-    t.unref?.();
-}
-
-async function releaseSessionLock(sessionId) {
-    const l = sessionLocks.get(sessionId);
-    if (!l) return;
-    sessionLocks.delete(sessionId);
-    try { l.hb.stop(); } catch {}
-    try { await releaseLock({ db: getMongoDb(), lockName: l.lockName, ownerId: l.ownerId }); } catch {}
-}
-
 // Sessions supprimées volontairement : elles ne doivent plus être relancées automatiquement
 const deletedSessionIds = new Set();
 function forgetSession(sid) {
     deletedSessionIds.add(sid);
-    clearTimeout(sessionRetryTimers.get(sid)); sessionRetryTimers.delete(sid);
-    releaseSessionLock(sid).catch(() => {});
     clearReconnectTimer(sid);
     const st = sessions.get(sid);
     if (st?.atlasTimer) { clearTimeout(st.atlasTimer); st.atlasTimer = null; }
@@ -507,7 +452,9 @@ async function startSession(sessionId, phoneNumber = null) {
         addLog('info', `[${sessionId}] Session supprimée — pas de redémarrage automatique`);
         return;
     }
-    if (!(await acquireSessionLock(sessionId))) { scheduleSessionRetry(sessionId, phoneNumber); return; }
+    // Aucune vérification d'instance/lock ici : le dossier local de la session
+    // (data/sessions/<id>) suffit pour démarrer, même si un ancien service est
+    // encore enregistré comme propriétaire du verrou dans Mongo.
     const existing = sessions.get(sessionId);
     if (existing?.sock && (existing.connection === 'open' || existing.connection === 'connecting')) { 
         addLog('warn',`Session ${sessionId} ignorée : ${existing.connection}`); 
@@ -1108,28 +1055,13 @@ async function startSession(sessionId, phoneNumber = null) {
         if (!isCurrentSocket(state, sock)) return; // ignore les événements d'un ancien socket
         // Preuve que le flux ENTRANT fonctionne (quel que soit le type d'événement).
         touchSession(state);
-        let appendWindowMs = 0;
-        if (type !== 'notify') {
-            if (type !== 'append') return;
-            // 'append' = normalement la sync d'historique au démarrage → à ignorer.
-            // MAIS après une coupure (redéploiement, reconnexion réseau...),
-            // WhatsApp redélivre aussi les messages reçus PENDANT la coupure en
-            // tant que 'append' — les rejeter fait perdre de vrais messages
-            // récents (observé : messages jamais reçus par le bot après un
-            // redéploiement de 45s, alors qu'un seuil fixe de 20s les excluait).
-            // Fenêtre dynamique = durée réelle de la coupure (+ marge), plafonnée.
-            // Comme dans Ely (Images/index.js), le filtre est appliqué MESSAGE PAR
-            // MESSAGE : un seul vieux message dans le lot ne fait plus perdre les
-            // messages récents qui l'accompagnent.
-            const outageMs = state.lastDisconnectAt ? (Date.now() - state.lastDisconnectAt) : 20_000;
-            appendWindowMs = Math.min(Math.max(outageMs + 30_000, 30_000), 10 * 60 * 1000);
-        }
+        // Comme Ely (Images/index.js) : on traite 'notify' ET 'append'.
+        // 'append' correspond aux messages reçus pendant une coupure : les
+        // rejeter faisait perdre de vrais messages après un redéploiement.
+        if (type !== 'notify' && type !== 'append') return;
+        const nowSec = Date.now() / 1000;
 
         for (const msg of messages) {
-            if (appendWindowMs) {
-                const ts = Number(msg.messageTimestamp) * 1000;
-                if (!ts || (Date.now() - ts) >= appendWindowMs) continue;
-            }
             // Écho d'un message envoyé par le bot : on l'ignore totalement
             // (sinon il apparaît en fromMe=true et peut se répondre à lui-même).
             if (msg.key?.fromMe && sentMessageIds.has(msg.key.id)) continue;
@@ -1142,6 +1074,11 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
                 continue;
             }
+            // Comme Ely : en 'notify', on ignore uniquement le rejeu de
+            // messages trop anciens (> 60 s). En 'append', on traite tout —
+            // c'est ce qui récupère les messages manqués pendant une coupure.
+            if (type === 'notify' && msg.messageTimestamp
+                && (nowSec - Number(msg.messageTimestamp)) > 60) continue;
             if (msg.key.remoteJid === 'status@broadcast') continue;
             // Cache des messages ENVOYÉS (y compris depuis un autre appareil) : WhatsApp
             // peut nous demander de les renvoyer pour un destinataire qui n'a pas pu les
@@ -1350,7 +1287,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     // d'autres contacts ; seul son propre chat est autorisé.
                     if (!fromMe || isSelfChatFree) {
                         try {
-                            await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body });
+                            await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg });
                         } catch (e) {
                             addLog('error', `[${state.id}] Chatbot: ${e.message}`);
                         }
@@ -1460,11 +1397,38 @@ async function startSession(sessionId, phoneNumber = null) {
                     && global.activeChatbotSessions?.has(senderJid)
                     && canUseBot(isOwner, true, senderNumber, OWNER, currentBotMode)) {
                     try {
-                        await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body });
+                        await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg });
                     } catch (e) {
                         addLog('error', `[${state.id}] Chatbot: ${e.message}`);
                     }
                     continue;
+                }
+                // ── Réponse IA automatique (logique Ely) ────────────────
+                // Le bot répond sans commande quand il est mentionné (@bot),
+                // quand le message commence par son nom, ou quand l'utilisateur
+                // cite une réponse de l'IA. Aucun changement pour les commandes.
+                if (!isCmd && !fromMe && body.trim()) {
+                    const contextInfo = unwrapped?.[ct]?.contextInfo || {};
+                    const mentionedJid = contextInfo.mentionedJid || [];
+                    const normalizeJid = j => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                    const botIds = [sock.user?.id, sock.user?.lid].map(normalizeJid).filter(Boolean);
+                    const estMentionne = mentionedJid.some(j => botIds.includes(normalizeJid(j)));
+                    const botName = String(sock.user?.name || process.env.BOT_NAME || '').trim();
+                    const estAppeleParNom = !!botName && body.trim().toLowerCase().startsWith(botName.toLowerCase());
+                    const estReponseAI = !!contextInfo.stanzaId
+                        && (isReplyToAI(from, contextInfo.stanzaId) || isReplyToAI(replyTo, contextInfo.stanzaId));
+                    if ((estMentionne || estAppeleParNom || estReponseAI)
+                        && canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode)) {
+                        try {
+                            await runChatbotTurn({
+                                sock, from: replyTo, sender: senderJid,
+                                text: body, quoted: msg,
+                            });
+                        } catch (e) {
+                            addLog('error', `[${state.id}] IA auto: ${e.message}`);
+                        }
+                        continue;
+                    }
                 }
                 if (!isCmd) continue;
                 const mayUseBot = canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode);
@@ -1618,96 +1582,67 @@ setInterval(() => {
     for (const [id, state] of sessions) checkSessionHealth(id, state).catch(() => {});
 }, WATCHDOG_INTERVAL).unref?.();
 async function loadExistingSessions() {
-    let sessionsToStart = [];
+    // Les sessions locales sur disque sont la source de vérité. On ne bloque
+    // JAMAIS le démarrage à cause d'un verrou Mongo détenu par un autre service :
+    // chaque dossier data/sessions/<id>/creds.json est chargé directement.
+    // Atlas ne sert qu'à récupérer une session absente du disque.
+    global.instanceLockHeld = true;
+
     const mongoOk = await connectMongo();
     if (mongoOk) {
-        // Verrou Mongo réactivé : empêche deux instances (ancien + nouveau déploiement) de se disputer WhatsApp.
-        // Si Atlas est injoignable, le verrou laisse tourner (fail-open) sans couper WhatsApp.
-        const db = getMongoDb();
-        const lockName = process.env.INSTANCE_LOCK_NAME || 'wa-bot-main';
-        const ttlMs = parseInt(process.env.INSTANCE_LOCK_TTL_MS || '60000'); // 60s
-        const hbMs = parseInt(process.env.INSTANCE_LOCK_HEARTBEAT_MS || '20000'); // 20s
-        const ownerId = buildOwnerId();
-        const deployId = process.env.RENDER_SERVICE_ID || process.env.RAILWAY_DEPLOYMENT_ID || '';
-        // Verrou PAR SESSION : le service démarre toujours, chaque session prend son propre
-        // verrou (wa-session-<id>) dans startSession. Deux services ne peuvent jamais tenir le même compte.
-        global.instanceLockHeld = true;
-        const hb = { stop() {} };
-
-        const shutdown = async (signal) => {
-            console.log(`[Process] 🛑 ${signal} reçu — arrêt gracieux...`);
-            try { hb.stop(); } catch {}
-            try {
-                await Promise.race([
-                    flushAllPendingSaves(),
-                    new Promise(r => setTimeout(r, 10000))
-                ]);
-                console.log('[Process] ✅ Flush terminé');
-            } catch {}
-            try { await releaseLock({ db, lockName, ownerId }); } catch {}
-            await saveAllToAtlasBeforeExit();
-            process.exit(0);
-        };
-
-        // SIGINT/SIGTERM sont gérés au niveau du module (sauvegarde Atlas finale, même sans Mongo au démarrage)
-        addLog('info', '[MongoDB] Restauration des sessions depuis Atlas...');
-        const count = await restoreAllSessions(SESSIONS_ROOT);
-        
-        // NOUVEAU : pour chaque session présente localement, vérifier si Atlas a une version plus récente
-        // et la restaurer si c'est le cas (évite les creds corrompus/anciens sur le disque)
-        let restoredNewer = 0;
-        if (fs.existsSync(SESSIONS_ROOT)) {
-            const localSessions = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-                fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-                fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-            );
-            for (const sessionId of localSessions) {
-                const localDir = path.join(SESSIONS_ROOT, sessionId);
-                const result = await restoreSessionFromAtlasIfNewer(sessionId, localDir).catch(() => 'error');
-                if (result === 'restored') {
-                    restoredNewer++;
-                    addLog('success', `[Atlas] Session [${sessionId}] mise à jour depuis la sauvegarde (plus récente que le disque)`);
-                }
-            }
-        }
-        
-        if (count > 0 || restoredNewer > 0) {
-            addLog('success', `[MongoDB] ${count} session(s) restaurée(s) + ${restoredNewer} mise(s) à jour depuis Atlas`);
-            if (fs.existsSync(SESSIONS_ROOT)) {
-                sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-                    fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-                    fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-                );
-            }
-        } else {
-            addLog('info', '[MongoDB] Aucune session en base — premier déploiement ?');
-            if (fs.existsSync(SESSIONS_ROOT)) {
-                sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-                    fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-                    fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-                );
-            }
-        }
+        addLog('info', '[MongoDB] Sauvegarde disponible — restauration des sessions absentes du disque...');
+        await restoreAllSessions(SESSIONS_ROOT).catch(e =>
+            addLog('warn', `[Atlas] restoreAllSessions: ${e.message}`)
+        );
     } else {
-        addLog('warn', '[MongoDB] Indisponible — fallback SESSION_STRING');
+        addLog('warn', '[MongoDB] Indisponible — démarrage avec les sessions locales uniquement');
         await restoreFromEnvSessionString();
-        if (fs.existsSync(SESSIONS_ROOT)) {
-            sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-                fs.statSync(path.join(SESSIONS_ROOT,d)).isDirectory() &&
-                fs.existsSync(path.join(SESSIONS_ROOT,d,'creds.json'))
-            );
-        }
     }
 
-    if (sessionsToStart.length === 0) addLog('info','Aucune session — créez-en une depuis le dashboard');
-    else { 
-        const startAll = process.env.START_ALL_SESSIONS === '1'; // désactivé par défaut — évite les 440 storm au démarrage
-        const list = [...sessionsToStart].sort();
-        const selected = startAll ? list : [list[list.length - 1]];
-        addLog('info', `${selected.length}/${list.length} session(s) lancée(s): ${selected.join(', ')}${startAll ? '' : ' (START_ALL_SESSIONS=1 pour tout lancer)'}`);
-        for (const [i, id] of selected.entries()) {
-            setTimeout(() => startSession(id), i * 1500);
+    // Lecture du disque APRÈS l'éventuelle restauration Atlas.
+    let sessionsToStart = [];
+    if (fs.existsSync(SESSIONS_ROOT)) {
+        sessionsToStart = fs.readdirSync(SESSIONS_ROOT).filter(d => {
+            try {
+                return fs.statSync(path.join(SESSIONS_ROOT, d)).isDirectory()
+                    && fs.existsSync(path.join(SESSIONS_ROOT, d, 'creds.json'));
+            } catch { return false; }
+        });
+    }
+
+    if (sessionsToStart.length === 0) {
+        addLog('info', 'Aucune session locale — créez-en une depuis le dashboard');
+        return;
+    }
+
+    // Une session par numéro : si un dossier temporaire (sess_xxx) et le dossier
+    // final (numéro) coexistent, on ne garde que le dossier le plus récent.
+    const byNumber = new Map();
+    for (const id of sessionsToStart.sort()) {
+        let num = id;
+        try {
+            const creds = JSON.parse(fs.readFileSync(path.join(SESSIONS_ROOT, id, 'creds.json'), 'utf-8'));
+            const me = creds?.me?.id || creds?.me?.user || '';
+            if (me) num = String(me).split('@')[0].split(':')[0];
+        } catch {}
+        const prev = byNumber.get(num);
+        if (!prev) {
+            byNumber.set(num, id);
+            continue;
         }
+        try {
+            const newer = fs.statSync(path.join(SESSIONS_ROOT, id)).mtimeMs
+                > fs.statSync(path.join(SESSIONS_ROOT, prev)).mtimeMs;
+            if (newer) byNumber.set(num, id);
+        } catch {}
+    }
+
+    const list = [...new Set(byNumber.values())];
+    addLog('info', `${list.length} session(s) locale(s) lancée(s): ${list.join(', ')}`);
+    for (const [i, id] of list.entries()) {
+        setTimeout(() => {
+            startSession(id).catch(e => addLog('error', `[${id}] Démarrage: ${e.message}`));
+        }, i * 1500);
     }
 }
 

@@ -6,6 +6,37 @@ const msgCache = new Set();
 const chatSessions = new Map();
 const CHATBOT_TIMEOUT = 30 * 60 * 1000;
 
+// ── Réponses IA déjà envoyées (par chat) ──────────────────────
+// Permet, comme dans Ely, de répondre automatiquement quand l'utilisateur
+// cite (reply) un message de l'IA, sans qu'il ait à la mentionner.
+const aiReplyIds = new Map(); // chatJid → Map(messageId → timestamp)
+const AI_REPLY_TTL = 60 * 60 * 1000;
+
+export function addAIReply(chatJid, id) {
+    if (!chatJid || !id) return;
+    let ids = aiReplyIds.get(chatJid);
+    if (!ids) { ids = new Map(); aiReplyIds.set(chatJid, ids); }
+    ids.set(id, Date.now());
+}
+
+export function isReplyToAI(chatJid, id) {
+    if (!chatJid || !id) return false;
+    const ids = aiReplyIds.get(chatJid);
+    const at = ids?.get(id);
+    if (!at) return false;
+    if (Date.now() - at > AI_REPLY_TTL) { ids.delete(id); return false; }
+    return true;
+}
+
+// Nettoyage périodique des identifiants expirés.
+setInterval(() => {
+    const now = Date.now();
+    for (const [chatJid, ids] of aiReplyIds) {
+        for (const [id, at] of ids) if (now - at > AI_REPLY_TTL) ids.delete(id);
+        if (ids.size === 0) aiReplyIds.delete(chatJid);
+    }
+}, 10 * 60 * 1000).unref?.();
+
 // Importation de la logique de rotation depuis ton fichier principal ai.js 
 // (Ou copier/coller la classe KeyManager ici si les fichiers sont isolés)
 // Pour l'exemple, j'utilise une fonction simplifiée qui respecte tes clés GEMINI_API_KEY_1, 2, 3...
@@ -37,11 +68,15 @@ async function callAI(messages, temperature = 0.7) {
     }
 }
 
-export async function runChatbotTurn({ sock, from, sender, text }) {
+export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
     let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
-    const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' });
+    // Comme Ely : la réponse cite le message qui a déclenché l'IA. Le wrapper
+    // sendMessage retire automatiquement la citation si le chat change.
+    const sendOpts = quoted ? { quoted } : undefined;
+    const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' }, sendOpts);
+    addAIReply(from, key?.id);
 
     const messages = [
         { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande evite parler trop et tu te nomme lalxureAi c\'est commca que tu presente , détaillé et naturel. Réponds complètement sans te couper.' },
@@ -54,12 +89,12 @@ export async function runChatbotTurn({ sock, from, sender, text }) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
         chatSessions.set(sender, session);
-        await sock.sendMessage(from, { text: `${reply}`, edit: key });
+        await sock.sendMessage(from, { text: `${reply}`, edit: key }, sendOpts);
     } else {
         await sock.sendMessage(from, {
             text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
             edit: key,
-        });
+        }, sendOpts);
     }
 }
 
