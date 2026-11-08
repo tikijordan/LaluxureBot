@@ -69,6 +69,8 @@ async function callAI(messages, temperature = 0.7) {
 }
 
 export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
+    // L'IA conversationnelle ne répond JAMAIS dans les groupes (en privé seulement).
+    if (typeof from === 'string' && from.endsWith('@g.us')) return;
     let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
@@ -109,11 +111,16 @@ export default {
         // premier "!chatbot", ses messages sans préfixe sont automatiquement
         // envoyés à l'IA (voir handleFreeformChatbot dans handler.js et le
         // branchement dans index.js), jusqu'à "!chatbot off".
-        execute: async ({ sock, from, sender, text, args, msg }) => {
+        execute: async ({ sock, from, sender, text, args, msg, isGroup }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
             setTimeout(() => msgCache.delete(msgId), 30000);
+
+            // Pas d'IA conversationnelle dans les groupes.
+            if (isGroup) {
+                return sock.sendMessage(from, { text: '📵 L\'IA conversationnelle répond uniquement en message privé.\n👉 Écris-moi en DM et tape !chatbot là-bas.' });
+            }
 
             const sub = args[0]?.toLowerCase();
 

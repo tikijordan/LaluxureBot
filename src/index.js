@@ -92,6 +92,14 @@ const SESSIONS_ROOT = process.env.SESSIONS_DIR
 const DATA_ROOT     = path.join(__dirname, '../data');
 const DASH_DIR      = path.join(__dirname, '../dashboard');
 const PREFIX        = process.env.PREFIX || '!';
+// Préfixes alternatifs acceptés : évite que le bot ignore silencieusement les
+// commandes quand PREFIX n'est pas défini côté Render (ou tapé différemment).
+const PREFIXES      = [...new Set([PREFIX, '!', '.', '/', '#', '♧'])];
+function detectCmdPrefix(text) {
+    if (typeof text !== 'string') return null;
+    for (const p of PREFIXES) if (text.startsWith(p)) return p;
+    return null;
+}
 const PORT          = parseInt(process.env.PORT || '3000');
 const BIND_HOST     = process.env.BIND_HOST || '0.0.0.0';
 const startTime     = Date.now();
@@ -1034,17 +1042,20 @@ async function startSession(sessionId, phoneNumber = null) {
                 forgetSession(state.id);
                 try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
                 sessions.delete(state.id);
-                deleteSessionMongo(state.id).catch(() => {});
+                await deleteSessionMongo(state.id).catch(() => {});
+                // Logique Ely : on purge puis on redémarre le process proprement
+                // pour repartir de zéro (nouveau QR / code de jumelage).
+                setTimeout(() => process.exit(0), 3000);
+            } else if (code === DisconnectReason.connectionReplaced) {
+                // Logique Ely : la session a été reprise sur un autre appareil
+                // (440). Tenter de se reconnecter crée une tempête qui dutte
+                // les deux instances. On arrête proprement le process : sur
+                // Render, il redémarre avec un état frais (sessions rechargées
+                // depuis le disque), et on ne se bat plus pour la session.
+                addLog('warn', `[${state.id}] Session remplacée sur un autre appareil (440) — arrêt du process (redémarrage auto)`);
+                setTimeout(() => process.exit(0), 1000);
             } else {
-                let extraCooldown = 0;
-                if (code === 440) {
-                    const stat = note440(state.id);
-                    extraCooldown = getCooldownAfterRepeated440Ms(state.id);
-                    if (extraCooldown > 0) {
-                        addLog('warn', `[${state.id}] 440 répété (${stat.count}x) — pause ${Math.round(extraCooldown/60000)}min pour éviter le storm`);
-                    }
-                }
-                const delay = Math.max(getNextBackoffMs(state.id, code), extraCooldown);
+                const delay = getNextBackoffMs(state.id, code);
                 addLog('info', `[${state.id}] Reconnexion dans ${Math.round(delay/1000)}s...`);
                 scheduleReconnect(state.id, delay);
             }
@@ -1109,7 +1120,8 @@ async function startSession(sessionId, phoneNumber = null) {
                 let senderJid, senderNumber;
                 const cleanPhone = jid => (jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
                 const bodyEarly = extractMessageBody(msg).trimStart();
-                const isCmdEarly = bodyEarly.startsWith(PREFIX);
+                const pfxEarly  = detectCmdPrefix(bodyEarly);
+                const isCmdEarly = !!pfxEarly;
                 if (fromMe) {
                     senderNumber = OWNER;
                     senderJid    = isGroup ? (participantRaw || OWNER + '@s.whatsapp.net') : OWNER + '@s.whatsapp.net';
@@ -1249,7 +1261,8 @@ async function startSession(sessionId, phoneNumber = null) {
                     }
                     if (handledCaptcha) continue;
                 }
-                const isCmd = body.startsWith(PREFIX);
+                const pfxCmd = pfxEarly || detectCmdPrefix(body);
+                const isCmd = !!pfxCmd && body.startsWith(pfxCmd);
                 // Comme Ely : on répond TOUJOURS dans le chat d'origine.
                 // Rediriger un DM vers un autre JID (PN vs @lid, self-chat)
                 // provoquait les messages « En attente de ce message… ».
@@ -1281,7 +1294,7 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (fromMe && !isCmd) continue;
                 if (isGroup) trackGroupMsg(from, senderJid);
                 if (isCmd) {
-                    const cmd = body.slice(PREFIX.length).trim().split(/\s+/)[0]?.toLowerCase()||'';
+                    const cmd = body.slice(pfxCmd.length).trim().split(/\s+/)[0]?.toLowerCase()||'';
                     state.commandsCount++;
                     state.recentCommands.push({ cmd, user: senderNumber, time: new Date().toISOString() });
                     if (state.recentCommands.length > 50) state.recentCommands.shift();
@@ -1375,20 +1388,14 @@ async function startSession(sessionId, phoneNumber = null) {
                         addLog('error', `[${state.id}] Modération: ${modErr.message}`);
                     }
                 }
-                // Mode conversation libre en groupe : traité APRÈS la
-                // modération pour ne pas contourner antilink/mots interdits.
-                if (isGroup && !isCmd && !fromMe && body.trim()
-                    && global.activeChatbotSessions?.has(senderJid)
-                    && canUseBot(isOwner, true, senderNumber, OWNER, currentBotMode)) {
-                    runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg })
-                        .catch(e => addLog('error', `[${state.id}] Chatbot: ${e.message}`));
-                    continue;
-                }
-                // ── Réponse IA automatique (logique Ely) ────────────────
+                // ── IA : DÉSACTIVÉE DANS LES GROUPES ────────────────────
+                // L'IA (auto + conversation libre) ne répond qu'en message
+                // privé. Les commandes, elles, marchent partout (dont groupes).
+                // ── Réponse IA automatique (logique Ely, PRIVATE ONLY) ──
                 // Le bot répond sans commande quand il est mentionné (@bot),
                 // quand le message commence par son nom, ou quand l'utilisateur
                 // cite une réponse de l'IA. Aucun changement pour les commandes.
-                if (!isCmd && !fromMe && body.trim()) {
+                if (!isGroup && !isCmd && !fromMe && body.trim()) {
                     const contextInfo = unwrapped?.[ct]?.contextInfo || {};
                     const mentionedJid = contextInfo.mentionedJid || [];
                     const normalizeJid = j => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
@@ -1416,7 +1423,7 @@ async function startSession(sessionId, phoneNumber = null) {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
                     botMode: currentBotMode,
-                    prefix: PREFIX,
+                    prefix: pfxCmd || PREFIX,
                     owner: OWNER,
                     ownerLid: state.ownerLid || null,
                     ownerPersonal: OWNER_PERSONAL,

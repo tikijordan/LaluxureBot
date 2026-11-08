@@ -90,13 +90,18 @@ async function callGemini(prompt) {
 
 export default {
 
-  ia: {
+    ia: {
     description: 'IA intelligente (Gemini)',
-    execute: async ({ sock, from, text, msg }) => {
+    execute: async ({ sock, from, text, msg, isGroup }) => {
       const msgId = msg.key.id;
       if (msgCache.has(msgId)) return;
       msgCache.add(msgId);
       setTimeout(() => msgCache.delete(msgId), 30000);
+
+      // L'IA ne répond pas dans les groupes (en privé uniquement).
+      if (isGroup) {
+        return sock.sendMessage(from, { text: '📵 L\'IA répond uniquement en message privé.\n👉 Écris-moi en DM et retape !ia là-bas.' });
+      }
 
       if (!text) {
         return sock.sendMessage(from, { text: '🤖 Pose une question après !ia\nExemple: !ia Explique-moi la relativité' });

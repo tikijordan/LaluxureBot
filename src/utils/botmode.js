@@ -35,10 +35,12 @@ const MODE_FILE = path.join(__dirname, '../../data/botmode.json');
  */
 export const ALLOW_GROUP_ADMINS = true;
 
-// Mode initial : BOT_MODE du .env (public | private), sinon private.
-// Ensuite, les commandes !public / !private persistent le choix dans data/botmode.json.
+// Mode initial : BOT_MODE du .env (public | private), sinon public.
+// public est le défaut : sur un disque éphémère (Render), data/botmode.json
+// repart de zéro à chaque déploiement — sans valeur par défaut publique, le
+// bot repassait silencieusement en privé et n'ignorait plus le groupe.
 const ENV_MODE = String(process.env.BOT_MODE || '').trim().toLowerCase();
-const DEFAULT_MODE = (ENV_MODE === 'public' || ENV_MODE === 'private') ? ENV_MODE : 'private';
+const DEFAULT_MODE = (ENV_MODE === 'public' || ENV_MODE === 'private') ? ENV_MODE : 'public';
 
 export function normalizeNumber(n) {
   return (n || '').replace(/\D/g, '').replace(/^0+/, '');
@@ -82,7 +84,13 @@ export async function checkCommandAccess({ sock, command, from, sender, isGroup,
     // chaque commande admin et donc un délai de réponse visible.
     let metadata = sock.state?.groupMetaCache?.get?.(from) || null;
     if (!metadata) {
-      metadata = await sock.groupMetadata(from).catch(() => null);
+      // Plafond réseau (comme Ely, cache 60 s) : jamais plus de 5 s d'attente.
+      // Sans ça, une requête WhatsApp qui cale fait « pendre » la commande
+      // sans réponse ni erreur.
+      metadata = await Promise.race([
+        sock.groupMetadata(from),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+      ]).catch(() => null);
       if (metadata) sock.state?.groupMetaCache?.set?.(from, metadata);
     }
     if (!metadata) return { allowed: false, message: '⚠️ Impossible de vérifier les droits du groupe.' };

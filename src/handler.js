@@ -156,7 +156,7 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     // Qui peut lancer une commande : décidé dans utils/botmode.js
     const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner, botMode);
     if (!canUse) {
-        addLog('debug', `[${sock.user?.id || 'unknown'}] canUseBot=false mode=${botMode} isOwner=${isOwner} isGroup=${isGroup} senderNumber=${senderNumber} ctx.owner=${ctx.owner}`);
+        addLog('info', `[${sock.user?.id || 'unknown'}] ⏭️ Commande ignorée (mode ${botMode}) cmd=${cmdName} expéditeur=${senderNumber} owner=${ctx.owner}`);
         return;
     }
 
@@ -169,7 +169,10 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
     if (!cmdName) return;
 
     const command = commands[cmdName];
-    if (!command) return;
+    if (!command) {
+        addLog('info', `[${sock.user?.id || 'unknown'}] ⏭️ Commande inconnue : « ${cmdName} » (préfixe ${PREFIX})`);
+        return;
+    }
 
     // ── Droits sur la commande (décidés dans utils/botmode.js) ──────
     const access = await checkCommandAccess({ sock, command, from, sender, isGroup, isOwner });
