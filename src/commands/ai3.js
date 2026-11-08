@@ -25,16 +25,16 @@ export default {
 
             if (!text) return sock.sendMessage(from, { text: '⚖️ Sujet manquant.' });
             
-            const { key } = await sock.sendMessage(from, { text: '⚖️ _Analyse des arguments..._' });
+            sock.sendPresenceUpdate('composing', from).catch(() => {});
             const result = await quickAI(`Fais un débat court sur : ${text}. Pour/Contre/Verdict.`);
+            sock.sendPresenceUpdate('paused', from).catch(() => {});
             
             if (result) {
-                await sock.sendMessage(from, { text: `⚖️ *DÉBAT*\n\n${result}`, edit: key });
+                await sock.sendMessage(from, { text: `⚖️ *DÉBAT*\n\n${result}` }, { quoted: msg });
             } else {
                 await sock.sendMessage(from, {
                     text: '❌ Service IA indisponible. Réessaie plus tard.',
-                    edit: key,
-                });
+                }, { quoted: msg });
             }
         }
     },
@@ -56,18 +56,19 @@ export default {
             if (global.activeQuizzes?.has(`${from}_${sender}`)) {
                 // ... (Reste de ta logique de réponse A/B/C/D)
             } else {
-                const { key } = await sock.sendMessage(from, { text: '📝 _Préparation du quiz..._' });
+                sock.sendPresenceUpdate('composing', from).catch(() => {});
                 const prompt = `Génère 3 questions de quiz sur ${text || 'Culture'}. Format JSON uniquement: [{"q":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"correct":"A"}]`;
                 const result = await quickAI(prompt);
+                sock.sendPresenceUpdate('paused', from).catch(() => {});
                 
                 // Nettoyage du JSON car l'IA ajoute souvent des ```json ... ```
                 const cleanJson = result?.replace(/```json|```/gi, '').trim();
                 try {
                     const questions = JSON.parse(cleanJson);
                     // Initialisation du quiz...
-                    await sock.sendMessage(from, { text: `📝 *Quiz prêt !*\nQuestion 1: ${questions[0].q}`, edit: key });
+                    await sock.sendMessage(from, { text: `📝 *Quiz prêt !*\nQuestion 1: ${questions[0].q}` }, { quoted: msg });
                 } catch {
-                    await sock.sendMessage(from, { text: '❌ Erreur de génération.', edit: key });
+                    await sock.sendMessage(from, { text: '❌ Erreur de génération.' }, { quoted: msg });
                 }
             }
         }

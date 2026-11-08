@@ -102,20 +102,21 @@ export default {
         return sock.sendMessage(from, { text: '🤖 Pose une question après !ia\nExemple: !ia Explique-moi la relativité' });
       }
 
-      const { key } = await sock.sendMessage(from, { text: '🔄 _Réflexion..._' });
-
+      // Comme Ely : pas de message temporaire édité ensuite. Les « edit »
+      // peuvent arriver avant le message original et afficher
+      // « En attente de ce message… » chez le destinataire.
+      sock.sendPresenceUpdate('composing', from).catch(() => {});
       const result = await callGemini(text);
+      sock.sendPresenceUpdate('paused', from).catch(() => {});
 
       if (result) {
         await sock.sendMessage(from, {
           text: ` *IA — ${result.provider}*\n\n${result.text}`,
-          edit: key,
-        });
+        }, { quoted: msg });
       } else {
         await sock.sendMessage(from, {
           text: '❌ Service IA indisponible.\n\n_Vérifie que GEMINI_API_KEY_1 est bien configurée dans les variables d\'environnement._',
-          edit: key,
-        });
+        }, { quoted: msg });
       }
     },
   },

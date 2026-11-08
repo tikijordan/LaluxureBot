@@ -72,11 +72,12 @@ export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
     let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
-    // Comme Ely : la réponse cite le message qui a déclenché l'IA. Le wrapper
-    // sendMessage retire automatiquement la citation si le chat change.
+    // Comme Ely : la réponse est envoyée directement, sans message temporaire
+    // édité. L'édition avant réception de l'original provoque le fameux
+    // « En attente de ce message… » côté WhatsApp. L'indicateur « en train
+    // d'écrire » remplace le placeholder, sans envoyer de message vide.
     const sendOpts = quoted ? { quoted } : undefined;
-    const { key } = await sock.sendMessage(from, { text: '✍️ _En train d\'écrire..._' }, sendOpts);
-    addAIReply(from, key?.id);
+    sock.sendPresenceUpdate('composing', from).catch(() => {});
 
     const messages = [
         { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande evite parler trop et tu te nomme lalxureAi c\'est commca que tu presente , détaillé et naturel. Réponds complètement sans te couper.' },
@@ -85,15 +86,16 @@ export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
     ];
 
     const reply = await callAI(messages);
-    if (reply) {
+    sock.sendPresenceUpdate('paused', from).catch(() => {});
+    if (reply && String(reply).trim()) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
         chatSessions.set(sender, session);
-        await sock.sendMessage(from, { text: `${reply}`, edit: key }, sendOpts);
+        const sent = await sock.sendMessage(from, { text: `${reply}` }, sendOpts);
+        addAIReply(from, sent?.key?.id);
     } else {
         await sock.sendMessage(from, {
             text: '❌ Service IA indisponible. Réessaie plus tard ou utilise !chatbot reset.',
-            edit: key,
         }, sendOpts);
     }
 }
@@ -140,7 +142,7 @@ export default {
                 });
             }
 
-            await runChatbotTurn({ sock, from, sender, text });
+            await runChatbotTurn({ sock, from, sender, text, quoted: msg });
         }
     },
 
@@ -151,8 +153,7 @@ export default {
             const target = quoted || msg.message;
             if (!target?.imageMessage) return sock.sendMessage(from, { text: '❌ Cite une image.' });
 
-            const { key } = await sock.sendMessage(from, { text: '🔍 _Lecture de l\'image..._' });
-
+            sock.sendPresenceUpdate('composing', from).catch(() => {});
             try {
                 const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
                 const stream = await downloadContentFromMessage(target.imageMessage, 'image');
@@ -171,9 +172,11 @@ export default {
                     }
                 );
                 const result = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                await sock.sendMessage(from, { text: `🔍 *OCR*\n\n${result || 'Aucun texte.'}`, edit: key });
+                sock.sendPresenceUpdate('paused', from).catch(() => {});
+                await sock.sendMessage(from, { text: `🔍 *OCR*\n\n${result || 'Aucun texte.'}` }, { quoted: msg });
             } catch (e) {
-                await sock.sendMessage(from, { text: '❌ Erreur OCR.', edit: key });
+                sock.sendPresenceUpdate('paused', from).catch(() => {});
+                await sock.sendMessage(from, { text: '❌ Erreur OCR.' }, { quoted: msg });
             }
         }
     }

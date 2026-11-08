@@ -78,7 +78,13 @@ export async function checkCommandAccess({ sock, command, from, sender, isGroup,
     if (!ALLOW_GROUP_ADMINS || !isGroup) {
       return { allowed: false, message: '🔒 Cette commande est réservée au propriétaire.' };
     }
-    const metadata = await sock.groupMetadata(from).catch(() => null);
+    // Cache des métadonnées (comme Ely) : évite un aller-retour réseau à
+    // chaque commande admin et donc un délai de réponse visible.
+    let metadata = sock.state?.groupMetaCache?.get?.(from) || null;
+    if (!metadata) {
+      metadata = await sock.groupMetadata(from).catch(() => null);
+      if (metadata) sock.state?.groupMetaCache?.set?.(from, metadata);
+    }
     if (!metadata) return { allowed: false, message: '⚠️ Impossible de vérifier les droits du groupe.' };
 
     const senderNumber = (sender || '').replace(/\D/g, '').replace(/^0+/, '');

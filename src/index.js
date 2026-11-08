@@ -1141,7 +1141,12 @@ async function startSession(sessionId, phoneNumber = null) {
                             senderNumber = lidNum;
                         } else {
                             try {
-                                const pn = await sock.signalRepository.lidMapping.getPNForLID(participantRaw || senderJid);
+                                // Délai plafonné : une résolution LID lente ne doit
+                                // pas retarder la réponse à la commande.
+                                const pn = await Promise.race([
+                                    sock.signalRepository.lidMapping.getPNForLID(participantRaw || senderJid),
+                                    new Promise(resolve => setTimeout(() => resolve(null), 1500)),
+                                ]);
                                 if (pn) {
                                     senderNumber = pn.split(':')[0].split('@')[0].replace(/\D/g, '');
                                     senderJid    = senderNumber + '@s.whatsapp.net';
@@ -1171,8 +1176,10 @@ async function startSession(sessionId, phoneNumber = null) {
                         senderJid = rawJid;
                     }
                 }
-                if (isGroup && isCmdEarly) {
-                    await resolveOwnerLidIfNeeded(sock, state, OWNER);
+                if (isGroup && isCmdEarly && !state.ownerLid) {
+                    // Non bloquant : la résolution réseau du LID ne doit pas
+                    // retarder la réponse. Elle profitera aux messages suivants.
+                    resolveOwnerLidIfNeeded(sock, state, OWNER).catch(() => {});
                 }
                 let OWNER_LID = state.ownerLid || null;
                 const ownerCheckJid = participantRaw || senderJid;
@@ -1243,32 +1250,10 @@ async function startSession(sessionId, phoneNumber = null) {
                     if (handledCaptcha) continue;
                 }
                 const isCmd = body.startsWith(PREFIX);
-                // ── Redirection des commandes tapées dans un DM ─────────
-                // Si tu tapes une commande dans le DM d'un contact réel, la
-                // réponse est redirigée vers ton propre chat (invisible pour le
-                // contact). Dans TON propre chat ("Message yourself"), on répond
-                // dans le chat d'origine (souvent un LID pour ne pas créer un
-                // second fil). Pour la redirection on vise le PN : c'est la
-                // seule cible où Baileys considère TOUS les appareils comme
-                // « moi » et leur envoie l'enveloppe deviceSentMessage. En LID,
-                // le téléphone recevait une copie brute → « En attente de ce
-                // message... ». (La citation croisée est retirée dans le wrapper
-                // sendMessage, même cause.)
-                let replyTo = from;
-                if (!isGroup && isCmd && isOwner && OWNER) {
-                    const selfPn = `${OWNER}@s.whatsapp.net`;
-                    const chatNum = String(rawJid || '').split('@')[0].split(':')[0];
-                    const isSelfChat = rawJid === selfPn
-                        || chatNum === OWNER
-                        || (state.ownerLid && chatNum === String(state.ownerLid));
-                    if (!isSelfChat) {
-                        // Cible = ton chat perso en PN (et non en @lid). En LID,
-                        // meId (PN) ne reconnaît pas le LID comme « moi » : Baileys
-                        // envoie alors au téléphone une copie SANS l'enveloppe
-                        // deviceSentMessage → « En attente de ce message... ».
-                        replyTo = selfPn;
-                    }
-                }
+                // Comme Ely : on répond TOUJOURS dans le chat d'origine.
+                // Rediriger un DM vers un autre JID (PN vs @lid, self-chat)
+                // provoquait les messages « En attente de ce message… ».
+                const replyTo = from;
                 // ── Mode conversation libre (!chatbot) ─────────────────
                 // Une fois activé par !chatbot, les messages SANS préfixe de
                 // cet utilisateur partent directement à l'IA (le commentaire
@@ -1286,11 +1271,10 @@ async function startSession(sessionId, phoneNumber = null) {
                     // On ignore les messages envoyés par le compte du bot vers
                     // d'autres contacts ; seul son propre chat est autorisé.
                     if (!fromMe || isSelfChatFree) {
-                        try {
-                            await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg });
-                        } catch (e) {
-                            addLog('error', `[${state.id}] Chatbot: ${e.message}`);
-                        }
+                        // Non bloquant : les autres messages du lot ne doivent pas
+                        // attendre la fin de l'appel IA.
+                        runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg })
+                            .catch(e => addLog('error', `[${state.id}] Chatbot: ${e.message}`));
                         continue;
                     }
                 }
@@ -1396,11 +1380,8 @@ async function startSession(sessionId, phoneNumber = null) {
                 if (isGroup && !isCmd && !fromMe && body.trim()
                     && global.activeChatbotSessions?.has(senderJid)
                     && canUseBot(isOwner, true, senderNumber, OWNER, currentBotMode)) {
-                    try {
-                        await runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg });
-                    } catch (e) {
-                        addLog('error', `[${state.id}] Chatbot: ${e.message}`);
-                    }
+                    runChatbotTurn({ sock, from: replyTo, sender: senderJid, text: body, quoted: msg })
+                        .catch(e => addLog('error', `[${state.id}] Chatbot: ${e.message}`));
                     continue;
                 }
                 // ── Réponse IA automatique (logique Ely) ────────────────
@@ -1419,21 +1400,19 @@ async function startSession(sessionId, phoneNumber = null) {
                         && (isReplyToAI(from, contextInfo.stanzaId) || isReplyToAI(replyTo, contextInfo.stanzaId));
                     if ((estMentionne || estAppeleParNom || estReponseAI)
                         && canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode)) {
-                        try {
-                            await runChatbotTurn({
-                                sock, from: replyTo, sender: senderJid,
-                                text: body, quoted: msg,
-                            });
-                        } catch (e) {
-                            addLog('error', `[${state.id}] IA auto: ${e.message}`);
-                        }
+                        runChatbotTurn({
+                            sock, from: replyTo, sender: senderJid,
+                            text: body, quoted: msg,
+                        }).catch(e => addLog('error', `[${state.id}] IA auto: ${e.message}`));
                         continue;
                     }
                 }
                 if (!isCmd) continue;
                 const mayUseBot = canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode);
                 if (!mayUseBot) continue;
-                await handleCommand(sock, msg, {}, {
+                // Non bloquant, comme Ely : un traitement lent ne doit pas
+                // retarder les messages suivants.
+                handleCommand(sock, msg, {}, {
                     body, from: replyTo, isGroup, isOwner, senderNumber, sender: senderJid,
                     noTagGroups: global.noTagGroups,
                     botMode: currentBotMode,
@@ -1446,7 +1425,7 @@ async function startSession(sessionId, phoneNumber = null) {
                         if (typeof global.__trackDashboardCommand === 'function')
                             global.__trackDashboardCommand(cmd, user);
                     },
-                });
+                }).catch(e => addLog('error', `[${state.id}] Commande: ${e.message}`));
             } catch(err) { addLog('error', `[${state.id}] ${err.message}`); }
         }
     }));
