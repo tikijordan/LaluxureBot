@@ -80,6 +80,7 @@ ${P}resume [lien] — Résumer article web
 ${P}chatbot — Mode conversation continue
 ${P}ocr — Extraire le texte d'une image
 ${P}debate [sujet] — Débat IA pour/contre sur un sujet
+${P}convert (alias ${P}converts) — Cite vidéo→audio, texte→vocal, audio→texte
 
 🔍 *RECHERCHE*
 ${P}wiki [sujet] — Résumé Wikipedia

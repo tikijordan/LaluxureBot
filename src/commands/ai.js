@@ -58,6 +58,14 @@ export class KeyManager {
 
 const geminiKeys = new KeyManager(GEMINI_KEYS, 'Gemini');
 
+// Extrait le texte d'une réponse Gemini : concatène toutes les parties « texte »
+// (en ignorant les parties de réflexion) au lieu de lire seulement parts[0],
+// qui peut être vide/une pensée avec les modèles « preview ».
+export function extractGeminiText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.filter(p => p?.text && !p.thought).map(p => p.text).join('').trim();
+}
+
 // --- APPEL GEMINI ---
 async function callGemini(prompt) {
   const key = geminiKeys.getKey();
@@ -73,7 +81,7 @@ async function callGemini(prompt) {
       { timeout: 30000 }
     );
 
-    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = extractGeminiText(res.data);
     if (!text) throw new Error('Réponse vide');
     return { text, provider: 'Gemini ✨' };
 
@@ -98,11 +106,6 @@ export default {
       msgCache.add(msgId);
       setTimeout(() => msgCache.delete(msgId), 30000);
 
-      // L'IA ne répond pas dans les groupes (en privé uniquement).
-      if (isGroup) {
-        return sock.sendMessage(from, { text: '📵 L\'IA répond uniquement en message privé.\n👉 Écris-moi en DM et retape !ia là-bas.' });
-      }
-
       if (!text) {
         return sock.sendMessage(from, { text: '🤖 Pose une question après !ia\nExemple: !ia Explique-moi la relativité' });
       }
@@ -116,7 +119,7 @@ export default {
 
       if (result) {
         await sock.sendMessage(from, {
-          text: ` *IA — ${result.provider}*\n\n${result.text}`,
+          text: `*IA — ${result.provider}*\n\n${result.text}`,
         }, { quoted: msg });
       } else {
         await sock.sendMessage(from, {

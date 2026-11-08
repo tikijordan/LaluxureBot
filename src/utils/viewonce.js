@@ -44,13 +44,25 @@ export function findSessionSocket(targetNumber) {
   return null;
 }
 
-/** Démballe le conteneur ephemeralMessage (messages éphémères / qui disparaissent),
- * qui enveloppe TOUT type de message y compris les vues uniques dès que les
- * messages éphémères sont activés sur la conversation. Sans ce démballage,
- * une vue unique envoyée dans une conversation avec messages éphémères actifs
- * n'est jamais reconnue comme telle. */
-function unwrapEphemeral(message) {
-  return message?.ephemeralMessage?.message || message;
+/** Démballe TOUTES les enveloppes qui peuvent entourer une vue unique
+ * (messages éphémères, messages édités, transferts « deviceSent », document
+ * avec légende) — pas seulement UN niveau d'ephemeralMessage.
+ *
+ * FIX : l'ancienne version ne retirait qu'un seul niveau d'ephemeralMessage.
+ * Dès qu'un message arrivait doublement enveloppé (ex. vue unique transférée,
+ * ou messages éphémères + un autre conteneur), extractViewOnceInner() ne
+ * trouvait plus rien et l'extraction par réaction échouait silencieusement
+ * (on voyait alors le log « Réaction sur un message NON reconnu comme vue
+ * unique »). On déballe maintenant en boucle, comme unwrapMessage() dans
+ * index.js et unwrapMessageContent() dans utils/message.js. */
+function unwrapEphemeral(message, depth = 0) {
+  if (!message || depth > 4) return message;
+  const inner = message.ephemeralMessage?.message
+    || message.editedMessage?.message
+    || message.deviceSentMessage?.message
+    || message.documentWithCaptionMessage?.message;
+  if (!inner) return message;
+  return unwrapEphemeral(inner, depth + 1);
 }
 
 /** Extrait le contenu média d'un message vue unique */

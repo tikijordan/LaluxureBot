@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { extractGeminiText } from './ai.js';
 
 const msgCache = new Set();
 
@@ -11,7 +12,7 @@ async function quickAI(prompt) {
             { contents: [{ parts: [{ text: prompt }] }] },
             { timeout: 20000 }
         );
-        return res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        return extractGeminiText(res.data) || null;
     } catch { return null; }
 }
 

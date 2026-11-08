@@ -32,6 +32,13 @@ const _commandsLoadPromise = loadCommands()
 
 const _defaultNoTagGroups = new Set();
 
+// addLog vit dans index.js (exposé via global.addLog). Il n'était pas importé ici :
+// toute commande ignorée / inconnue levait un ReferenceError silencieux.
+const addLog = (level, msg) => {
+    if (typeof global.addLog === 'function') global.addLog(level, msg);
+    else console.log(`[${level}] ${msg}`);
+};
+
 // ══════════════════════════════════════════════════════════════
 // DÉDUPLICATION HANDLER — Map avec TTL (10 min par message)
 // ══════════════════════════════════════════════════════════════
@@ -150,23 +157,25 @@ export async function handleCommand(sock, msg, store, ctx = {}) {
 
     if (!body || !body.startsWith(PREFIX)) return;
 
-    // Mode lu à chaque message (le fichier peut changer via !public / !private)
-    const botMode = getBotMode();
-
-    // Qui peut lancer une commande : décidé dans utils/botmode.js
-    const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner, botMode);
-    if (!canUse) {
-        addLog('info', `[${sock.user?.id || 'unknown'}] ⏭️ Commande ignorée (mode ${botMode}) cmd=${cmdName} expéditeur=${senderNumber} owner=${ctx.owner}`);
-        return;
-    }
-
     // ── Parsing de la commande ─────────────────────────────────
+    // (déplacé AVANT le contrôle d'accès : cmdName était utilisé avant sa
+    //  déclaration → ReferenceError « Cannot access 'cmdName' before initialization »)
     const parts   = body.slice(PREFIX.length).trim().split(/\s+/);
     const cmdName = parts[0]?.toLowerCase();
     const args    = parts.slice(1);
     const text    = args.join(' ');
 
     if (!cmdName) return;
+
+    // Mode lu à chaque message (le fichier peut changer via !public / !private)
+    const botMode = getBotMode();
+
+    // Qui peut lancer une commande : décidé dans utils/botmode.js
+    const canUse = canUseBot(isOwner, isGroup, senderNumber, ctx.owner || OWNER, botMode);
+    if (!canUse) {
+        addLog('info', `[${sock.user?.id || 'unknown'}] ⏭️ Commande ignorée (mode ${botMode}, ${isGroup ? 'groupe' : 'privé'}) cmd=${cmdName} expéditeur=${senderNumber} owner=${ctx.owner || OWNER} isOwner=${isOwner}`);
+        return;
+    }
 
     const command = commands[cmdName];
     if (!command) {

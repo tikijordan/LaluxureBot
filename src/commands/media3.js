@@ -34,7 +34,7 @@ export default {
         // Tenor API (gratuit)
         const tenorKey = process.env.TENOR_API_KEY || 'AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCDA'; // clé demo publique
         const res = await axios.get('https://tenor.googleapis.com/v2/search', {
-          params: { q: text, key: tenorKey, limit: 5, media_filter: 'gif', locale: 'fr_FR' },
+          params: { q: text, key: tenorKey, limit: 5, media_filter: 'mp4', locale: 'fr_FR' },
           timeout: 8000,
         });
         const results = res.data?.results || [];
@@ -43,7 +43,8 @@ export default {
           return;
         }
         const pick = results[Math.floor(Math.random() * results.length)];
-        const gifUrl = pick.media_formats?.gif?.url || pick.url;
+        const gifUrl = pick.media_formats?.mp4?.url || pick.media_formats?.tinymp4?.url;
+        if (!gifUrl) throw new Error('Pas de format mp4');
         const gifRes = await axios.get(gifUrl, { responseType: 'arraybuffer', timeout: 15000 });
         const buf = Buffer.from(gifRes.data);
         await sock.sendMessage(from, {

@@ -153,7 +153,7 @@ function validatePlayInput(text) {
     if (!text || !text.trim()) return { ok: false, msg: '🎵 Usage: !play [titre ou lien]' };
     const input = text.trim();
     if (input.startsWith('-')) return { ok: false, msg: '❌ Entrée invalide.' };
-    if (input.length > 300) return { ok: false, msg: '❌ Recherche trop longue (max 300 caractères).' };
+    if (input.length > 100000) return { ok: false, msg: '❌ Recherche trop longue (max 100000 caractères).' };
     if (input.startsWith('http')) {
         const check = validateDownloadUrl(input);
         if (!check.ok) return check;

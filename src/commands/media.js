@@ -9,7 +9,7 @@
 import { getContentType, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import fs from 'fs';
 import path from 'path';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import {
   extractViewOnceInner,
@@ -57,29 +57,35 @@ const mediaCommands = {
         return sock.sendMessage(from, { text: '❌ Répondez à une image ou une vidéo pour créer un sticker.' });
       }
 
+      const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const tempDir = path.join(__dirname, '../temp');
+      const ext = found.mediaType === 'video' ? 'mp4' : 'jpg';
+      const tempIn = path.join(tempDir, `${stamp}.${ext}`);
+      const tempOut = path.join(tempDir, `${stamp}.webp`);
+
       try {
         const buffer = await downloadMedia(found.mediaMsg, found.mediaType);
-        const tempDir = path.join(__dirname, '../temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-
-        const ext = found.mediaType === 'video' ? 'mp4' : 'jpg';
-        const tempIn = path.join(tempDir, `${Date.now()}.${ext}`);
-        const tempOut = path.join(tempDir, `${Date.now()}.webp`);
-
+        fs.mkdirSync(tempDir, { recursive: true });
         fs.writeFileSync(tempIn, buffer);
 
-        // Conversion via FFmpeg pour garantir la compatibilité et le format carré
-        const ffmpegCmd = `ffmpeg -i "${tempIn}" -vcodec libwebp -vf "scale='min(320,iw)':min'(320,ih)':force_original_aspect_ratio=decrease,fps=15, pad=320:320:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse" "${tempOut}"`;
+        // Le filtre précédent était invalide (« min'(320,ih)' ») : FFmpeg échouait
+        // et, dans le catch, un message VIDE était envoyé (invisible).
+        const vf = 'scale=320:320:force_original_aspect_ratio=decrease,fps=15,format=rgba,'
+                 + 'pad=320:320:(ow-iw)/2:(oh-ih)/2:color=#00000000';
+        const args = ['-y', '-i', tempIn, '-t', '8', '-an', '-vcodec', 'libwebp',
+                      '-vf', vf, '-loop', '0', '-preset', 'default', '-q:v', '60', tempOut];
 
-        exec(ffmpegCmd, async (err) => {
-          if (fs.existsSync(tempIn)) fs.unlinkSync(tempIn);
-          if (err) return sock.sendMessage(from, { text: '❌ Erreur FFmpeg. Vérifiez l\'installation.' });
-
-          await sock.sendMessage(from, { sticker: fs.readFileSync(tempOut) }, { quoted: msg });
-          if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
+        await new Promise((resolve, reject) => {
+          execFile('ffmpeg', args, { timeout: 60_000 }, (err, _so, se) =>
+            err ? reject(new Error(String(se || err.message).slice(-200))) : resolve());
         });
+
+        await sock.sendMessage(from, { sticker: fs.readFileSync(tempOut) }, { quoted: msg });
       } catch (e) {
-        sock.sendMessage(from, { text: '' });
+        console.error('[sticker]', e.message);
+        await sock.sendMessage(from, { text: '❌ Impossible de créer le sticker (FFmpeg indisponible ou média invalide).' }, { quoted: msg }).catch(() => {});
+      } finally {
+        for (const f of [tempIn, tempOut]) { try { fs.unlinkSync(f); } catch {} }
       }
     },
   },
@@ -93,7 +99,7 @@ const mediaCommands = {
       const quotedSender = msg.message?.extendedTextMessage?.contextInfo?.participant;
       const isGroup = msg.key?.remoteJid?.endsWith('@g.us');
       const target = (mentioned && mentioned[0]) || quotedSender || (isGroup?sender :from);
-      const sendTo = sender;
+      const sendTo = from; // répondre dans le chat d'origine (groupe ou DM)
 
       try {
         const ppUrl = await sock.profilePictureUrl(target, 'image');
@@ -113,7 +119,8 @@ const mediaCommands = {
     description: 'Extrait un média à vue unique.',
     execute: async ({ sock, msg, from, sender, senderNumber, isGroup, owner }) => {
       const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-       const sendTo = sender;
+      // Groupe : extraction envoyée en privé à l'auteur ; DM : même chat (JID exact, PN/LID).
+      const sendTo = isGroup ? sender : from;
       if (!quoted) return sock.sendMessage(sendTo, { text: '❌ Réponds à un message à vue unique.' });
 
       const innerMsg = extractViewOnceInner(quoted) || quoted;

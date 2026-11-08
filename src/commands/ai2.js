@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { KeyManager } from './ai.js';
+import { KeyManager, extractGeminiText } from './ai.js';
 
 // Utilisation du cache global ou local pour éviter les doublons
 const msgCache = new Set();
@@ -11,6 +11,13 @@ const CHATBOT_TIMEOUT = 30 * 60 * 1000;
 // cite (reply) un message de l'IA, sans qu'il ait à la mentionner.
 const aiReplyIds = new Map(); // chatJid → Map(messageId → timestamp)
 const AI_REPLY_TTL = 60 * 60 * 1000;
+
+// Clé de session du chatbot : par utilisateur en privé, par (groupe, utilisateur)
+// en groupe — pour que le mode « conversation libre » et la mémoire ne fuient
+// pas d'un groupe à l'autre.
+export function chatbotKey(chatJid, senderJid) {
+    return String(chatJid || '').endsWith('@g.us') ? `${chatJid}__${senderJid}` : senderJid;
+}
 
 export function addAIReply(chatJid, id) {
     if (!chatJid || !id) return;
@@ -59,7 +66,7 @@ async function callAI(messages, temperature = 0.7) {
             { contents, generationConfig: { temperature, maxOutputTokens: 4096 } },
             { timeout: 20000 }
         );
-        return res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        return extractGeminiText(res.data);
     } catch (e) {
         const status = e.response?.status;
         console.error("Erreur IA:", e.message);
@@ -69,9 +76,9 @@ async function callAI(messages, temperature = 0.7) {
 }
 
 export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
-    // L'IA conversationnelle ne répond JAMAIS dans les groupes (en privé seulement).
-    if (typeof from === 'string' && from.endsWith('@g.us')) return;
-    let session = chatSessions.get(sender) || { history: [], lastActivity: Date.now() };
+    // L'IA conversationnelle répond PARTOUT (privé et groupes).
+    const sKey = chatbotKey(from, sender);
+    let session = chatSessions.get(sKey) || { history: [], lastActivity: Date.now() };
     if (Date.now() - session.lastActivity > CHATBOT_TIMEOUT) session.history = [];
 
     // Comme Ely : la réponse est envoyée directement, sans message temporaire
@@ -82,7 +89,7 @@ export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
     sock.sendPresenceUpdate('composing', from).catch(() => {});
 
     const messages = [
-        { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fais ce qu\'on te demande evite parler trop et tu te nomme lalxureAi c\'est commca que tu presente , détaillé et naturel. Réponds complètement sans te couper.' },
+        { role: 'system', content: 'Tu es un assistant WhatsApp utile qui fait ce qu\'on te demande, sans trop parler. Tu te présentes sous le nom lalxureAi. Réponds de façon détaillée et naturelle, complètement, sans te couper. Dans un groupe, réponds à la personne qui t\'écrit.' },
         ...session.history.slice(-10),
         { role: 'user', content: text }
     ];
@@ -92,7 +99,7 @@ export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
     if (reply && String(reply).trim()) {
         session.history.push({ role: 'user', content: text }, { role: 'assistant', content: reply });
         session.lastActivity = Date.now();
-        chatSessions.set(sender, session);
+        chatSessions.set(sKey, session);
         const sent = await sock.sendMessage(from, { text: `${reply}` }, sendOpts);
         addAIReply(from, sent?.key?.id);
     } else {
@@ -105,47 +112,40 @@ export async function runChatbotTurn({ sock, from, sender, text, quoted }) {
 export default {
     chatbot: {
         description: 'Mode conversation continue — une fois activé, plus besoin de retaper la commande, écris directement',
-        // FIX (chatbot doit permettre de causer sans retaper la commande) :
-        // avant, il fallait préfixer CHAQUE message par "!chatbot". On active
-        // maintenant un "mode conversation libre" par utilisateur — après un
-        // premier "!chatbot", ses messages sans préfixe sont automatiquement
-        // envoyés à l'IA (voir handleFreeformChatbot dans handler.js et le
-        // branchement dans index.js), jusqu'à "!chatbot off".
+        // Mode « conversation libre » : après un premier "!chatbot", les messages
+        // sans préfixe de cet utilisateur partent à l'IA (branchement dans index.js),
+        // en privé comme dans les groupes, jusqu'à "!chatbot off".
         execute: async ({ sock, from, sender, text, args, msg, isGroup }) => {
             const msgId = msg.key.id;
             if (msgCache.has(msgId)) return;
             msgCache.add(msgId);
             setTimeout(() => msgCache.delete(msgId), 30000);
 
-            // Pas d'IA conversationnelle dans les groupes.
-            if (isGroup) {
-                return sock.sendMessage(from, { text: '📵 L\'IA conversationnelle répond uniquement en message privé.\n👉 Écris-moi en DM et tape !chatbot là-bas.' });
-            }
-
+            const sKey = chatbotKey(from, sender);
             const sub = args[0]?.toLowerCase();
 
             if (sub === 'off') {
-                global.activeChatbotSessions?.delete(sender);
+                global.activeChatbotSessions?.delete(sKey);
                 return sock.sendMessage(from, { text: '🔕 Mode conversation libre désactivé. Retape !chatbot pour reprendre.' });
             }
 
             if (sub === 'reset') {
-                chatSessions.delete(sender);
-                global.activeChatbotSessions?.delete(sender);
+                chatSessions.delete(sKey);
+                global.activeChatbotSessions?.delete(sKey);
                 return sock.sendMessage(from, { text: '🔄 Mémoire effacée. Retape !chatbot pour reprendre.' });
             }
 
             // Active le mode conversation libre : les prochains messages de
             // cet utilisateur sans préfixe seront envoyés à l'IA directement.
             if (!global.activeChatbotSessions) global.activeChatbotSessions = new Set();
-            const alreadyActive = global.activeChatbotSessions.has(sender);
-            global.activeChatbotSessions.add(sender);
+            const alreadyActive = global.activeChatbotSessions.has(sKey);
+            global.activeChatbotSessions.add(sKey);
 
             if (!text) {
                 return sock.sendMessage(from, {
                     text: alreadyActive
-                        ? ' Le mode conversation libre est déjà actif — écris directement, sans !chatbot.'
-                        : ' *Mode conversation libre activé !*\n\nÉcris directement, plus besoin de retaper !chatbot avant chaque message.\n\n_!chatbot off pour arrêter, !chatbot reset pour effacer la mémoire._',
+                        ? 'Le mode conversation libre est déjà actif — écris directement, sans !chatbot.'
+                        : '*Mode conversation libre activé !*\n\nÉcris directement, plus besoin de retaper !chatbot avant chaque message.\n\n_!chatbot off pour arrêter, !chatbot reset pour effacer la mémoire._',
                 });
             }
 
@@ -178,7 +178,7 @@ export default {
                         }]
                     }
                 );
-                const result = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const result = extractGeminiText(res.data);
                 sock.sendPresenceUpdate('paused', from).catch(() => {});
                 await sock.sendMessage(from, { text: `🔍 *OCR*\n\n${result || 'Aucun texte.'}` }, { quoted: msg });
             } catch (e) {
