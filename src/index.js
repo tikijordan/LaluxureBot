@@ -266,6 +266,16 @@ function forgetSession(sid) {
 // normalement mais ne reçoit plus rien. On ne se base donc plus sur des messages de
 // test envoyés à soi-même (spam + faux positifs) : on mesure le silence réel de
 // WhatsApp. Aucune récupération ne supprime d'identifiants ni de clés.
+// FIX (« connecté mais muet ») : touchSession() est appelé pour TOUT
+// événement entrant, y compris les messages ILLISIBLES (CIPHERTEXT). Une
+// session dont le déchiffrement est cassé (clés de session corrompues)
+// continue donc à « recevoir des événements » indéfiniment — RECEIVE_STALL_MS
+// ci-dessous ne se déclenche JAMAIS dans ce cas précis, puisqu'il ne mesure
+// que l'absence totale d'événement, pas l'absence de message LISIBLE. Ces
+// deux constantes détectent spécifiquement ce cas : des messages arrivent
+// (cipherCount augmente) mais aucun ne se déchiffre depuis longtemps.
+const CIPHER_STALL_THRESHOLD = 5;                // messages illisibles avant suspicion
+const CIPHER_STALL_WINDOW_MS = 10 * 60 * 1000;   // sans AUCUN déchiffrement réussi sur cette durée
 const RECEIVE_STALL_MS       = 30 * 60 * 1000;   // 30 min de silence entrant = flux suspect
 const STALL_RESTART_FIRST_MS = 30 * 60 * 1000;   // délai mini entre deux rafraîchissements
 const STALL_RESTART_MAX_MS   = 6 * 60 * 60 * 1000; // plafond du délai (double à chaque fois)
@@ -561,6 +571,44 @@ async function startSession(sessionId, phoneNumber = null) {
                     options = { ...options, quoted: undefined };
                 }
             }
+            // FIX (messages vides) : filet de sécurité UNIQUE pour tous les
+            // envois — TOUTES les commandes ET les automatisations (anti-delete,
+            // interception vue unique vers le DM perso, etc.). Avant, chaque bug
+            // du genre (déballage d'enveloppe trop court, média déjà expiré côté
+            // WhatsApp, variable de texte mal construite, clé de contenu
+            // simplement oubliée...) finissait par envoyer une bulle vide ou un
+            // média cassé. On bloque ici n'importe quel envoi sans contenu
+            // exploitable AVANT qu'il ne parte, plutôt que de corriger chaque
+            // site d'appel un par un.
+            if (content && typeof content === 'object'
+                && !content.delete && !content.react && !content.edit) {
+                const mediaKeys = ['image', 'video', 'audio', 'sticker', 'document'];
+                const mediaKey = mediaKeys.find(k => k in content);
+                const mediaVal = mediaKey ? content[mediaKey] : undefined;
+                // Média valide = buffer non vide, OU objet { url } non vide, OU
+                // flux déjà préparé par Baileys (stream).
+                const hasUsableMedia = !!mediaKey && (
+                    (Buffer.isBuffer(mediaVal) && mediaVal.length > 0)
+                    || (mediaVal && typeof mediaVal === 'object'
+                        && typeof mediaVal.url === 'string' && mediaVal.url.trim() !== '')
+                    || (mediaVal && typeof mediaVal === 'object' && mediaVal.stream)
+                );
+                const hasText = typeof content.text === 'string' && content.text.trim() !== '';
+                // Types de contenu valides SANS texte ni média classique.
+                const OTHER_RENDERABLE = [
+                    'location', 'contacts', 'buttonsMessage', 'templateMessage',
+                    'listMessage', 'poll', 'product', 'groupInvite', 'pin',
+                    'viewOnceMessage', 'forward',
+                ];
+                const hasOtherRenderable = OTHER_RENDERABLE.some(k => k in content);
+                const isDegenerate = mediaKey
+                    ? !hasUsableMedia                       // clé média présente mais vide/invalide
+                    : (!hasText && !hasOtherRenderable);    // ni texte ni média ni autre contenu valide
+                if (isDegenerate) {
+                    addLog('warn', `[${sessionId}] Envoi bloqué (contenu vide/dégénéré) vers ${jid} — clés: ${Object.keys(content).join(',') || '(aucune)'}`);
+                    return null;
+                }
+            }
             // Pas de limite de temps imposée ici : la réponse attend l'envoi réel.
             const t0 = Date.now();
             if (!sock.__sentJids) sock.__sentJids = new Set();
@@ -654,7 +702,13 @@ async function startSession(sessionId, phoneNumber = null) {
     async function resendDeletedMessage(sock, chat, origMsg, deleterJid, ownerNumber) {
         // Le message est renvoyé dans la conversation personnelle du propriétaire
         const to = `${ownerNumber}@s.whatsapp.net`;
-        const raw = origMsg.message?.ephemeralMessage?.message || origMsg.message || {};
+        // FIX : ne déballait qu'UN SEUL niveau d'ephemeralMessage (comme l'ancien
+        // bug de viewonce.js). Un message supprimé doublement enveloppé
+        // (éphémère + autre conteneur) ne trouvait ni texte ni média → `raw`
+        // restait un objet vide, et le message renvoyé dans le DM perso était
+        // soit vide, soit absent. On réutilise le déballage récursif déjà
+        // utilisé pour les commandes.
+        const raw = unwrapMessage(origMsg.message) || {};
         const who = deleterJid.split('@')[0].split(':')[0];
         let where = 'dans une conversation privée';
         if (chat.endsWith('@g.us')) {
@@ -676,11 +730,25 @@ async function startSession(sessionId, phoneNumber = null) {
             return;
         }
         const kind = mediaType.replace('Message', '');
-        const stream = await downloadContentFromMessage(raw[mediaType], kind);
-        const chunks = [];
-        for await (const c of stream) chunks.push(c);
-        const buffer = Buffer.concat(chunks);
         const caption = `${header}${raw[mediaType].caption ? `\n\n${raw[mediaType].caption}` : ''}`;
+        let buffer;
+        try {
+            const stream = await downloadContentFromMessage(raw[mediaType], kind);
+            const chunks = [];
+            for await (const c of stream) chunks.push(c);
+            buffer = Buffer.concat(chunks);
+        } catch (e) {
+            buffer = Buffer.alloc(0);
+        }
+        // FIX : le média d'un message déjà supprimé est souvent invalidé côté
+        // WhatsApp (clé/CDN expirée) — le téléchargement réussit parfois tout
+        // en renvoyant 0 octet, ce qui produisait une bulle image/vidéo
+        // cassée dans le DM perso. On prévient désormais avec un message
+        // texte plutôt que d'envoyer un média vide.
+        if (!buffer.length) {
+            await sock.sendMessage(to, { text: `${header}\n\n⚠️ Média supprimé — impossible de le récupérer (déjà expiré côté WhatsApp).` });
+            return;
+        }
         if (kind === 'image') await sock.sendMessage(to, { image: buffer, caption });
         else if (kind === 'video') await sock.sendMessage(to, { video: buffer, caption });
         else if (kind === 'audio') await sock.sendMessage(to, { audio: buffer, mimetype: raw.audioMessage.mimetype || 'audio/ogg; codecs=opus', ptt: !!raw.audioMessage.ptt });
@@ -954,6 +1022,7 @@ async function startSession(sessionId, phoneNumber = null) {
             state.badSessionCount = 0;
             state.badSessionFirstAt = null;
             state.cipherCount = 0; // reset compteur messages illisibles après reconnexion réussie
+            state.cipherRepairDone = false; // réautorise une tentative de réparation sur CETTE connexion
             addLog('success', `[${state.id}] Connecté — Owner auto: ${num}${state.ownerLid ? ` (LID: ${state.ownerLid})` : ''} | Préfixe: ${PREFIX}`);
             // Auto-réparation : si les prekeys privées manquent (ancienne logique qui les
             // supprimait, restauration partielle…), on publie un nouveau lot. Sans ça,
@@ -1096,11 +1165,21 @@ async function startSession(sessionId, phoneNumber = null) {
                 }
                 continue;
             }
-            // Comme Ely : en 'notify', on ignore uniquement le rejeu de
-            // messages trop anciens (> 60 s). En 'append', on traite tout —
-            // c'est ce qui récupère les messages manqués pendant une coupure.
-            if (type === 'notify' && msg.messageTimestamp
-                && (nowSec - Number(msg.messageTimestamp)) > 60) continue;
+            // FIX : avant, cette limite d'âge ne s'appliquait qu'au type
+            // 'notify'. En 'append' (rejeu après coupure/reconnexion), TOUT
+            // était traité sans limite — y compris des commandes VIEILLES DE
+            // PLUSIEURS HEURES OU JOURS, déjà traitées une première fois en
+            // direct. Comme processedMsgIds expire au bout de 10 min
+            // (MSG_TTL), un rejeu arrivant plus tard n'était plus reconnu
+            // comme « déjà vu » et la commande était réexécutée — exactement
+            // le symptôme « le bot répond à d'anciennes commandes plusieurs
+            // fois après avoir déjà répondu ». La limite s'applique
+            // maintenant aux DEUX types, avec une marge un peu plus large en
+            // 'append' pour quand même récupérer les messages manqués durant
+            // une brève coupure, sans rejouer un historique entier.
+            const maxAgeSec = type === 'append' ? 180 : 60;
+            if (msg.messageTimestamp
+                && (nowSec - Number(msg.messageTimestamp)) > maxAgeSec) continue;
             if (msg.key.remoteJid === 'status@broadcast') continue;
             // Cache de TOUS les messages (envoyés ET reçus) : WhatsApp (ou un
             // appareil lié) peut redemander n'importe quel message déjà vu pour
@@ -1418,8 +1497,20 @@ async function startSession(sessionId, phoneNumber = null) {
                     const normalizeJid = j => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
                     const botIds = [sock.user?.id, sock.user?.lid].map(normalizeJid).filter(Boolean);
                     const estMentionne = mentionedJid.some(j => botIds.includes(normalizeJid(j)));
-                    const botName = String(sock.user?.name || process.env.BOT_NAME || '').trim();
-                    const estAppeleParNom = !!botName && body.trim().toLowerCase().startsWith(botName.toLowerCase());
+                    // FIX : avant, sock.user?.name (le nom de PROFIL WhatsApp du
+                    // compte connecté — pas un nom de bot déclaré) passait en
+                    // PRIORITÉ sur BOT_NAME, sans vérifier sa longueur ni exiger
+                    // une limite de mot. Si ce nom de profil était court ou
+                    // banal, N'IMPORTE QUEL message commençant par ces lettres
+                    // déclenchait le chatbot — indépendamment de !chatbot.
+                    // On utilise désormais UNIQUEMENT BOT_NAME (déclaré
+                    // explicitement en .env), avec une longueur minimale et une
+                    // vraie limite de mot (« Botanique » ne doit pas matcher
+                    // un bot nommé « Bot »).
+                    const botName = String(process.env.BOT_NAME || '').trim();
+                    const escapedBotName = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const estAppeleParNom = botName.length >= 3
+                        && new RegExp(`^${escapedBotName}\\b`, 'i').test(body.trim());
                     const estReponseAI = !!contextInfo.stanzaId
                         && (isReplyToAI(from, contextInfo.stanzaId) || isReplyToAI(replyTo, contextInfo.stanzaId));
                     const estSessionLibre = isGroup
@@ -1553,6 +1644,31 @@ async function checkSessionHealthInner(id, state) {
     if (wsState !== undefined && wsState !== 1) {
         restartSocket(state, { reason: `websocket fermé (readyState=${wsState})`, delayMs: 3000 });
         return;
+    }
+
+    // 1.5. Déchiffrement cassé : des messages ARRIVENT (cipherCount augmente
+    // à chaque CIPHERTEXT) mais aucun ne se déchiffre depuis longtemps. Comme
+    // ces échecs comptent comme de l'activité pour touchSession(), le check
+    // #2 ci-dessous ne voit AUCUN silence et ne se déclenche jamais — la
+    // session reste « connectée » sans jamais pouvoir répondre à rien. Une
+    // seule tentative de réparation par connexion (cipherRepairDone) :
+    // republication des prekeys (répare la cause la plus fréquente : un lot
+    // de prekeys épuisé ou désynchronisé côté WhatsApp) puis redémarrage du
+    // socket (identifiants conservés).
+    if (!state.cipherRepairDone && (state.cipherCount || 0) >= CIPHER_STALL_THRESHOLD) {
+        const lastGood = state.lastDeliveryAt || state.lastConnectedAt || 0;
+        const sinceGood = Date.now() - lastGood;
+        if (sinceGood >= CIPHER_STALL_WINDOW_MS) {
+            state.cipherRepairDone = true;
+            addLog('warn', `[Watchdog] [${id}] ${state.cipherCount} message(s) illisible(s), aucun déchiffré depuis ${Math.round(sinceGood / 60000)} min — réparation (prekeys + redémarrage du socket)`);
+            try {
+                if (typeof state.sock.uploadPreKeys === 'function') await state.sock.uploadPreKeys();
+            } catch (e) {
+                addLog('warn', `[Watchdog] [${id}] Republication des prekeys impossible: ${e.message}`);
+            }
+            restartSocket(state, { reason: 'déchiffrement cassé (prekeys republiées)', delayMs: 3000 });
+            return;
+        }
     }
 
     // 2. Silence total du flux entrant.

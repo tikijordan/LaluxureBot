@@ -22,9 +22,16 @@ const ANTIDELETE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 function readAntidelete() {
   try { return JSON.parse(fs.readFileSync(ANTIDELETE_FILE, 'utf-8')); } catch { return {}; }
 }
+// FIX : antidelete doit être actif PAR DÉFAUT et EN PERMANENCE — avant,
+// l'absence de fichier (ou l'absence du champ enabled) faisait défaut à
+// false, donc une installation neuve ne récupérait aucun message supprimé
+// tant que personne n'avait tapé !antidelete on. Il n'y a plus de bascule :
+// la fonction retourne toujours true, quoi que contienne le fichier.
 export function isAntideleteEnabled() {
-  return readAntidelete().enabled === true;
+  return true;
 }
+// Conservé uniquement pour écrire un fichier initial lisible par !antidelete
+// (affichage du statut) ; n'a plus d'effet sur isAntideleteEnabled().
 function setAntidelete(on) {
   const data = readAntidelete();
   data.enabled = on;
@@ -42,17 +49,16 @@ export default {
 
   // ── ANTI-SPAM ───────────────────────────────────────────────
   antidelete: {
-    description: 'Activer/désactiver la récupération des messages supprimés (toutes les conversations)',
+    description: 'Statut de la récupération des messages supprimés (toujours activée)',
     adminOnly: true,
-    execute: async ({ sock, from, args }) => {
-      const action = (args[0] || '').toLowerCase();
-      if (!['on', 'off'].includes(action)) {
-        const on = isAntideleteEnabled();
-        await sock.sendMessage(from, { text: `🗑️ *Anti-delete* (toutes les conversations)\n\nStatut: ${on ? 'Activé' : 'Désactivé'}\n\n• !antidelete on → Activer\n• !antidelete off → Désactiver\n\n_Quand quelqu'un supprime un message, il est renvoyé dans ta conversation personnelle._` });
-        return;
-      }
-      setAntidelete(action === 'on');
-      await sock.sendMessage(from, { text: action === 'on' ? '✅ Anti-delete activé.' : '❌ Anti-delete désactivé.' });
+    execute: async ({ sock, from }) => {
+      // FIX : l'anti-delete est désormais permanent — plus de on/off, pour
+      // qu'une installation neuve récupère les messages supprimés sans
+      // configuration manuelle, et qu'il ne puisse plus être désactivé par
+      // erreur (ou volontairement par un admin du groupe) ailleurs dans le code.
+      await sock.sendMessage(from, {
+        text: `🗑️ *Anti-delete* (toutes les conversations)\n\n✅ Toujours activé — ne peut pas être désactivé.\n\n_Quand quelqu'un supprime un message, il est renvoyé dans ta conversation personnelle._`,
+      });
     },
   },
 
