@@ -155,6 +155,37 @@ setInterval(() => {
         if (now - ts > MSG_TTL) processedMsgIds.delete(id);
     }
 }, 60 * 1000); // check toutes les minutes
+
+// FIX (messages en rafale dans le DM perso) : le handler 'messages.update'
+// n'avait AUCUNE déduplication sur l'événement REVOKE (suppression). WhatsApp
+// peut livrer le MÊME événement de suppression plusieurs fois (reconnexions,
+// synchronisation multi-appareil) — et comme antidelete est maintenant
+// toujours actif, chaque répétition renvoyait un NOUVEL exemplaire du
+// message dans le DM personnel, en rafale. L'envoi rapide et répété de
+// plusieurs messages à la suite semble aussi être ce qui les rend
+// indéchiffrables (« En attente de ce message... ») côté WhatsApp.
+// FIX (voir resendDeletedMessage) : force un nouveau jeu de clés Signal pour
+// un JID avant de lui envoyer un message automatisé, avec un simple throttle
+// (5 min) pour ne pas solliciter WhatsApp à chaque envoi.
+const sessionRefreshedAt = new Map(); // jid → timestamp
+async function ensureFreshSession(sock, jid) {
+    const last = sessionRefreshedAt.get(jid) || 0;
+    if (Date.now() - last < 5 * 60 * 1000) return;
+    sessionRefreshedAt.set(jid, Date.now());
+    try {
+        if (typeof sock.assertSessions === 'function') {
+            await sock.assertSessions([jid], true);
+        }
+    } catch { /* on tente quand même l'envoi ensuite */ }
+}
+
+const processedRevokeIds = new Map(); // key.id du message supprimé → timestamp
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, ts] of processedRevokeIds) {
+        if (now - ts > MSG_TTL) processedRevokeIds.delete(id);
+    }
+}, 60 * 1000);
 if (typeof global.gc === 'function') {
     setInterval(() => { try { global.gc(); } catch {} }, 5 * 60 * 1000);
 }
@@ -169,7 +200,9 @@ process.stderr.write = (d, ...a) => { const s=d.toString(); if(NOISE.some(n=>s.i
 const _ce = console.error.bind(console);
 console.error = (...a) => { const s=a.join(' '); if(NOISE.some(n=>s.includes(n))) return; _ce(...a); };
 import { handleCommand } from './handler.js';
-import { runChatbotTurn, isReplyToAI, chatbotKey } from './commands/ai2.js';
+// isReplyToAI n'est plus utilisée : la réponse automatique en citant une
+// ancienne réponse IA a été retirée (le chatbot ne se déclenche plus que via !chatbot).
+import { runChatbotTurn, chatbotKey } from './commands/ai2.js';
 import { trackMessage as trackGroupMsg } from './utils/groupstats.js';
 import { cleanupStaleSessionDocs, saveAllActiveSessions, restoreSessionFromAtlasIfNewer, listSessionsMongo, connectMongo, saveSessionMongo, restoreAllSessions, deleteSessionMongo, deleteAllSessionsMongo, readSessionFiles, migrateSessionId } from './utils/mongostore.js';
 // getBotMode vient de utils/botmode.js, comme dans handler.js : une seule source de vérité
@@ -560,6 +593,15 @@ async function startSession(sessionId, phoneNumber = null) {
     if (!sock.__sendMessageWrapped) {
         const _origSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options) => {
+            // FIX (demande explicite : partout, pas seulement anti-delete/vue
+            // unique) : avant TOUT envoi — commandes, automatisations, tout —
+            // on s'assure que la session de chiffrement Signal avec ce
+            // destinataire est fraîche. Un placeholder « En attente de ce
+            // message » qui ne se résout jamais vient d'une session cassée
+            // avec cet appareil précis ; ça peut toucher N'IMPORTE QUEL
+            // destinataire, pas seulement le DM perso. Throttlé à 5 min par
+            // JID (voir ensureFreshSession) pour ne pas ralentir chaque envoi.
+            if (jid) await ensureFreshSession(sock, jid);
             // Une citation ne peut référencer qu'un message du MÊME chat. Quand
             // une commande tapée dans un autre DM/groupe est redirigée vers ton
             // chat perso, le « quoted » vient d'une autre conversation :
@@ -702,6 +744,9 @@ async function startSession(sessionId, phoneNumber = null) {
     async function resendDeletedMessage(sock, chat, origMsg, deleterJid, ownerNumber) {
         // Le message est renvoyé dans la conversation personnelle du propriétaire
         const to = `${ownerNumber}@s.whatsapp.net`;
+        // Le rafraîchissement de session (ensureFreshSession) est maintenant
+        // appliqué pour TOUS les envois dans le wrapper sock.sendMessage
+        // ci-dessus — plus besoin de l'appeler spécifiquement ici.
         // FIX : ne déballait qu'UN SEUL niveau d'ephemeralMessage (comme l'ancien
         // bug de viewonce.js). Un message supprimé doublement enveloppé
         // (éphémère + autre conteneur) ne trouvait ni texte ni média → `raw`
@@ -767,6 +812,12 @@ async function startSession(sessionId, phoneNumber = null) {
                 // Toutes les conversations (groupes et privés). Les suppressions faites
                 // par le bot ou par toi-même (fromMe) sont ignorées.
                 if (chat && !update.key?.fromMe && isAntideleteEnabled()) {
+                    // FIX : déduplication — sans ça, le même événement REVOKE
+                    // livré plusieurs fois par WhatsApp renvoyait plusieurs
+                    // fois le même message supprimé dans le DM perso.
+                    const revokeId = key?.id;
+                    if (revokeId && processedRevokeIds.has(revokeId)) { continue; }
+                    if (revokeId) processedRevokeIds.set(revokeId, Date.now());
                     const cached = state.msgCache?.get(key.id);
                     if (!cached) { addLog('warn', `[${state.id}] Anti-delete: message supprimé inconnu du cache (id=${key.id})`); }
                     else {
@@ -1162,6 +1213,13 @@ async function startSession(sessionId, phoneNumber = null) {
                 // aucune clé et on ne coupe pas la session.
                 if (msg.messageStubType === WAMessageStubType.CIPHERTEXT) {
                     state.cipherCount = (state.cipherCount || 0) + 1;
+                    // FIX (diagnostic) : avant, ce cas ne laissait AUCUNE trace
+                    // dans les logs — un message illisible disparaissait
+                    // silencieusement, avant même d'atteindre la ligne « MSG
+                    // REÇU ». On logge désormais explicitement, pour que
+                    // l'absence totale de ligne « MSG REÇU » cesse d'être
+                    // ambiguë (rien n'est arrivé VS c'est arrivé mais illisible).
+                    addLog('warn', `[${state.id}] MSG ILLISIBLE (CIPHERTEXT, déchiffrement échoué) chat=${msg.key?.remoteJid} — cipherCount=${state.cipherCount}`);
                 }
                 continue;
             }
@@ -1179,7 +1237,15 @@ async function startSession(sessionId, phoneNumber = null) {
             // une brève coupure, sans rejouer un historique entier.
             const maxAgeSec = type === 'append' ? 180 : 60;
             if (msg.messageTimestamp
-                && (nowSec - Number(msg.messageTimestamp)) > maxAgeSec) continue;
+                && (nowSec - Number(msg.messageTimestamp)) > maxAgeSec) {
+                // FIX (diagnostic) : idem, ce filtre d'âge ne laissait non plus
+                // aucune trace avant — un message légitime mais trop vieux
+                // disparaissait sans explication.
+                if (!msg.key?.fromMe) {
+                    addLog('warn', `[${state.id}] MSG IGNORÉ (trop vieux, ${Math.round(nowSec - Number(msg.messageTimestamp))}s > ${maxAgeSec}s, type=${type}) chat=${msg.key?.remoteJid}`);
+                }
+                continue;
+            }
             if (msg.key.remoteJid === 'status@broadcast') continue;
             // Cache de TOUS les messages (envoyés ET reçus) : WhatsApp (ou un
             // appareil lié) peut redemander n'importe quel message déjà vu pour
@@ -1195,9 +1261,17 @@ async function startSession(sessionId, phoneNumber = null) {
             rememberMessage(msg);
             state.lastActivity = Date.now();
             state.lastDeliveryAt = Date.now();
-            if (type === 'notify' && !msg.key.fromMe) {
+            // FIX : avant, ce log n'apparaissait qu'en type 'notify' (message
+            // en direct). Un message livré en 'append' (rattrapage après une
+            // micro-coupure — fréquent si la connexion flanche) était traité
+            // normalement plus bas mais JAMAIS loggé ici : impossible de
+            // distinguer « rien n'est arrivé » de « c'est arrivé en rattrapage,
+            // juste pas affiché ». Le log sort désormais pour les deux types,
+            // avec le type affiché, pour pouvoir diagnostiquer une connexion
+            // qui flanche (beaucoup d'« append » = beaucoup de micro-coupures).
+            if (!msg.key.fromMe) {
                 const who = msg.key.participant || msg.key.remoteJid;
-                addLog('info', `[${state.id}] MSG REÇU de=${who} chat=${msg.key.remoteJid} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
+                addLog('info', `[${state.id}] MSG REÇU (${type}) de=${who} chat=${msg.key.remoteJid} texte=${(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').slice(0,30)}`);
             }
             const msgId = msg.key.id;
             if (!msgId || processedMsgIds.has(msgId)) continue;
@@ -1486,36 +1560,17 @@ async function startSession(sessionId, phoneNumber = null) {
                         addLog('error', `[${state.id}] Modération: ${modErr.message}`);
                     }
                 }
-                // ── Réponse IA automatique : PRIVÉ ET GROUPES ───────────
-                // Le bot répond sans commande quand il est mentionné (@bot),
-                // quand le message commence par son nom, quand l'utilisateur
-                // cite une réponse de l'IA, ou (groupes) quand l'utilisateur a
-                // activé le mode conversation libre avec !chatbot dans ce groupe.
+                // ── Chatbot : UNIQUEMENT via la commande !chatbot ───────
+                // FIX (demande explicite) : avant, le chatbot se déclenchait
+                // aussi tout seul sur une @mention, sur le nom du bot en début
+                // de message, ou sur la citation d'une ancienne réponse IA.
+                // Ces trois déclencheurs automatiques sont retirés. Le SEUL
+                // moyen d'activer la conversation libre est maintenant la
+                // commande !chatbot (qui active ensuite global.activeChatbotSessions
+                // pour cette conversation/cet utilisateur) — en DM comme en groupe.
                 if (!isCmd && !fromMe && body.trim()) {
-                    const contextInfo = unwrapped?.[ct]?.contextInfo || {};
-                    const mentionedJid = contextInfo.mentionedJid || [];
-                    const normalizeJid = j => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-                    const botIds = [sock.user?.id, sock.user?.lid].map(normalizeJid).filter(Boolean);
-                    const estMentionne = mentionedJid.some(j => botIds.includes(normalizeJid(j)));
-                    // FIX : avant, sock.user?.name (le nom de PROFIL WhatsApp du
-                    // compte connecté — pas un nom de bot déclaré) passait en
-                    // PRIORITÉ sur BOT_NAME, sans vérifier sa longueur ni exiger
-                    // une limite de mot. Si ce nom de profil était court ou
-                    // banal, N'IMPORTE QUEL message commençant par ces lettres
-                    // déclenchait le chatbot — indépendamment de !chatbot.
-                    // On utilise désormais UNIQUEMENT BOT_NAME (déclaré
-                    // explicitement en .env), avec une longueur minimale et une
-                    // vraie limite de mot (« Botanique » ne doit pas matcher
-                    // un bot nommé « Bot »).
-                    const botName = String(process.env.BOT_NAME || '').trim();
-                    const escapedBotName = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const estAppeleParNom = botName.length >= 3
-                        && new RegExp(`^${escapedBotName}\\b`, 'i').test(body.trim());
-                    const estReponseAI = !!contextInfo.stanzaId
-                        && (isReplyToAI(from, contextInfo.stanzaId) || isReplyToAI(replyTo, contextInfo.stanzaId));
-                    const estSessionLibre = isGroup
-                        && !!global.activeChatbotSessions?.has(chatbotKey(from, senderJid));
-                    if ((estMentionne || estAppeleParNom || estReponseAI || estSessionLibre)
+                    const estSessionLibre = !!global.activeChatbotSessions?.has(chatbotKey(from, senderJid));
+                    if (estSessionLibre
                         && canUseBot(isOwner, isGroup, senderNumber, OWNER, currentBotMode)) {
                         runChatbotTurn({
                             sock, from: replyTo, sender: senderJid,
