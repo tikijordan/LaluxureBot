@@ -1832,4 +1832,518 @@ function getStatsData() {
 
 import { randomBytes, timingSafeEqual, createHash } from 'crypto';
 import admin from './commands/admin.js';
-const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD |
+const DASH_PASSWORD  = process.env.DASHBOARD_PASSWORD || 'changeme';
+const ALLOWED_ORIGIN = process.env.DASHBOARD_ORIGIN  || null;
+const MAX_BODY_BYTES = 512 * 1024;
+const RATE_WINDOW    = 60 * 1000;
+const RATE_MAX       = 80;
+const LOGIN_WINDOW   = 15 * 60 * 1000;
+const LOGIN_MAX      = 5;
+const LOCKOUT_TIME   = 30 * 60 * 1000;
+const SESSION_TTL    = 8 * 3600 * 1000;
+const DASH_SESSIONS_FILE = path.join(DATA_ROOT, '.dash_sessions.json');
+const IS_HTTPS = process.env.DASHBOARD_HTTPS === 'true';
+const PASS_HASH = createHash('sha256').update(DASH_PASSWORD).digest();
+const dashSessions = new Map();
+function loadDashSessions() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(DASH_SESSIONS_FILE,'utf8'));
+        const now = Date.now();
+        Object.entries(raw).forEach(([t,s]) => { if (s.expires>now) dashSessions.set(t,s); });
+    } catch {}
+}
+
+function saveDashSessions() {
+    const obj = {};
+    dashSessions.forEach((v,k) => { obj[k]=v; });
+    try { fs.writeFileSync(DASH_SESSIONS_FILE, JSON.stringify(obj)); } catch {}
+}
+
+loadDashSessions();
+const rateLimiter  = new Map();
+const loginTracker = new Map();
+setInterval(() => {
+    const now = Date.now();
+    rateLimiter.forEach((v,k)  => { if (now>v.reset)      rateLimiter.delete(k); });
+    loginTracker.forEach((v,k) => { if (v.lockedUntil && now>v.lockedUntil) loginTracker.delete(k); });
+    dashSessions.forEach((v,k) => { if (now>v.expires)    dashSessions.delete(k); });
+}, 5 * 60 * 1000);
+function genToken() { return randomBytes(32).toString('hex'); }
+function checkPassword(input) {
+    try {
+        const h = createHash('sha256').update(input).digest();
+        return timingSafeEqual(PASS_HASH, h);
+    } catch { return false; }
+}
+
+function isRateLimited(ip) {
+    const now = Date.now();
+    const e = rateLimiter.get(ip);
+    if (!e || now>e.reset) { rateLimiter.set(ip,{count:1,reset:now+RATE_WINDOW}); return false; }
+    return ++e.count > RATE_MAX;
+}
+
+function checkLoginAttempt(ip) {
+    const now = Date.now();
+    const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:0 };
+    if (e.lockedUntil > now) return { blocked:true, lockoutMins:Math.ceil((e.lockedUntil-now)/60000) };
+    if (now - e.windowStart > LOGIN_WINDOW) { e.attempts=0; e.windowStart=now; }
+    e.attempts++;
+    if (e.attempts >= LOGIN_MAX) {
+        e.lockedUntil = now + LOCKOUT_TIME;
+        loginTracker.set(ip, e);
+        addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
+        return { blocked:true, lockoutMins:30 };
+    }
+
+    loginTracker.set(ip, e);
+    return { blocked:false, remaining: LOGIN_MAX - e.attempts };
+}
+
+function recordLoginSuccess(ip) { loginTracker.delete(ip); }
+function isAuthenticated(req) {
+    const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
+    if (!token || !/^[0-9a-f]{64}$/.test(token)) return false;
+    const s = dashSessions.get(token);
+    if (!s || Date.now()>s.expires) { dashSessions.delete(token); return false; }
+    return true;
+}
+
+function sanitizeId(raw) {
+    const id = decodeURIComponent(raw||'');
+    if (!/^[\w\-+]{1,50}$/.test(id)) return null;
+    const resolved = path.resolve(SESSIONS_ROOT, id);
+    if (!resolved.startsWith(path.resolve(SESSIONS_ROOT)+path.sep) &&
+        resolved !== path.resolve(SESSIONS_ROOT)) return null;
+    return id;
+}
+
+function readBodySafe(req) {
+    return new Promise((resolve, reject) => {
+        let b='', size=0;
+        req.on('data', c => { size+=c.length; if(size>MAX_BODY_BYTES){req.destroy();reject(new Error('Payload trop grand'));return;} b+=c; });
+        req.on('end', ()=>{ try{resolve(JSON.parse(b));}catch{resolve({});} });
+        req.on('error', reject);
+    });
+}
+
+function maskSensitive(msg) {
+    return msg
+        .replace(/(SESSION_STRING)[^\s,}]*/gi, '$1=[MASQUÉ]')
+        .replace(/([A-Za-z0-9+/]{80,}={0,2})/g, m => m.slice(0,10)+'...[MASQUÉ]');
+}
+
+const SECURITY_HEADERS = {
+    'X-Content-Type-Options':  'nosniff',
+    'X-Frame-Options':         'DENY',
+    'X-XSS-Protection':        '1; mode=block',
+    'Referrer-Policy':         'strict-origin',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https://api.qrserver.com; font-src https://fonts.gstatic.com; connect-src 'self'",
+    ...(IS_HTTPS ? { 'Strict-Transport-Security': 'max-age=63072000; includeSubDomains' } : {}),
+};
+
+const SEC_HEADERS = SECURITY_HEADERS;
+function getSessionToken(req) {
+    return (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1] || null;
+}
+
+function recordFailedLogin(ip) {
+    const now = Date.now();
+    const e = loginTracker.get(ip) || { attempts:0, lockedUntil:0, windowStart:now };
+    if (e.lockedUntil > now) return; // déjà bloqué
+    if (now - e.windowStart > LOGIN_WINDOW) { e.attempts=0; e.windowStart=now; }
+    e.attempts++;
+    if (e.attempts >= LOGIN_MAX) {
+        e.lockedUntil = now + LOCKOUT_TIME;
+        addLog('warn', `[Auth] IP ${ip} bloquée 30 min (${LOGIN_MAX} tentatives)`);
+    }
+
+    loginTracker.set(ip, e);
+}
+
+function clearLoginAttempts(ip) {
+    loginTracker.delete(ip);
+}
+
+const _addLogOrig = addLog;
+global.addLog = function(level, msg) { _addLogOrig(level, maskSensitive(msg)); };
+http.createServer(async (req, res) => {
+    const ip       = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    const url      = new URL(req.url, `http://localhost:${PORT}`);
+    const pathname = url.pathname;
+    const method   = req.method;
+    if (isRateLimited(ip)) {
+        res.writeHead(429, { 'Content-Type':'application/json', 'Retry-After':'60' });
+        return res.end(JSON.stringify({ error:'Trop de requêtes. Réessaie dans 1 minute.' }));
+    }
+
+    try {
+    const origin = req.headers['origin'] || '';
+    const corsOk = !ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN || origin === `http://localhost:${PORT}`;
+    const corsHeaders = {
+        'Access-Control-Allow-Origin':  corsOk ? (origin || '*') : 'null',
+        'Access-Control-Allow-Methods': 'GET,POST,DELETE',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Credentials': 'true',
+    };
+
+    if (method === 'OPTIONS') { res.writeHead(204, corsHeaders); return res.end(); }
+    function sendJson(r, data, status=200) {
+        r.writeHead(status, { ...SECURITY_HEADERS, ...corsHeaders, 'Content-Type':'application/json' });
+        r.end(JSON.stringify(data));
+    }
+
+    function sendHtml(r, html, status=200) {
+        r.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'text/html; charset=utf-8' });
+        r.end(html);
+    }
+
+    if ((pathname==='/'||pathname==='/dashboard') && method==='GET') {
+        if (!isAuthenticated(req)) { res.writeHead(302,{Location:'/login'}); return res.end(); }
+        const hp = path.join(DASH_DIR,'index.html');
+        if (fs.existsSync(hp)) { res.writeHead(200,{'Content-Type':'text/html; charset=utf-8',...SEC_HEADERS}); return res.end(fs.readFileSync(hp)); }
+        res.writeHead(302,{Location:'/login'}); return res.end();
+    }
+
+    if (pathname==='/login' && method==='GET') {
+        const errCode = url.searchParams.get('error');
+        const lockMin = url.searchParams.get('min') || '30';
+        const errMsg  = errCode === 'locked'
+            ? `Trop de tentatives. IP bloquée ${lockMin} minutes.`
+            : errCode ? 'Mot de passe incorrect.' : '';
+        const html = `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connexion — Bot Dashboard</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:#080b10;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:#0d1117;border:1px solid #21262d;border-radius:14px;padding:36px;width:340px;display:flex;flex-direction:column;gap:16px}
+.logo{font-size:1.1rem;font-weight:700;color:#f0f6fc;display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:#25d366;box-shadow:0 0 8px #25d366}
+p{font-size:.78rem;color:#484f58;font-family:monospace}
+input{background:#080b10;border:1px solid #21262d;border-radius:8px;padding:11px 14px;color:#c9d1d9;font-size:.9rem;width:100%;outline:none;transition:border-color .2s}
+input:focus{border-color:#25d366}
+button{background:#25d366;color:#000;font-weight:700;border:none;border-radius:8px;padding:12px;cursor:pointer;font-size:.9rem;transition:background .15s;width:100%}
+button:hover{background:#1fb858}
+.err{background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);color:#f85149;font-size:.78rem;font-family:monospace;padding:9px 12px;border-radius:6px;${errMsg?'':'display:none'}}
+</style></head><body><div class="box">
+<div class="logo"><div class="dot"></div>Bot Dashboard</div>
+<p>Accès protégé — mot de passe requis</p>
+<form method="POST" action="/login">
+<input type="password" name="password" placeholder="Mot de passe..." autofocus required autocomplete="current-password">
+<button type="submit">Connexion</button>
+</form>
+<div class="err">${errMsg}</div>
+</div></body></html>`;
+        return sendHtml(res, html);
+    }
+
+    if (pathname==='/login' && method==='POST') {
+        let b = '';
+        await new Promise(r => { req.on('data',c=>b+=c.slice(0,500)); req.on('end',r); });
+        const pwd = new URLSearchParams(b).get('password') || '';
+        if (!checkPassword(pwd)) {
+            recordFailedLogin(ip);
+            addLog('warn', `[Auth] Échec login depuis ${ip}`);
+            res.writeHead(302,{Location:'/login?error=1'}); return res.end();
+        }
+
+        const oldToken = getSessionToken(req);
+        if (oldToken) dashSessions.delete(oldToken);
+        clearLoginAttempts(ip);
+        const token = genToken();
+        dashSessions.set(token, { ip, expires: Date.now()+SESSION_TTL });
+        addLog('success', `[Auth] Connexion dashboard depuis ${ip}`);
+        // Restauration depuis Atlas en arrière-plan (ne retarde pas la connexion)
+        restoreSessionsFromAtlas().catch(e => addLog('warn', `[Atlas] Restauration: ${e.message}`));
+        const cookieFlags = [`dash_token=${token}`,'HttpOnly','SameSite=Strict',`Max-Age=${Math.floor(SESSION_TTL/1000)}`,'Path=/',...(IS_HTTPS?['Secure']:[])].join('; ');
+        res.writeHead(302, { Location:'/', 'Set-Cookie': cookieFlags, ...SECURITY_HEADERS });
+        return res.end();
+    }
+
+    if (pathname==='/logout' && method==='POST') {
+        const token = (req.headers['cookie']||'').match(/dash_token=([^;]+)/)?.[1];
+        if (token) { dashSessions.delete(token); saveDashSessions(); }
+        addLog('info', `[Auth] Déconnexion depuis ${ip}`);
+        res.writeHead(302, { Location:'/login', 'Set-Cookie':'dash_token=; HttpOnly; Max-Age=0; Path=/', ...SECURITY_HEADERS });
+        return res.end();
+    }
+
+    if (pathname==='/api/status') return sendJson(res,{ status:'online', sessions:sessions.size, uptime:Math.floor((Date.now()-startTime)/1000) });
+    if (pathname==='/api/health' && method==='GET') {
+        const sessionsList = [...sessions.values()].map(s => ({
+            id: s.id,
+            status: s.connection,
+            messagesCount: s.messagesCount,
+            lastActivity: s.lastActivity,
+            silentSeconds: s.lastEventAt ? Math.round((Date.now() - s.lastEventAt) / 1000) : null,
+            cipherCount: s.cipherCount || 0,
+            needsRepair: !!s.needsRepair,
+        }));
+
+        const connectedCount = sessionsList.filter(s => s.status === 'open').length;
+        const strict = url.searchParams.get('strict') === '1' || process.env.STRICT_HEALTH_CHECK === '1';
+        const httpStatus = (strict && connectedCount === 0) ? 503 : 200;
+        return sendJson(res, {
+            status: connectedCount > 0 ? 'ok' : 'degraded',
+            uptime: Math.round((Date.now() - startTime) / 1000),
+            sessions: sessionsList.length,
+            connected: connectedCount,
+            timestamp: new Date().toISOString()
+        }, httpStatus);
+    }
+
+    if (!isAuthenticated(req)) return sendJson(res,{ error:'Non autorisé — connectez-vous sur /login' },401);
+    if (pathname==='/api/logs' && method==='GET') {
+        const since = Math.max(0, parseInt(url.searchParams.get('since')||'0'));
+        const safeLogs = logs.slice(since).map(l => ({ ...l, msg: maskSensitive(l.msg) }));
+        return sendJson(res,{ logs: safeLogs, total:logs.length });
+    }
+
+    if (pathname==='/api/sessions' && method==='GET') {
+        const list = [...sessions.values()].map(s=>({
+            id:s.id, connection:s.connection, connectedNumber:s.connectedNumber,
+            ownerNumber:s.connectedNumber, ownerLid:s.ownerLid||null,
+            qrCode:s.qrCode, pairingCode:s.pairingCode||null, commandsCount:s.commandsCount, messagesCount:s.messagesCount, createdAt:s.createdAt,
+            // Diagnostic du flux entrant (utile pour voir une session « connectée mais muette »)
+            silentSeconds: s.lastEventAt ? Math.round((Date.now() - s.lastEventAt)/1000) : null,
+            cipherCount: s.cipherCount || 0,
+            stallRestarts: s.stallRestarts || 0,
+            needsRepair: !!s.needsRepair,
+        }));
+
+        return sendJson(res,{ sessions:list });
+    }
+
+    if (pathname==='/api/sessions' && method==='POST') {
+        if (sessions.size >= 10) return sendJson(res,{ error:'Maximum 10 sessions simultanées' },429);
+        let body = {};
+        try { body = await readBodySafe(req); } catch {}
+        const phone = (body.phone||'').replace(/\D/g,'');
+        const id = 'sess_'+Date.now();
+        deletedSessionIds.delete(id);
+        await startSession(id, phone || null);
+        const msg = phone ? 'Session créée, pairing code en cours...' : 'Session créée, QR en cours...';
+        return sendJson(res,{ ok:true, sessionId:id, message:msg });
+    }
+
+    if ((pathname==='/api/sessions' && method==='DELETE') || (pathname==='/api/sessions/purge-all' && method==='GET')) {
+        const ids = [...sessions.keys()];
+        for (const sid of ids) {
+            const s = sessions.get(sid);
+            try { if (s?.sock) await s.sock.end(); } catch {}
+            try { fse.removeSync(path.join(SESSIONS_ROOT, sid)); } catch {}
+            sessions.delete(sid);
+        }
+
+        const result = await deleteAllSessionsMongo().catch(e => ({ deleted: 0, error: e.message }));
+        addLog('info', `Purge totale : ${ids.length} session(s) locale(s), ${result.deleted||0} en MongoDB (IP: ${ip})`);
+        return sendJson(res, { ok:true, sessionsCleared: ids.length, mongoDeleted: result.deleted||0 });
+    }
+
+    // GET /api/sessions/backup-now — sauvegarde immédiate de toutes les sessions vers Atlas
+    // (à lancer avant de toucher au disque). Protégé par l'authentification dashboard.
+    if (pathname==='/api/sessions/backup-now' && method==='GET') {
+        const saved = await saveAllActiveSessions(sessions);
+        addLog('success', `[Backup] Sauvegarde manuelle vers Atlas : ${saved} session(s) (IP: ${ip})`);
+        return sendJson(res, { ok:true, saved });
+    }
+
+    const smatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
+    if (smatch && method==='GET') {
+        const sid = sanitizeId(smatch[1]);
+        if (!sid) return sendJson(res,{ error:'ID de session invalide' },400);
+        const s = sessions.get(sid);
+        if (!s) return sendJson(res,{ error:'Session introuvable' },404);
+        const statsData = getStatsData();
+        const totalCmds = Object.values(statsData).reduce((a,u)=>a+(u.total||0),0);
+        const topMap    = {};
+        Object.values(statsData).forEach(u => Object.entries(u.commands||{}).forEach(([c,n])=>{ topMap[c]=(topMap[c]||0)+n; }));
+        const topCmds   = Object.entries(topMap).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([cmd,count])=>({cmd,count}));
+        const users     = Object.entries(statsData).map(([n,d])=>({number:n,total:d.total,lastSeen:d.lastSeen,topCmd:Object.entries(d.commands||{}).sort((a,b)=>b[1]-a[1])[0]?.[0]})).sort((a,b)=>b.total-a.total).slice(0,50);
+        const uptime    = Math.floor((Date.now()-startTime)/1000);
+        return sendJson(res,{
+            ...s, sock:undefined, pingInterval:undefined, healthCheckInterval:undefined,
+            groupMetaCache:undefined, msgCache:undefined, lidCache:undefined, lidFailCache:undefined,
+            atlasTimer:undefined, reconnectTimer:undefined, qrTimer:undefined,
+            recentCommands:(s.recentCommands || []).slice(-20),
+            uptime, uptimeHuman:`${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
+            totalUsers:Object.keys(statsData).length, totalCommands:totalCmds,
+            topCommands:topCmds, users, prefix:PREFIX,
+            memory:Math.round(process.memoryUsage().heapUsed/1024/1024), node:process.version,
+            // sessionString volontairement absent : identifiants WhatsApp, jamais exposés par l'API
+        });
+    }
+
+    const pairmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/pair$/);
+    if (pairmatch && method==='POST') {
+        const sid = sanitizeId(pairmatch[1]);
+        if (!sid) return sendJson(res,{error:'ID invalide'},400);
+        let body;
+        try { body = await readBodySafe(req); } catch { return sendJson(res,{error:'Payload trop grand'},413); }
+        const phone = (body.phone||'').replace(/\D/g,'');
+        if (!phone || phone.length < 7 || phone.length > 15) return sendJson(res,{error:'Numéro invalide'},400);
+        const s = sessions.get(sid);
+        if (!s) return sendJson(res,{error:'Session introuvable'},404);
+        if (s.connection === 'open') return sendJson(res,{error:'Déjà connecté'},400);
+        try {
+            if (!s.sock) {
+                deletedSessionIds.delete(sid);
+                await startSession(sid, phone);
+                return sendJson(res,{ok:true, message:'Session démarrée, code en cours...'});
+            }
+            const code = await s.sock.requestPairingCode(phone);
+            s.pairingCode = code;
+            addLog('success',`[${sid}] Pairing code: ${code}`);
+            return sendJson(res,{ok:true, code});
+        } catch(e) {
+            return sendJson(res,{error:e.message},500);
+        }
+    }
+
+    const rmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
+    if (rmatch && method==='POST') {
+        const sid = sanitizeId(rmatch[1]);
+        if (!sid) return sendJson(res,{error:'ID invalide'},400);
+        const s = sessions.get(sid);
+        if (!s) return sendJson(res,{error:'Session introuvable'},404);
+        addLog('info',`[${sid}] Redémarrage depuis le dashboard (IP: ${ip}) — identifiants conservés`);
+        // Redémarre uniquement le socket : creds.json et clés restent intacts.
+        if (!restartSocket(s, { reason: 'dashboard', delayMs: 5000 })) {
+            return sendJson(res,{ error:'Redémarrage déjà en cours' },409);
+        }
+        return sendJson(res,{ ok:true, message:'Reconnexion en cours...' });
+    }
+
+    const lmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/logout$/);
+    if (lmatch && method==='POST') {
+        const sid = sanitizeId(lmatch[1]);
+        if (!sid) return sendJson(res,{error:'ID invalide'},400);
+        const s = sessions.get(sid);
+        if (!s) return sendJson(res,{error:'Session introuvable'},404);
+        addLog('info',`[${sid}] Déconnexion depuis le dashboard (IP: ${ip})`);
+        forgetSession(sid);
+        try { if(s.sock) await s.sock.logout(); } catch {}
+        fse.removeSync(path.join(SESSIONS_ROOT,sid));
+        sessions.delete(sid);
+        deleteSessionMongo(sid).catch(() => {});
+        return sendJson(res,{ ok:true, message:'Session supprimée.' });
+    }
+
+    const dmatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
+    if (dmatch && method==='DELETE') {
+        const sid = sanitizeId(dmatch[1]);
+        if (!sid) return sendJson(res,{error:'ID invalide'},400);
+        const s = sessions.get(sid);
+        forgetSession(sid);
+        try { if(s?.sock) await s.sock.logout(); } catch {}
+        try { if(s?.sock) await s.sock.end(); } catch {}
+        fse.removeSync(path.join(SESSIONS_ROOT,sid));
+        sessions.delete(sid);
+        deleteSessionMongo(sid).catch(() => {});
+        addLog('info',`Session [${sid}] supprimée (IP: ${ip})`);
+        return sendJson(res,{ ok:true });
+    }
+
+    const sendmatch = pathname.match(/^\/api\/sessions\/([^/]+)\/send$/);
+    if (sendmatch && method==='POST') {
+        const sid  = sanitizeId(sendmatch[1]);
+        if (!sid) return sendJson(res,{error:'ID invalide'},400);
+        const s    = sessions.get(sid);
+        let body;
+        try { body = await readBodySafe(req); } catch { return sendJson(res,{error:'Payload trop grand'},413); }
+        if (!s||s.connection!=='open') return sendJson(res,{error:'Session non connectée'},503);
+        const toNum = (body.to||'').replace(/\D/g,'');
+        if (!toNum || toNum.length < 7 || toNum.length > 15) return sendJson(res,{error:'Numéro invalide (7-15 chiffres)'},400);
+        if (!body.text || typeof body.text !== 'string' || body.text.length > 4096) return sendJson(res,{error:'Message invalide (max 4096 chars)'},400);
+        try {
+            await s.sock.sendMessage(toNum+'@s.whatsapp.net',{ text:body.text });
+            addLog('success',`[${sid}] Message → ${toNum.slice(0,-4)}**** (IP: ${ip})`);
+            return sendJson(res,{ ok:true });
+        } catch(e) { return sendJson(res,{error:e.message},500); }
+    }
+
+    sendJson(res,{ error:'Route inconnue' },404);
+    } catch (e) {
+        addLog('error', `[HTTP] Exception non gérée sur ${method} ${pathname}: ${e.message}`);
+        try {
+            if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Erreur serveur interne' }));
+            }
+        } catch {}
+    }
+}).listen(PORT, BIND_HOST, () => {
+    const railwayUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+        : null;
+    addLog('success', `Dashboard démarré sur le port ${PORT} (${BIND_HOST}) — mot de passe requis`);
+    if (railwayUrl) addLog('success', `URL publique Railway: ${railwayUrl}`);
+    if (DASH_PASSWORD === 'changeme') {
+        addLog('warn', 'SÉCURITÉ: Changez DASHBOARD_PASSWORD dans les variables d\'environnement !');
+    }
+});
+
+loadExistingSessions().catch(e => console.error('[Boot] Erreur loadExistingSessions:', e.message));
+(function startSelfPing() {
+    if (process.env.SELF_PING === '0') return;
+    const PING_INTERVAL_MS = 4 * 60 * 1000; // toutes les 4 min (< 15 min = seuil Render Free)
+    function getPingUrl() {
+        if (process.env.SELF_PING_URL) return process.env.SELF_PING_URL;
+        if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/status`;
+        if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/status`;
+        return `http://127.0.0.1:${PORT}/api/status`;
+    }
+
+    const doSelfPing = () => {
+        const url = getPingUrl();
+        axios.get(url, { timeout: 10000 })
+            .then(() => { /* ping silencieux — garder le service éveillé */ })
+            .catch(e => addLog('warn', `[SelfPing] Échec ping ${url}: ${e.message}`));
+    };
+
+    setTimeout(() => {
+        doSelfPing();
+        setInterval(doSelfPing, PING_INTERVAL_MS);
+    }, 30_000);
+    addLog('info', `[SelfPing] Keep-alive activé (toutes les ${PING_INTERVAL_MS / 60000} min) — désactive avec SELF_PING=0`);
+
+////////////////////
+// PING_SESSION — vérification périodique de la santé des sessions
+////////////////////
+const PING_SESSION_INTERVAL = 15 * 60 * 1000;
+let pingSessionTimer = null;
+
+// Le faux « lastActivity » a été supprimé : il masquait les sessions réellement
+// muettes. La surveillance se fait maintenant sur le flux entrant (checkSessionHealth).
+function startPingSession() {
+    if (pingSessionTimer) clearInterval(pingSessionTimer);
+    pingSessionTimer = setInterval(() => {
+        for (const [id, state] of sessions) checkSessionHealth(id, state).catch(() => {});
+    }, PING_SESSION_INTERVAL);
+}
+
+function stopPingSession() {
+    if (pingSessionTimer) {
+        clearInterval(pingSessionTimer);
+        pingSessionTimer = null;
+    }
+}
+
+////////////////////
+// restartSession — Comme Ctrl+C : arrêt propre + redémarrage immédiat
+////////////////////
+function restartSession() {
+    const active = [...sessions.values()].filter(s => s.connectedNumber || s.connection === 'open');
+    if (!active.length) {
+        addLog('warn', '[restart] Aucune session active à redémarrer');
+        return;
+    }
+    let count = 0;
+    for (const s of active) {
+        if (restartSocket(s, { reason: 'restart manuel', delayMs: 5000 })) count++;
+    }
+    addLog('success', `[restart] ${count} session(s) relancée(s) — creds.json et clés intacts`);
+}
+
+// Démarrage automatique du PING_SESSION au startup
+startPingSession();
+
+})();
