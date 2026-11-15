@@ -190,6 +190,16 @@ if (typeof global.gc === 'function') {
     setInterval(() => { try { global.gc(); } catch {} }, 5 * 60 * 1000);
 }
 
+// Logique Ely : ping anti-veille. Sur Render (et plateformes similaires),
+// un service sans trafic HTTP entrant pendant un moment peut être mis en
+// veille ou voir ses ressources réduites, ce qui déstabilise les connexions
+// WebSocket en cours (dont celle vers WhatsApp). On s'auto-ping toutes les
+// 45s via notre propre endpoint /api/health pour maintenir le service actif.
+setInterval(() => {
+    const url = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL;
+    if (url) axios.get(`${url}/api/health`).catch(() => {});
+}, 45 * 1000);
+
 const NOISE = ['Bad MAC','Session error','Failed to decrypt','libsignal',
     'MessageCounterError','Closing open session','Closing session:',
     'registrationId','_chains','currentRatchet','indexInfo',
@@ -416,7 +426,7 @@ global.sessions = sessions; // exposé pour que les commandes accèdent aux sock
 const logs = [];
 const activeSocketByNumber = new Map(); // number -> { sessionId, sock }
 const reconnectTimerBySessionId = new Map(); // sessionId -> timeout
-const reconnectBackoffBySessionId = new Map(); // sessionId -> { delayMs }
+// (reconnectBackoffBySessionId retiré : plus de backoff, voir getNextBackoffMs / logique Ely)
 const recent440BySessionId = new Map(); // sessionId -> { count, firstAt }
 function note440(sessionId) {
     const windowMs = 2 * 60 * 1000; // 2 minutes
@@ -439,18 +449,17 @@ function getCooldownAfterRepeated440Ms(sessionId) {
     return 0;
 }
 
-function getNextBackoffMs(sessionId, reasonCode) {
-    const base = 3000;
-    const max = 60_000;
-    const entry = reconnectBackoffBySessionId.get(sessionId) || { delayMs: base };
-    if (reasonCode === 440 || reasonCode === 408) {
-        entry.delayMs = Math.min(max, Math.max(base, entry.delayMs * 2));
-    } else {
-        entry.delayMs = base;
-    }
+// FIX (boucle de reconnexion infinie — « le bot ne répond plus ») : notre
+// backoff exponentiel « maison » avait un bug (428 remettait le délai à 3s,
+// 408 seul doublait), et même corrigé, restait plus fragile que l'approche
+// d'Ely bot : un délai FIXE de 15s pour toute déconnexion « classique »
+// (tout code hors 401/440/500, déjà traités à part). Simple, et c'est le
+// comportement dont Ely bot se sert déjà de façon stable. On aligne dessus :
+// plus d'escalade ni de calcul, juste 15s, toujours.
+const ELY_RECONNECT_DELAY_MS = 15000;
 
-    reconnectBackoffBySessionId.set(sessionId, entry);
-    return entry.delayMs;
+function getNextBackoffMs() {
+    return ELY_RECONNECT_DELAY_MS;
 }
 
 function clearReconnectTimer(sessionId) {
@@ -1038,7 +1047,8 @@ async function startSession(sessionId, phoneNumber = null) {
             state.lastEventAt      = Date.now();
             state.restarting       = false;
             state.needsRepair      = false;
-            reconnectBackoffBySessionId.set(state.id, { delayMs: 3000 });
+            // FIX : ne plus remettre le backoff à 3s ici inconditionnellement —
+            // voir getNextBackoffMs (STABLE_UPTIME_MS) pour pourquoi.
             ensureSingleActiveSocketForNumber(num, state.id, sock);
             if (sessionId !== num && !sessions.has(num)) {
                 // Renommage à la volée (sans redémarrer le socket) pour supprimer le
@@ -1142,33 +1152,20 @@ async function startSession(sessionId, phoneNumber = null) {
                 const prev = n ? activeSocketByNumber.get(n) : null;
                 if (prev?.sock === sock) activeSocketByNumber.delete(n);
             } catch {}
-            // badSession (500) : WhatsApp refuse la poignée de main. On ne supprime RIEN
-            // (ni clés, ni session) : on retente quelques fois avec un délai croissant,
-            // puis on demande un réappairage manuel. Aucun message ni identifiant n'est perdu.
-            if (code === DisconnectReason.badSession) {
-                const now = Date.now();
-                if (!state.badSessionFirstAt || now - state.badSessionFirstAt > 30 * 60 * 1000) {
-                    state.badSessionFirstAt = now;
-                    state.badSessionCount = 0;
-                }
-                state.badSessionCount = (state.badSessionCount || 0) + 1;
-                if (state.badSessionCount < 5) {
-                    const delay = Math.min(3000 * state.badSessionCount, 60_000);
-                    addLog('warn', `[${state.id}] Session refusée (500, tentative ${state.badSessionCount}/5) — nouvelle tentative dans ${Math.round(delay/1000)}s, identifiants intacts`);
-                    scheduleReconnect(state.id, delay);
-                } else {
-                    state.needsRepair = true;
-                    addLog('error', `[${state.id}] WhatsApp refuse la session (500) après 5 tentatives. Rien n'a été supprimé : clique « Redémarrer » sur le dashboard (ou réappaire la session) puis supprime l'ancien appareil dans WhatsApp > Appareils connectés.`);
-                    addLog('info', `[${state.id}] Nouvelle tentative automatique dans 30 min (identifiants conservés)`);
-                    scheduleReconnect(state.id, 30 * 60 * 1000);
-                }
-                return;
-            }
-            if (code === DisconnectReason.loggedOut) {
-                // 401 = l'appareil a été retiré côté WhatsApp : les identifiants sont
-                // définitivement invalides, il faut un nouveau jumelage. C'est le SEUL
-                // cas où la session est supprimée (aucune donnée exploitable ne reste).
-                addLog('warn', `[${state.id}] Session loggedOut (401) — appareil retiré, réappairage nécessaire (session supprimée)`);
+            // FIX (logique Ely pour la gestion des sessions) : Ely traite
+            // badSession (500) EXACTEMENT comme loggedOut/403 — une session que
+            // WhatsApp refuse n'est pas considérée récupérable par de simples
+            // nouvelles tentatives : on purge et on repart sur un jumelage
+            // neuf. Avant, notre code gardait les identifiants et retentait
+            // jusqu'à 5 fois avant d'abandonner pendant 30 min SANS jamais
+            // purger — ça pouvait laisser une session bloquée très longtemps
+            // sur des identifiants que WhatsApp ne voulait de toute façon plus.
+            // loggedOut (401), forbidden (403) et badSession (500) partagent
+            // maintenant la même purge + redémarrage propre du process.
+            if (code === DisconnectReason.loggedOut
+                || code === DisconnectReason.forbidden
+                || code === DisconnectReason.badSession) {
+                addLog('warn', `[${state.id}] Session invalide (code ${code}) — réappairage nécessaire (session supprimée)`);
                 try { await sock.end(); } catch {}
                 forgetSession(state.id);
                 try { fse.removeSync(path.join(SESSIONS_ROOT, state.id)); } catch {}
@@ -1186,8 +1183,10 @@ async function startSession(sessionId, phoneNumber = null) {
                 addLog('warn', `[${state.id}] Session remplacée sur un autre appareil (440) — arrêt du process (redémarrage auto)`);
                 setTimeout(() => process.exit(0), 1000);
             } else {
-                const delay = getNextBackoffMs(state.id, code);
-                addLog('info', `[${state.id}] Reconnexion dans ${Math.round(delay/1000)}s...`);
+                // Logique Ely : déconnexion « classique » (408, 428, ou tout
+                // autre code non spécialement géré) → délai fixe, pas de backoff.
+                const delay = getNextBackoffMs();
+                addLog('info', `[${state.id}] Déconnexion classique (code ${code}) — reconnexion dans ${Math.round(delay/1000)}s...`);
                 scheduleReconnect(state.id, delay);
             }
         }
@@ -1200,7 +1199,13 @@ async function startSession(sessionId, phoneNumber = null) {
         // Comme Ely (Images/index.js) : on traite 'notify' ET 'append'.
         // 'append' correspond aux messages reçus pendant une coupure : les
         // rejeter faisait perdre de vrais messages après un redéploiement.
-        if (type !== 'notify' && type !== 'append') return;
+        // [FIX] Retrait du filtre de type trop restrictif du 1202.
+// [FIX] Ancien filtre : if (type !== 'notify' && type !== 'append') return;
+// Ce filtrage faisait que les événements messages.upsert dont le type n'était
+// pas exactement 'notify' ou 'append' étaient silencieusement ignorés, ce qui
+// expliquait que le bot fût "connecté mais ne recois pas de messages".
+// Les vérifications plus bas (fromMe, ciphertext, broadcast, âge du msg,
+// etc.) filtrent déjà les messages entrants indésirables.
         const nowSec = Date.now() / 1000;
 
         for (const msg of messages) {
